@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<defaultsMap>
+    <entry>
+        <key>max_message_length</key>
+        <value>1000</value>
+    </entry>
+    <entry>
+        <key>max_conversation_history</key>
+        <value>20</value>
+    </entry>
+    <entry>
+        <key>content_filter_enabled</key>
+        <value>true</value>
+    </entry>
+    <entry>
+        <key>feature_sse_enabled</key>
+        <value>true</value>
+    </entry>
+    <entry>
+        <key>feature_google_signin</key>
+        <value>true</value>
+    </entry>
+    <entry>
+        <key>feature_push_notification</key>
+        <value>true</value>
+    </entry>
+    <entry>
+        <key>mbti_compatibility_enabled</key>
+        <value>true</value>
+    </entry>
+    <entry>
+        <key>affinity_max_delta</key>
+        <value>5</value>
+    </entry>
+</defaultsMap>

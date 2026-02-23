@@ -1,0 +1,28 @@
+﻿# Android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+android/*.iml
+
+# Python server
+server/venv/
+server/**/__pycache__/
+server/*.pyc
+server/.env
+server/fcm_tokens.json
+server/eval_report.json
+server/chroma_db/
+server/finetune_models.json
+
+# IDE/OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Global docs/venv
+*.md
+venv/
+.venv/
