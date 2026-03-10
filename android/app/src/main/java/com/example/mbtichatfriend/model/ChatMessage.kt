@@ -5,5 +5,6 @@ data class ChatMessage(
     val text: String,
     val isFromUser: Boolean,
     val emotion: CharacterEmotion? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val sendStatus: String = "SENT"
 )

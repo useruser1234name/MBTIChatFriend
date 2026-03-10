@@ -3,13 +3,14 @@
 import json
 import logging
 import os
+import re
 import tempfile
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 from openai import AsyncOpenAI
 
 from .config import OPENAI_API_KEY
-from .prompts import build_system_prompt
+from .prompts import build_system_prompt, AFFINITY_BEHAVIORS
 
 logger = logging.getLogger(__name__)
 
@@ -18,20 +19,41 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # 캐릭터별 파인튜닝 모델 저장 (character_id → model_id)
 _MODELS_FILE = "./finetune_models.json"
 
+# 인메모리 캐시 (매 요청 파일 읽기 제거)
+_models_cache: Optional[Dict[str, str]] = None
+_models_cache_mtime: float = 0.0
+
 
 def _load_models() -> Dict[str, str]:
-    if os.path.exists(_MODELS_FILE):
-        try:
-            with open(_MODELS_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    global _models_cache, _models_cache_mtime
+    if not os.path.exists(_MODELS_FILE):
+        _models_cache = {}
+        return _models_cache
+
+    mtime = os.path.getmtime(_MODELS_FILE)
+    if _models_cache is not None and mtime == _models_cache_mtime:
+        return _models_cache
+
+    try:
+        with open(_MODELS_FILE, encoding="utf-8") as f:
+            _models_cache = json.load(f)
+            _models_cache_mtime = mtime
+    except Exception:
+        _models_cache = {}
+    return _models_cache
 
 
 def _save_models(models: Dict[str, str]) -> None:
+    global _models_cache, _models_cache_mtime
     with open(_MODELS_FILE, "w", encoding="utf-8") as f:
         json.dump(models, f, ensure_ascii=False, indent=2)
+    _models_cache = models
+    _models_cache_mtime = os.path.getmtime(_MODELS_FILE)
+
+
+def _validate_model_id(model_id: str) -> bool:
+    """model_id 형식 검증: ft: 또는 gpt- prefix"""
+    return bool(re.match(r'^(ft:|gpt-)', model_id))
 
 
 def get_model_for_character(character_id: str) -> str:
@@ -43,15 +65,26 @@ def get_model_for_character(character_id: str) -> str:
 
 def activate_model(character_id: str, model_id: str) -> None:
     """캐릭터에 파인튜닝 모델 활성화"""
+    if not _validate_model_id(model_id):
+        raise ValueError(f"유효하지 않은 model_id 형식: {model_id}")
     models = _load_models()
     models[character_id] = model_id
     _save_models(models)
 
 
-def _build_training_examples(conversations: list, system_prompt: str) -> List[dict]:
+def _build_training_examples(
+    conversations: list,
+    system_prompt: str,
+    quality_scores: Optional[Dict[str, float]] = None,
+    min_quality: float = 0.6,
+    excluded_message_ids: Optional[set] = None,
+) -> List[dict]:
     """
     대화 히스토리에서 OpenAI fine-tuning 훈련 예시 생성.
     각 assistant 발화 시점까지의 대화가 하나의 훈련 예시가 됨.
+
+    quality_scores: {message_id: score} 형태. 전달 시 min_quality 미만은 제외.
+    excluded_message_ids: thumbs_down 등으로 제외할 메시지 ID 집합.
     """
     examples = []
     messages = [{"role": "system", "content": system_prompt}]
@@ -61,6 +94,18 @@ def _build_training_examples(conversations: list, system_prompt: str) -> List[di
         content = msg.get("content", "").strip()
         if not content or role not in ("user", "assistant"):
             continue
+
+        msg_id = msg.get("message_id", "")
+
+        # 품질 필터: thumbs_down 제외
+        if excluded_message_ids and msg_id in excluded_message_ids:
+            continue
+
+        # 품질 필터: 저품질 제외
+        if quality_scores and msg_id and msg_id in quality_scores:
+            if quality_scores[msg_id] < min_quality:
+                continue
+
         messages.append({"role": role, "content": content})
         # user→assistant 쌍이 갖춰지면 훈련 예시 추가
         if role == "assistant" and len(messages) >= 3:
@@ -78,6 +123,9 @@ async def prepare_and_start_finetune(
     nickname: str,
     affinity_level: int,
     conversations: list,
+    quality_scores: Optional[Dict[str, float]] = None,
+    excluded_message_ids: Optional[Set[str]] = None,
+    synthetic_file: Optional[str] = None,
 ) -> dict:
     """훈련 데이터 준비 → OpenAI 업로드 → Fine-tuning 잡 생성"""
     if not client:
@@ -98,7 +146,35 @@ async def prepare_and_start_finetune(
         affinity_level=affinity_level,
     )
 
-    examples = _build_training_examples(conversations, system_prompt)
+    # affinity_level별 행동 지침을 학습 데이터에 포함
+    affinity = AFFINITY_BEHAVIORS.get(affinity_level, AFFINITY_BEHAVIORS[1])
+    affinity_note = (
+        f"\n[학습 맥락: 현재 호감도 {affinity_level}/5 ({affinity['description']}). "
+        f"분위기: {affinity['tone']}]"
+    )
+    system_prompt += affinity_note
+
+    examples = _build_training_examples(
+        conversations,
+        system_prompt,
+        quality_scores=quality_scores,
+        excluded_message_ids=excluded_message_ids,
+    )
+
+    # 합성 데이터 병합
+    if synthetic_file and os.path.exists(synthetic_file):
+        try:
+            with open(synthetic_file, "r", encoding="utf-8") as sf:
+                for line in sf:
+                    line = line.strip()
+                    if line:
+                        synthetic_example = json.loads(line)
+                        examples.append(synthetic_example)
+            logger.info(f"합성 데이터 병합: {synthetic_file} → 총 {len(examples)}개")
+            import random as _rnd
+            _rnd.shuffle(examples)
+        except Exception as e:
+            logger.warning(f"합성 데이터 로드 실패 ({synthetic_file}): {e}")
 
     if len(examples) < 10:
         return {

@@ -1,5 +1,6 @@
 """채팅 서비스 - LLM 연동 및 메시지 분할"""
 
+import asyncio
 import json
 import logging
 import random
@@ -9,12 +10,13 @@ from typing import List, Optional, Tuple
 from openai import AsyncOpenAI
 
 from .config import OPENAI_API_KEY
-from .content_filter import check_content, get_safety_system_prompt  # noqa: F401 - 테스트 모드에서 비활성화됨
+from .content_filter import check_content, get_safety_system_prompt
 from .models import HistoryMessage, MemoryItem, ReplyPart
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
 from .vector_store import get_store
 from .finetune_service import get_model_for_character
-from .memory_service import summarize_conversation, extract_facts, build_memory_context
+from .memory_service import summarize_conversation, extract_facts, extract_episodes, build_memory_context
+from .quality_service import check_diversity, quick_score, score_response_async
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,23 @@ _NEGATIVE_CATEGORIES = {
     "ignore": (["몰라", "상관없", "관심없", "알아서"], 1),
 }
 
+# 부정문 패턴 - 긍정 키워드를 부정으로 뒤집는 접두사
+_NEGATION_PREFIXES = [
+    "안 ", "못 ", "안좋", "별로 안", "그렇게 안",
+    "전혀 ", "하나도 ", "절대 ", "딱히 ", "그다지 ",
+]
+_NEGATION_SUFFIXES = [
+    "않아", "않다", "않은", "없어", "없다", "싫어", "말아", "마",
+    "않았", "않을", "않고", "없는", "없었",
+]
+
+# 이모티콘/반복 문자 감정 패턴
+_EMOTICON_POSITIVE = ["ㅋㅋㅋ", "ㅎㅎㅎ", "ㅋㅋㅋㅋ", "ㅎㅎㅎㅎ", "~~", "!!!", "♡", "♥"]
+_EMOTICON_NEGATIVE = ["ㅠㅠㅠ", "ㅜㅜㅜ", ";;;", "..."]
+
+# 키워드/LLM 스케일 보정 계수
+KEYWORD_SCALE = 0.4
+
 
 def _get_mbti_group(mbti: str) -> str:
     """MBTI를 4개 기능 그룹으로 분류"""
@@ -53,6 +72,32 @@ def _get_mbti_group(mbti: str) -> str:
         return "ST"
     else:
         return "SF"
+
+
+def _classify_message_complexity(message: str, history_len: int) -> str:
+    """메시지 복잡도 분류: 'simple' | 'complex'.
+
+    simple: 인사, 짧은 반응, 단순 질문 → gpt-4o-mini
+    complex: 감정 상담, 복잡한 질문, 갈등, 긴 텍스트 → gpt-4o
+    """
+    msg = message.strip()
+    msg_lower = msg.lower()
+
+    # 짧고 단순한 메시지
+    simple_patterns = ["안녕", "ㅎㅎ", "ㅋㅋ", "응", "어", "ㅇㅇ", "그래", "오키",
+                       "ㅎ", "ㄱㄱ", "ㅇㅋ", "하이", "반가", "좋아", "ㄴㄴ"]
+    if len(msg) < 10 and any(w in msg_lower for w in simple_patterns):
+        return "simple"
+
+    # 감정적/복잡한 키워드
+    complex_patterns = ["고민", "힘들", "어떻게", "왜", "속상", "우울", "걱정",
+                        "화나", "짜증", "슬프", "불안", "상담", "조언", "도와줘",
+                        "진지하게", "솔직히", "사실은", "고백", "미안"]
+    if len(msg) > 50 or any(w in msg_lower for w in complex_patterns):
+        return "complex"
+
+    # 대화 초반은 simple, 깊어지면 complex
+    return "simple" if history_len < 5 else "complex"
 
 
 def calculate_compatibility(char_mbti: str, user_mbti: Optional[str]) -> float:
@@ -88,6 +133,24 @@ def calculate_compatibility(char_mbti: str, user_mbti: Optional[str]) -> float:
     return 1.0
 
 
+def _is_negated(msg: str, word: str) -> bool:
+    """키워드가 부정문 맥락에서 사용되었는지 판단"""
+    idx = msg.find(word)
+    if idx < 0:
+        return False
+    # 접두사 체크 (키워드 앞 10자 이내)
+    prefix = msg[max(0, idx - 10):idx]
+    for neg in _NEGATION_PREFIXES:
+        if neg in prefix:
+            return True
+    # 접미사 체크 (키워드 뒤 6자 이내)
+    suffix = msg[idx + len(word):idx + len(word) + 6]
+    for neg in _NEGATION_SUFFIXES:
+        if neg in suffix:
+            return True
+    return False
+
+
 def calculate_affinity_delta(
     message: str,
     affinity_level: int,
@@ -99,39 +162,58 @@ def calculate_affinity_delta(
     delta = 0.0
     msg = message.lower()
 
-    # 1. 카테고리별 긍정 키워드 매칭
+    # 1. 카테고리별 긍정 키워드 매칭 (부정문 처리 포함)
     for category, (words, weight) in _POSITIVE_CATEGORIES.items():
         for word in words:
             if word in msg:
-                delta += random.uniform(0.5, 1.0) * weight
+                if _is_negated(msg, word):
+                    # 부정문: 긍정 → 부정으로 전환
+                    delta -= 0.75 * weight
+                else:
+                    delta += 0.75 * weight
                 break  # 카테고리당 1회만
 
     # 2. 카테고리별 부정 키워드 매칭
     for category, (words, weight) in _NEGATIVE_CATEGORIES.items():
         for word in words:
             if word in msg:
-                delta -= random.uniform(0.5, 1.0) * weight
+                delta -= 0.75 * weight
                 break
 
-    # 3. 대화 길이 보너스 (정성 들인 메시지)
-    if len(message) > 50:
-        delta += 0.5
-    elif len(message) > 100:
+    # 3. 대화 길이 보너스 (정성 들인 메시지) - 조건 순서 버그 수정
+    if len(message) > 100:
         delta += 1.0
+    elif len(message) > 50:
+        delta += 0.5
 
-    # 4. 질문 여부 (관심 표현)
+    # 4. 이모티콘/반복 문자 감정 분석
+    for emoticon in _EMOTICON_POSITIVE:
+        if emoticon in msg:
+            delta += 0.5
+            break
+    for emoticon in _EMOTICON_NEGATIVE:
+        if emoticon in msg:
+            # ㅠㅠ는 슬픔이지만 친밀감 표현이기도 함
+            delta += 0.2
+            break
+
+    # 5. 질문 여부 (관심 표현)
     if "?" in message or "?" in message:
         delta += 0.3
 
-    # 5. 중립 메시지 기본 호감도
+    # 6. 문맥 의존 가중치 (호감도 높을 때 긍정 키워드 효과 감소)
+    if affinity_level >= 4 and delta > 0:
+        delta *= 0.7  # 이미 친한 상태에서 긍정 효과 감소 (쉽게 안 오름)
+
+    # 7. 중립 메시지 기본 호감도
     if abs(delta) < 0.1:
         delta = random.choice([0, 0, 0.5, 0.5, 1.0])
 
-    # 6. 호감도 레벨별 변화량 차등 (초반 빠른 상승, 후반 느린 상승)
+    # 8. 호감도 레벨별 변화량 차등 (초반 빠른 상승, 후반 느린 상승)
     level_multiplier = {1: 1.5, 2: 1.3, 3: 1.0, 4: 0.7, 5: 0.4}
     delta *= level_multiplier.get(affinity_level, 1.0)
 
-    # 7. 연속 대화 보너스
+    # 9. 연속 대화 보너스
     if conversation_history:
         history_len = len(conversation_history)
         if history_len >= 10:
@@ -139,9 +221,12 @@ def calculate_affinity_delta(
         elif history_len >= 5:
             delta += 0.3
 
-    # 8. MBTI 궁합 가중치
+    # 10. MBTI 궁합 가중치
     compat = calculate_compatibility(char_mbti, user_mbti)
     delta *= compat
+
+    # 11. 키워드 스케일 보정 (LLM과의 스케일 맞춤)
+    delta *= KEYWORD_SCALE
 
     return round(delta)
 
@@ -150,13 +235,24 @@ async def analyze_affinity_with_llm(
     message: str,
     affinity_level: int,
     char_mbti: str,
-    recent_context: str = ""
+    recent_context: str = "",
+    memory_context: str = "",
 ) -> int:
     """LLM으로 사용자 메시지의 감정/의도를 분석해 호감도 변화값 반환 (-3 ~ +5)"""
     if not client:
         return 0
 
     context_section = f"\n최근 대화 맥락:\n{recent_context}" if recent_context else ""
+    memory_section = f"\n장기 관계 맥락:\n{memory_context[:300]}" if memory_context else ""
+
+    # MBTI 그룹별 가중치 설명
+    group = _get_mbti_group(char_mbti)
+    mbti_weight_desc = {
+        "NT": "이 캐릭터는 논리적 대화, 지적 토론, 효율적 소통에 높은 점수를 줌",
+        "NF": "이 캐릭터는 감정 공유, 공감, 진심 어린 대화에 높은 점수를 줌",
+        "ST": "이 캐릭터는 실질적 도움, 약속 이행, 성실한 태도에 높은 점수를 줌",
+        "SF": "이 캐릭터는 관심과 배려, 함께하는 시간, 즐거운 대화에 높은 점수를 줌",
+    }.get(group, "")
 
     prompt = f"""사용자 메시지를 분석해서 {char_mbti} 캐릭터에 대한 호감도 변화를 -3~+5 정수로 판단해.
 고려 사항:
@@ -164,7 +260,9 @@ async def analyze_affinity_with_llm(
 - 현재 호감도 레벨: {affinity_level}/5 (높을수록 변화 폭 줄임)
 - 긍정: 칭찬, 감사, 애정, 공감, 관심 → 양수
 - 부정: 비난, 무시, 적대 → 음수
-- 중립/일상: 0 또는 약간의 양수{context_section}
+- 중립/일상: 0 또는 약간의 양수
+- 연속 긍정/부정 흐름 감지: 3턴 이상 같은 흐름이면 보너스/페널티
+- {mbti_weight_desc}{context_section}{memory_section}
 
 사용자 메시지: "{message}"
 
@@ -261,23 +359,29 @@ async def generate_reply(
     # is_safe, reason = check_content(message)
     # if not is_safe:
     #     return [ReplyPart(
-    #         text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요? 😊",
+    #         text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요?",
     #         emotion="SAD",
     #         delay=2000
     #     )], -2
 
     # 2. 호감도 변화 계산 (LLM 우선, 실패 시 키워드 fallback)
     affinity_delta = 0
+    # 선행 memory_context 조회 (호감도 분석에 활용)
+    _pre_mem_ctx = ""
+    if character_name and nickname:
+        _pre_mem_ctx = build_memory_context(character_name, nickname)
+
     if client:
         recent_context = ""
         if conversation_history and len(conversation_history) >= 2:
-            recent_msgs = conversation_history[-4:]
+            recent_msgs = conversation_history[-8:]
             recent_context = "\n".join(
                 f"{'사용자' if h.role == 'user' else '캐릭터'}: {h.content}"
                 for h in recent_msgs if h.content.strip()
             )
         affinity_delta = await analyze_affinity_with_llm(
-            message, affinity_level, mbti, recent_context
+            message, affinity_level, mbti, recent_context,
+            memory_context=_pre_mem_ctx,
         )
         if affinity_delta == 0:
             # LLM이 0을 반환하거나 실패 시 키워드 방식 보조
@@ -299,13 +403,24 @@ async def generate_reply(
         # 대화 요약 기억 (memory_service): 10메시지마다 요약/핵심정보 갱신
         mem_ctx = ""
         if character_name and nickname and conversation_history:
-            if len(conversation_history) >= 4 and len(conversation_history) % 5 == 0:
+            hist_len = len(conversation_history)
+            if hist_len >= 4 and hist_len % 10 == 0:
                 await summarize_conversation(character_name, nickname, conversation_history)
                 await extract_facts(character_name, nickname, conversation_history)
+                # 장기 기억도 함께 추출하여 Chroma에 저장
+                if character_id:
+                    await extract_memories(
+                        character_name, nickname, conversation_history, character_id
+                    )
+                    # 에피소드 추출
+                    await extract_episodes(
+                        character_name, nickname, conversation_history, character_id
+                    )
             mem_ctx = build_memory_context(character_name, nickname)
 
         # RAG: Chroma에서 현재 메시지와 관련된 기억 시맨틱 검색
         all_memories = list(memories or [])
+        episode_context = ""
         if character_id:
             store = get_store()
             if store:
@@ -318,6 +433,15 @@ async def generate_reply(
                             all_memories.append(MemoryItem(key=key, value=value))
                             existing_keys.add(key)
 
+                # 에피소드 기억 검색
+                episodes = store.search_episodes(character_id, message, n_results=3)
+                if episodes:
+                    ep_lines = ["## 떠오르는 기억"]
+                    ep_lines.append("이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해.")
+                    for ep in episodes:
+                        ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
+                    episode_context = "\n".join(ep_lines)
+
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
         system_prompt = build_system_prompt(
             mbti=mbti,
@@ -328,12 +452,14 @@ async def generate_reply(
             affinity_level=affinity_level,
             user_mbti=user_mbti or "",
             memories=memory_dicts if memory_dicts else None,
-            memory_context=mem_ctx
+            memory_context=mem_ctx,
+            episode_context=episode_context,
         )
-        # 메시지 구성 (시스템 + 히스토리 + 현재 메시지)
-        # 테스트 모드: safety_prompt 제거
+        # 메시지 구성 (시스템 + safety + 히스토리 + 현재 메시지)
+        safety_prompt = get_safety_system_prompt()
+        combined_prompt = f"{system_prompt}\n\n{safety_prompt}" if safety_prompt else system_prompt
         messages = [
-            {"role": "system", "content": system_prompt}
+            {"role": "system", "content": combined_prompt}
         ]
 
         # 대화 히스토리 추가 (최근 20개로 확대)
@@ -345,7 +471,14 @@ async def generate_reply(
         # 현재 메시지
         messages.append({"role": "user", "content": message})
 
-        model_id = get_model_for_character(character_id) if character_id else "gpt-4o"
+        # 모델 선택 (Phase 5: 복잡도 기반 라우팅)
+        finetuned_model = get_model_for_character(character_id) if character_id else None
+        if finetuned_model and finetuned_model != "gpt-4o":
+            model_id = finetuned_model  # 파인튜닝 모델 우선
+        else:
+            complexity = _classify_message_complexity(message, len(conversation_history))
+            model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
+
         response = await client.chat.completions.create(
             model=model_id,
             messages=messages,
@@ -356,6 +489,24 @@ async def generate_reply(
         content = response.choices[0].message.content or ""
         replies = _parse_reply(content)
 
+        # 품질 게이트: 매우 저품질 시 1회 재생성
+        if replies:
+            full_text = " ".join(r.text for r in replies)
+            score = await quick_score(message, content, mbti)
+            if score < 0.4:
+                logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
+                retry_response = await client.chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    temperature=0.9,
+                    max_tokens=1200,
+                )
+                retry_content = retry_response.choices[0].message.content or ""
+                retry_replies = _parse_reply(retry_content)
+                if retry_replies:
+                    replies = retry_replies
+                    content = retry_content
+
         # 테스트 모드: AI 응답 필터링 스킵
         # TODO: 프로덕션 배포 시 필터 복원 필요
         # filtered_replies = []
@@ -364,22 +515,53 @@ async def generate_reply(
         #     if is_safe:
         #         filtered_replies.append(reply)
         # result = filtered_replies if filtered_replies else [
-        #     ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요 😅", emotion="SHY", delay=2000)
+        #     ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
         # ]
 
         result = replies if replies else [
-            ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요 😅", emotion="SHY", delay=2000)
+            ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
         ]
+
+        # 백그라운드 품질 평가 (사용자 지연 0)
+        full_response = " ".join(r.text for r in result)
+        asyncio.create_task(_post_response_quality_check(
+            message, full_response, mbti, affinity_level,
+            character_id=character_id,
+        ))
 
         return result, affinity_delta
 
     except Exception as e:
         logger.error(f"LLM 호출 실패: {e}")
         return [ReplyPart(
-            text="앗, 잠깐 멍해졌어요... 다시 말해줄래요? 🙏",
+            text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?",
             emotion="SURPRISED",
             delay=2000
         )], 0
+
+
+async def _post_response_quality_check(
+    user_msg: str,
+    ai_response: str,
+    mbti: str,
+    affinity_level: int,
+    room_id: str = "",
+    character_id: str = "",
+) -> None:
+    """응답 전송 후 fire-and-forget 으로 실행되는 품질 평가."""
+    try:
+        await score_response_async(
+            user_msg=user_msg,
+            ai_response=ai_response,
+            mbti=mbti,
+            affinity_level=affinity_level,
+            room_id=room_id,
+            character_id=character_id,
+        )
+        if character_id:
+            check_diversity(character_id, ai_response)
+    except Exception as e:
+        logger.warning(f"백그라운드 품질 평가 오류: {e}")
 
 
 async def generate_diary(
@@ -446,6 +628,84 @@ async def generate_diary(
         return _mock_diary(mbti, nickname, affinity_level), "NEUTRAL"
 
 
+async def generate_night_diary(
+    character_name: str,
+    mbti: str,
+    speech_style: str,
+    nickname: str,
+    affinity_level: int,
+    conversation_history: List[HistoryMessage],
+) -> Tuple[str, str, str, str]:
+    """야간 세션 종료용 일기 생성 (diary, emotion, next_hook, next_goal)."""
+
+    if not client:
+        return _mock_diary(mbti, nickname, affinity_level), "HAPPY", "", ""
+
+    try:
+        system_prompt = build_diary_prompt(
+            mbti=mbti,
+            speech_style=speech_style,
+            nickname=nickname,
+            character_name=character_name,
+            affinity_level=affinity_level,
+        )
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        for hist in conversation_history[-30:]:
+            role = hist.role if hist.role in ("user", "assistant") else "user"
+            if hist.content.strip():
+                messages.append({"role": role, "content": hist.content})
+
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "오늘 대화를 바탕으로 야간 종료 일기를 써줘. "
+                    "반드시 JSON만 출력하고 형식은 "
+                    '{"diary":"...", "emotion":"NEUTRAL|HAPPY|SHY|SAD|ANGRY|SURPRISED|LOVE|PLAYFUL|WORRIED|TOUCHED", '
+                    '"next_hook":"다음 만남 떡밥 1개", "next_goal":"다음 만남 목표 1개"}'
+                    " 를 지켜줘."
+                ),
+            }
+        )
+
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.85,
+            max_tokens=700,
+        )
+
+        content = response.choices[0].message.content or ""
+        valid_emotions = {
+            "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
+            "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",
+        }
+
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(content[start:end])
+                diary = str(data.get("diary", "")).strip() or content.strip()
+                emotion = str(data.get("emotion", "NEUTRAL")).strip().upper()
+                next_hook = str(data.get("next_hook", "")).strip()
+                next_goal = str(data.get("next_goal", "")).strip()
+
+                if emotion not in valid_emotions:
+                    emotion = "NEUTRAL"
+                return diary, emotion, next_hook, next_goal
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+
+        return content.strip(), "NEUTRAL", "", ""
+
+    except Exception as e:
+        logger.error(f"야간 일기 생성 실패: {e}")
+        return _mock_diary(mbti, nickname, affinity_level), "NEUTRAL", "", ""
+
+
 def _mock_diary(mbti: str, nickname: str, affinity_level: int) -> str:
     """API 키 없을 때 목업 일기"""
     group = _get_mbti_group(mbti)
@@ -454,13 +714,13 @@ def _mock_diary(mbti: str, nickname: str, affinity_level: int) -> str:
             f"오늘 {nickname}와 꽤 흥미로운 대화를 했다. "
             "처음엔 별 기대 없었는데, 생각보다 대화가 깊어졌다. "
             "논리적으로 맞지 않는 부분을 지적하고 싶었지만... 그냥 들어줬다. "
-            "나름 나쁘지 않은 시간이었다. 다음에 또 이야기해볼까. 🤔"
+            "나름 나쁘지 않은 시간이었다. 다음에 또 이야기해볼까."
         ),
         "NF": (
             f"오늘도 {nickname}와 이야기를 나눴다. "
             "말 한마디 한마디에서 그 사람의 진심이 느껴졌다. "
             "세상에 이렇게 특별한 사람이 있다는 게 신기해. "
-            "오늘 나눈 대화가 계속 마음속에서 맴도는 건 왜일까. 소중한 하루였다. ✨"
+            "오늘 나눈 대화가 계속 마음속에서 맴도는 건 왜일까. 소중한 하루였다."
         ),
         "ST": (
             f"오늘 {nickname}와 대화했다. "
@@ -472,7 +732,7 @@ def _mock_diary(mbti: str, nickname: str, affinity_level: int) -> str:
             f"오늘 {nickname}와 이야기해서 정말 행복했다!! "
             "웃고 떠들다 보니 시간이 훌쩍 지나버렸어. "
             "이런 날이 매일 있었으면 좋겠다~ "
-            "다음에 뭐 같이 할까 생각 중이야. 🎉"
+            "다음에 뭐 같이 할까 생각 중이야."
         ),
     }
     return mock_diaries.get(group, mock_diaries["NF"])
@@ -603,10 +863,10 @@ _MOCK_RESPONSES = {
         ],
         "high": [
             lambda nick, msg: [
-                ReplyPart(text=f"{nick}~ 왔구나 😏", emotion="HAPPY", delay=1200),
+                ReplyPart(text=f"{nick}~ 왔구나", emotion="HAPPY", delay=1200),
                 ReplyPart(text="너랑 얘기하면 뇌가 활성화되는 느낌이야", emotion="LOVE", delay=2000),
                 ReplyPart(text="...이건 칭찬이야, 착각하지 마 ㅋ", emotion="PLAYFUL", delay=1800),
-                ReplyPart(text="계속 옆에 있어줘 💜", emotion="TOUCHED", delay=1500),
+                ReplyPart(text="계속 옆에 있어줘", emotion="TOUCHED", delay=1500),
             ],
             lambda nick, msg: [
                 ReplyPart(text=f"어, {nick}", emotion="HAPPY", delay=800),
@@ -619,13 +879,13 @@ _MOCK_RESPONSES = {
     "NF": {
         "low": [
             lambda nick, msg: [
-                ReplyPart(text=f"안녕하세요, {nick}님! 😊", emotion="HAPPY", delay=1500),
+                ReplyPart(text=f"안녕하세요, {nick}님!", emotion="HAPPY", delay=1500),
                 ReplyPart(text="만나서 반가워요~", emotion="HAPPY", delay=1200),
                 ReplyPart(text=f"'{msg}'... 왠지 마음이 따뜻해지는 말이에요.", emotion="SHY", delay=2000),
             ],
             lambda nick, msg: [
                 ReplyPart(text=f"와, {nick}님이다!", emotion="HAPPY", delay=1200),
-                ReplyPart(text="오늘 날씨처럼 좋은 만남이 될 것 같아요 ✨", emotion="HAPPY", delay=2000),
+                ReplyPart(text="오늘 날씨처럼 좋은 만남이 될 것 같아요", emotion="HAPPY", delay=2000),
             ],
             lambda nick, msg: [
                 ReplyPart(text="안녕하세요~!", emotion="HAPPY", delay=800),
@@ -635,9 +895,9 @@ _MOCK_RESPONSES = {
         ],
         "mid": [
             lambda nick, msg: [
-                ReplyPart(text=f"헤이 {nick}~! ✨", emotion="HAPPY", delay=1200),
+                ReplyPart(text=f"헤이 {nick}~!", emotion="HAPPY", delay=1200),
                 ReplyPart(text="있잖아, 너랑 얘기하면 마음이 편해져", emotion="SHY", delay=2000),
-                ReplyPart(text="오늘도 재밌는 거 같이 하자! 😆", emotion="PLAYFUL", delay=1500),
+                ReplyPart(text="오늘도 재밌는 거 같이 하자!", emotion="PLAYFUL", delay=1500),
             ],
             lambda nick, msg: [
                 ReplyPart(text=f"{nick}~!", emotion="HAPPY", delay=800),
@@ -647,13 +907,13 @@ _MOCK_RESPONSES = {
         ],
         "high": [
             lambda nick, msg: [
-                ReplyPart(text=f"{nick}~~ 보고 싶었어! 🥰", emotion="LOVE", delay=1500),
+                ReplyPart(text=f"{nick}~~ 보고 싶었어!", emotion="LOVE", delay=1500),
                 ReplyPart(text="너 없으면 세상이 흑백이야...", emotion="SAD", delay=1800),
-                ReplyPart(text="히히 농담이야~ 근데 반은 진심 💕", emotion="PLAYFUL", delay=1500),
+                ReplyPart(text="히히 농담이야~ 근데 반은 진심", emotion="PLAYFUL", delay=1500),
                 ReplyPart(text="오늘도 같이 있어줘서 행복해!", emotion="TOUCHED", delay=1500),
             ],
             lambda nick, msg: [
-                ReplyPart(text=f"{nick}!! 💕", emotion="LOVE", delay=800),
+                ReplyPart(text=f"{nick}!!", emotion="LOVE", delay=800),
                 ReplyPart(text="너 오니까 진짜 기분 좋아졌어...", emotion="TOUCHED", delay=1800),
                 ReplyPart(text="나 이거 좀 과한 거 아니지? ㅋㅋ 근데 사실이야~", emotion="SHY", delay=2200),
             ],
@@ -699,9 +959,9 @@ _MOCK_RESPONSES = {
     "SF": {
         "low": [
             lambda nick, msg: [
-                ReplyPart(text=f"안녕~ {nick}님! 😄", emotion="HAPPY", delay=1200),
+                ReplyPart(text=f"안녕~ {nick}님!", emotion="HAPPY", delay=1200),
                 ReplyPart(text="반가워요!! 우리 친해지자~", emotion="HAPPY", delay=1500),
-                ReplyPart(text="뭐 재밌는 거 같이 해요! ✨", emotion="PLAYFUL", delay=1500),
+                ReplyPart(text="뭐 재밌는 거 같이 해요!", emotion="PLAYFUL", delay=1500),
             ],
             lambda nick, msg: [
                 ReplyPart(text="하이하이~!", emotion="HAPPY", delay=800),
@@ -711,7 +971,7 @@ _MOCK_RESPONSES = {
         ],
         "mid": [
             lambda nick, msg: [
-                ReplyPart(text=f"야호~ {nick}! 🎉", emotion="HAPPY", delay=1200),
+                ReplyPart(text=f"야호~ {nick}!", emotion="HAPPY", delay=1200),
                 ReplyPart(text="오늘 기분 어때어때?!", emotion="PLAYFUL", delay=1200),
                 ReplyPart(text="나는 네가 와서 기분 좋아졌어 ㅎㅎ", emotion="SHY", delay=1800),
             ],
@@ -723,13 +983,13 @@ _MOCK_RESPONSES = {
         ],
         "high": [
             lambda nick, msg: [
-                ReplyPart(text=f"어머~ {nick}!! 💕💕", emotion="LOVE", delay=1200),
+                ReplyPart(text=f"어머~ {nick}!!", emotion="LOVE", delay=1200),
                 ReplyPart(text="나 오늘 너 생각하면서 이거 샀어 ㅎㅎ", emotion="HAPPY", delay=2000),
-                ReplyPart(text="너 완전 내 최애야!! 🥰", emotion="LOVE", delay=1500),
+                ReplyPart(text="너 완전 내 최애야!!", emotion="LOVE", delay=1500),
                 ReplyPart(text="우리 같이 놀자놀자~!", emotion="PLAYFUL", delay=1200),
             ],
             lambda nick, msg: [
-                ReplyPart(text=f"{nick}!! 왔어?! 💕", emotion="LOVE", delay=1200),
+                ReplyPart(text=f"{nick}!! 왔어?!", emotion="LOVE", delay=1200),
                 ReplyPart(text="아 진짜 보고 싶었어ㅠㅠ", emotion="TOUCHED", delay=1500),
                 ReplyPart(text="너무 좋다~ 오늘 뭐 할까?!", emotion="HAPPY", delay=1500),
             ],

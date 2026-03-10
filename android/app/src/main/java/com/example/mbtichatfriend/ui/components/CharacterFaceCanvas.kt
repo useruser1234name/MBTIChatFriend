@@ -44,15 +44,18 @@ fun CharacterFace(
     avatarId: String,
     modifier: Modifier = Modifier,
     emotion: CharacterEmotion = CharacterEmotion.NEUTRAL,
-    legacyFontSize: Float = 22f
+    legacyFontSize: Float = 22f,
+    expressionUrls: Map<String, String>? = null,
+    isTalking: Boolean = false
 ) {
     if (avatarId.startsWith("img:")) {
         val imageUrl = avatarId.removePrefix("img:")
-        AsyncImage(
-            model = imageUrl,
-            contentDescription = "캐릭터 이미지",
-            modifier = modifier.clip(CircleShape),
-            contentScale = ContentScale.Crop
+        ImageCharacterFace(
+            baseImageUrl = imageUrl,
+            expressionUrls = expressionUrls,
+            emotion = emotion,
+            isTalking = isTalking,
+            modifier = modifier
         )
     } else if (avatarId.startsWith("v2:")) {
         val config = AvatarConfig.fromId(avatarId)

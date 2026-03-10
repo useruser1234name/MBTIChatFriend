@@ -12,11 +12,11 @@ data class PresetCharacter(
     val avatarId: String get() = avatarConfig.toId()
 }
 
-enum class MbtiGroup(val label: String, val emoji: String) {
-    NT("분석형", "🔍"),
-    NF("외교형", "💫"),
-    SJ("관리형", "🛡️"),
-    SP("탐험형", "⚡")
+enum class MbtiGroup(val label: String, val tag: String) {
+    NT("분석형", "NT"),
+    NF("외교형", "NF"),
+    SJ("관리형", "SJ"),
+    SP("탐험형", "SP")
 }
 
 // skinTone(0-4), hairStyle(0-5: LONG/BOB/TWIN/PONYTAIL/SHORT/BUN),

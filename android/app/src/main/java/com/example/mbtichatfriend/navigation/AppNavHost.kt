@@ -13,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -39,13 +40,14 @@ import com.example.mbtichatfriend.ui.voicecall.VoiceCallScreen
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppNavHost(navController: NavHostController) {
+fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) {
     val onboardingViewModel: OnboardingViewModel = hiltViewModel()
     val isOnboardingDone by onboardingViewModel.isOnboardingCompleted.collectAsState(initial = false)
 
     NavHost(
         navController = navController,
         startDestination = Route.Splash.route,
+        modifier = modifier,
         enterTransition = {
             slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Start, tween(300))
         },

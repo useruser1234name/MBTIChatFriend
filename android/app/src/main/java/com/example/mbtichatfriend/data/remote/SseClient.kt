@@ -22,7 +22,13 @@ sealed class SseEvent {
         val delay: Long
     ) : SseEvent()
 
-    data class Done(val affinityDelta: Int) : SseEvent()
+    data class Done(
+        val affinityDelta: Int,
+        val nightDiaryGenerated: Boolean = false,
+        val nextHook: String = "",
+        val nextGoal: String = "",
+        val roomId: String = ""
+    ) : SseEvent()
     data class Error(val message: String) : SseEvent()
 }
 
@@ -94,7 +100,13 @@ class SseClient @Inject constructor(
                         }
                         "done" -> {
                             val obj = JSONObject(data)
-                            trySend(SseEvent.Done(affinityDelta = obj.optInt("affinity_delta", 0)))
+                            trySend(SseEvent.Done(
+                                affinityDelta = obj.optInt("affinity_delta", 0),
+                                nightDiaryGenerated = obj.optBoolean("night_diary_generated", false),
+                                nextHook = obj.optString("next_hook", ""),
+                                nextGoal = obj.optString("next_goal", ""),
+                                roomId = obj.optString("room_id", "")
+                            ))
                             close()
                         }
                     }

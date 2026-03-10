@@ -21,7 +21,7 @@ def check_content(text: str) -> Tuple[bool, str]:
     콘텐츠 필터링 체크
     Returns: (is_safe, reason)
 
-    TODO: 테스트 모드 - 필터 비활성화. 프로덕션 배포 시 원래 로직 복원 필요.
+    NOTE: 테스트 모드 - 필터 비활성화. 프로덕션 배포 시 주석 해제 필요.
     """
     # for pattern in COMPILED_PATTERNS:
     #     if pattern.search(text):
@@ -33,6 +33,6 @@ def check_content(text: str) -> Tuple[bool, str]:
 def get_safety_system_prompt() -> str:
     """AI 응답 안전 가이드라인 시스템 프롬프트
 
-    TODO: 테스트 모드 - safety prompt 비활성화. 프로덕션 배포 시 원래 프롬프트 복원 필요.
+    NOTE: 테스트 모드 - 비활성화. 프로덕션 배포 시 원래 프롬프트 복원 필요.
     """
     return ""

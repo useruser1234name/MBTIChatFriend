@@ -148,6 +148,11 @@ fun CharacterProfileScreen(
                 MbtiType.valueOf(ch.mbti).description
             } catch (_: Exception) { "" }
 
+          Column(
+              modifier = Modifier
+                  .fillMaxSize()
+                  .verticalScroll(scrollState)
+          ) {
             // 캐릭터 아바타 영역
             Box(
                 modifier = Modifier
@@ -216,12 +221,12 @@ fun CharacterProfileScreen(
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     val levelName = when (ch.affinityLevel) {
-                        1 -> "\uD83E\uDD1D 낯선 사이"
-                        2 -> "\uD83D\uDC4B 아는 사이"
-                        3 -> "\uD83D\uDE0A 친한 친구"
-                        4 -> "\uD83D\uDC96 특별한 사이"
-                        5 -> "\uD83D\uDC95 연인"
-                        else -> "\uD83E\uDD1D 낯선 사이"
+                        1 -> "Lv.1 낯선 사이"
+                        2 -> "Lv.2 아는 사이"
+                        3 -> "Lv.3 친한 친구"
+                        4 -> "Lv.4 특별한 사이"
+                        5 -> "Lv.5 연인"
+                        else -> "Lv.1 낯선 사이"
                     }
 
                     Text("호감도", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -281,7 +286,7 @@ fun CharacterProfileScreen(
                     .padding(horizontal = 24.dp)
             )
 
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(24.dp))
 
             // 하단 버튼들
             Column(
@@ -349,6 +354,7 @@ fun CharacterProfileScreen(
                     Text("대화하기", style = MaterialTheme.typography.titleMedium)
                 }
             }
+          } // end scrollable Column
         }
     }
 }
@@ -369,8 +375,6 @@ private fun FinetuneCard(
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("🤖", fontSize = 18.sp)
-                Spacer(Modifier.width(8.dp))
                 Text(
                     "GPT 파인튜닝",
                     style = MaterialTheme.typography.titleMedium,
@@ -408,7 +412,7 @@ private fun FinetuneCard(
                 }
                 is FinetuneUiState.JobStarted -> {
                     Text(
-                        "✅ 파인튜닝 잡이 시작됐어요!",
+                        "파인튜닝 잡이 시작됐어요!",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary
@@ -429,7 +433,7 @@ private fun FinetuneCard(
                 }
                 is FinetuneUiState.InProgress -> {
                     Text(
-                        "⏳ 파인튜닝 진행 중 (${state.status})",
+                        "파인튜닝 진행 중 (${state.status})",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.height(6.dp))
@@ -445,7 +449,7 @@ private fun FinetuneCard(
                 }
                 is FinetuneUiState.Completed -> {
                     Text(
-                        "🎉 파인튜닝 완료!",
+                        "파인튜닝 완료!",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary

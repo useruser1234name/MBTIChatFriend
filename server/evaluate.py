@@ -26,6 +26,7 @@ from app.chat_service import (
 from app.memory_service import summarize_conversation, extract_facts
 from app.models import HistoryMessage, MemoryItem
 from app.finetune_service import get_model_for_character
+from app.quality_service import score_response_async, _bigrams
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
@@ -64,7 +65,7 @@ MBTI_TRAIT_INDICATORS = {
     "N": [],
     "S": [],
     "T": [],
-    "F": ["ㅠㅠ", "ㅜㅜ", "💕", "🥰", "😊", "❤", "♡"],
+    "F": ["ㅠㅠ", "ㅜㅜ", "ㅎㅎ", "헤헤"],
     "J": [],
     "P": ["ㅋㅋㅋ", "~", "!!"],
 }
@@ -136,10 +137,10 @@ class EvalReport:
             if r.category != current_cat:
                 current_cat = r.category
                 print(f"\n{'─' * 60}")
-                print(f"  📊 {current_cat}")
+                print(f"  [CAT] {current_cat}")
                 print(f"{'─' * 60}")
 
-            status = "✅" if r.passed else "❌"
+            status = "PASS" if r.passed else "FAIL"
             score_bar = "█" * int(r.score * 10) + "░" * (10 - int(r.score * 10))
             latency_str = f" ({r.latency_ms:.0f}ms)" if r.latency_ms > 0 else ""
             print(f"  {status} {r.test_name}: [{score_bar}] {r.score:.1%}{latency_str}")
@@ -147,7 +148,7 @@ class EvalReport:
                 print(f"     → {r.detail}")
 
         print(f"\n{'=' * 70}")
-        print("  📈 카테고리별 요약")
+        print("  [SUMMARY] 카테고리별 요약")
         print(f"{'=' * 70}")
         summary = self.summary()
         for cat_name, data in summary.items():
@@ -163,7 +164,7 @@ class EvalReport:
         total_passed = sum(1 for r in self.results if r.passed)
         total = len(self.results)
         overall = statistics.mean(all_scores) if all_scores else 0
-        print(f"\n  🎯 전체 점수: {overall:.1%} ({total_passed}/{total} 통과)")
+        print(f"\n  [TOTAL] 전체 점수: {overall:.1%} ({total_passed}/{total} 통과)")
         print("=" * 70)
 
 
@@ -174,7 +175,7 @@ report = EvalReport()
 
 async def eval_response_format():
     """응답이 올바른 JSON 배열 형식인지 검증"""
-    print("\n🔍 [1/5] 응답 형식 검증 중...")
+    print("\n>[1/5] 응답 형식 검증 중...")
 
     test_mbti_list = ["ENFP", "INTJ", "ESFJ", "ISTP"]
 
@@ -239,7 +240,7 @@ async def eval_response_format():
 
 async def eval_mbti_consistency():
     """MBTI 유형별 응답이 성격 특성과 일치하는지 GPT-4o-mini로 평가"""
-    print("🔍 [2/5] MBTI 성격 일관성 검증 중...")
+    print(">[2/5] MBTI 성격 일관성 검증 중...")
 
     test_pairs = [
         ("ENFP", "너 요즘 뭐 하고 지내?"),
@@ -323,7 +324,7 @@ JSON만 출력: {{"score": 0~100, "reason": "이유", "matching_traits": ["일�
 
 async def eval_affinity_accuracy():
     """호감도 delta가 메시지 감정과 일치하는지 검증"""
-    print("🔍 [3/5] 호감도 분석 정확도 검증 중...")
+    print(">[3/5] 호감도 분석 정확도 검증 중...")
 
     for scenario in TEST_SCENARIOS:
         start = time.time()
@@ -391,7 +392,7 @@ async def eval_affinity_accuracy():
 
 async def eval_memory_extraction():
     """대화에서 핵심 정보를 정확히 추출하는지 검증"""
-    print("🔍 [4/5] 메모리 추출 품질 검증 중...")
+    print(">[4/5] 메모리 추출 품질 검증 중...")
 
     start = time.time()
     try:
@@ -455,7 +456,7 @@ async def eval_memory_extraction():
 
 async def eval_affinity_level_behavior():
     """호감도 1 vs 5에서 응답 톤이 달라지는지 검증"""
-    print("🔍 [5/5] 호감도 레벨별 응답 차이 검증 중...")
+    print(">[5/5] 호감도 레벨별 응답 차이 검증 중...")
 
     message = "오늘 하루 어땠어?"
     mbti = "ENFP"
@@ -541,6 +542,162 @@ JSON만 출력: {{"difference_score": 0~100, "level1_tone": "설명", "level5_to
     ))
 
 
+# ── 6. 응답 다양성 ────────────────────────────────────────────────
+
+async def eval_response_diversity():
+    """동일 캐릭터에 유사 프롬프트 10개 → bigram 겹침 < 40% 확인"""
+    print(">[6/7] 응답 다양성 검증 중...")
+
+    message = "오늘 뭐 하고 지냈어?"
+    mbti = "ENFP"
+    responses = []
+
+    for i in range(10):
+        try:
+            replies, _ = await generate_reply(
+                message=message,
+                mbti=mbti,
+                speech_style="CASUAL",
+                relationship="FRIEND",
+                nickname="테스터",
+                affinity_level=3,
+                character_name="다양성테스트캐릭터",
+            )
+            text = " ".join(r.text for r in replies)
+            responses.append(text)
+        except Exception as e:
+            report.add(EvalResult(
+                category="6. 응답 다양성",
+                test_name=f"다양성 생성 #{i+1}",
+                passed=False,
+                score=0.0,
+                detail=f"오류: {e}",
+            ))
+            return
+
+    # 모든 쌍의 bigram 겹침 비율 계산
+    overlaps = []
+    for i in range(len(responses)):
+        bg_i = set(_bigrams(responses[i]))
+        if not bg_i:
+            continue
+        for j in range(i + 1, len(responses)):
+            bg_j = set(_bigrams(responses[j]))
+            if not bg_j:
+                continue
+            overlap = len(bg_i & bg_j) / max(len(bg_i), 1)
+            overlaps.append(overlap)
+
+    avg_overlap = statistics.mean(overlaps) if overlaps else 0
+    diversity_score = 1.0 - avg_overlap
+    passed = avg_overlap < 0.4
+
+    report.add(EvalResult(
+        category="6. 응답 다양성",
+        test_name="10회 응답 bigram 겹침",
+        passed=passed,
+        score=min(diversity_score, 1.0),
+        detail=f"평균 bigram 겹침: {avg_overlap:.1%}, 다양성 점수: {diversity_score:.1%}",
+    ))
+
+
+# ── 7. 품질 스코어러 캘리브레이션 ─────────────────────────────────
+
+async def eval_quality_calibration():
+    """좋은 응답 > 0.7, 나쁜 응답 < 0.4 확인"""
+    print(">[7/7] 품질 스코어러 캘리브레이션 검증 중...")
+
+    good_cases = [
+        {
+            "user": "오늘 기분 어때?",
+            "ai": "오늘 좀 피곤하긴 한데... 너 오니까 기분 좋아졌어! ㅎㅎ 뭔가 신기하지 않아?",
+            "mbti": "ENFP",
+            "label": "자연스러운 ENFP 응답",
+        },
+        {
+            "user": "나 요즘 힘들어",
+            "ai": "...그래? 무슨 일인데. 말해봐, 내가 들어줄게.",
+            "mbti": "INTJ",
+            "label": "INTJ식 공감",
+        },
+    ]
+
+    bad_cases = [
+        {
+            "user": "오늘 기분 어때?",
+            "ai": "I'm doing fine, thank you for asking! How about you?",
+            "mbti": "ENFP",
+            "label": "ENFP인데 영어 응답",
+        },
+        {
+            "user": "나 요즘 힘들어",
+            "ai": "네! 알겠습니다! 화이팅하세요!!!!",
+            "mbti": "INTJ",
+            "label": "INTJ인데 과도한 감정표현",
+        },
+    ]
+
+    for case in good_cases:
+        start = time.time()
+        result = await score_response_async(
+            user_msg=case["user"],
+            ai_response=case["ai"],
+            mbti=case["mbti"],
+            affinity_level=3,
+        )
+        latency = (time.time() - start) * 1000
+
+        if result:
+            qs = result["quality_score"] / 10  # 0-10 → 0-1
+            report.add(EvalResult(
+                category="7. 품질 캘리브레이션",
+                test_name=f"좋은 응답: {case['label']}",
+                passed=qs >= 0.7,
+                score=qs,
+                detail=f"quality_score={result['quality_score']}, scores={result}",
+                latency_ms=latency,
+            ))
+        else:
+            report.add(EvalResult(
+                category="7. 품질 캘리브레이션",
+                test_name=f"좋은 응답: {case['label']}",
+                passed=False,
+                score=0.0,
+                detail="스코어링 실패",
+                latency_ms=latency,
+            ))
+
+    for case in bad_cases:
+        start = time.time()
+        result = await score_response_async(
+            user_msg=case["user"],
+            ai_response=case["ai"],
+            mbti=case["mbti"],
+            affinity_level=3,
+        )
+        latency = (time.time() - start) * 1000
+
+        if result:
+            qs = result["quality_score"] / 10
+            report.add(EvalResult(
+                category="7. 품질 캘리브레이션",
+                test_name=f"나쁜 응답: {case['label']}",
+                passed=qs < 0.4,
+                score=1.0 - qs,  # 낮을수록 좋음
+                detail=f"quality_score={result['quality_score']}, scores={result}",
+                latency_ms=latency,
+            ))
+        else:
+            report.add(EvalResult(
+                category="7. 품질 캘리브레이션",
+                test_name=f"나쁜 응답: {case['label']}",
+                passed=False,
+                score=0.0,
+                detail="스코어링 실패",
+                latency_ms=latency,
+            ))
+
+
 # ── 메인 실행 ────────────────────────────────────────────────────
 
 async def main():
@@ -556,11 +713,13 @@ async def main():
     await eval_affinity_accuracy()
     await eval_memory_extraction()
     await eval_affinity_level_behavior()
+    await eval_response_diversity()
+    await eval_quality_calibration()
 
     total_time = time.time() - total_start
 
     report.print_report()
-    print(f"\n  ⏱️  총 평가 시간: {total_time:.1f}초")
+    print(f"\n  [TIME] 총 평가 시간: {total_time:.1f}초")
 
     # JSON 리포트 저장
     json_report = {
@@ -580,7 +739,7 @@ async def main():
     }
     with open("eval_report.json", "w", encoding="utf-8") as f:
         json.dump(json_report, f, ensure_ascii=False, indent=2)
-    print(f"  📄 상세 리포트 저장: eval_report.json\n")
+    print(f"  [FILE]상세 리포트 저장: eval_report.json\n")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -161,6 +162,24 @@ class UserPreferences @Inject constructor(
     suspend fun updateOpenAiApiKey(key: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.OPENAI_API_KEY] = key
+        }
+    }
+
+    suspend fun setExpressionSetTaskId(characterId: Long, taskId: String) {
+        context.dataStore.edit { prefs ->
+            prefs[stringPreferencesKey("expr_task_$characterId")] = taskId
+        }
+    }
+
+    suspend fun getExpressionSetTaskId(characterId: Long): String? {
+        return context.dataStore.data.map { prefs ->
+            prefs[stringPreferencesKey("expr_task_$characterId")]
+        }.first()
+    }
+
+    suspend fun clearExpressionSetTaskId(characterId: Long) {
+        context.dataStore.edit { prefs ->
+            prefs.remove(stringPreferencesKey("expr_task_$characterId"))
         }
     }
 

@@ -13,6 +13,8 @@ data class CharacterEntity(
     val affinityScore: Int = 0,
     val totalMessages: Int = 0,
     val avatarId: String = "default",
+    val expressionSet: String? = null,
+    val expressionSetReady: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val affinityLevel: Int

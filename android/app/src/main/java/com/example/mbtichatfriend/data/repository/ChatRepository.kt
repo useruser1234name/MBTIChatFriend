@@ -1,9 +1,12 @@
 package com.example.mbtichatfriend.data.repository
 
+import com.example.mbtichatfriend.data.local.FeedbackDao
+import com.example.mbtichatfriend.data.local.FeedbackEntity
 import com.example.mbtichatfriend.data.local.MessageDao
 import com.example.mbtichatfriend.data.local.MessageEntity
 import com.example.mbtichatfriend.data.remote.ChatApi
 import com.example.mbtichatfriend.data.remote.ChatRequest
+import com.example.mbtichatfriend.data.remote.FeedbackRequest
 import com.example.mbtichatfriend.data.remote.MemoryItem
 import com.example.mbtichatfriend.data.remote.ReplyPart
 import com.example.mbtichatfriend.data.remote.SseClient
@@ -20,6 +23,7 @@ data class ChatResult(
 @Singleton
 class ChatRepository @Inject constructor(
     private val dao: MessageDao,
+    private val feedbackDao: FeedbackDao,
     private val api: ChatApi,
     private val sseClient: SseClient
 ) {
@@ -30,14 +34,16 @@ class ChatRepository @Inject constructor(
         characterId: Long,
         text: String,
         isFromUser: Boolean,
-        emotion: String? = null
+        emotion: String? = null,
+        sendStatus: String = "SENT"
     ) {
         dao.insert(
             MessageEntity(
                 characterId = characterId,
                 text = text,
                 isFromUser = isFromUser,
-                emotion = emotion
+                emotion = emotion,
+                sendStatus = sendStatus
             )
         )
     }
@@ -113,7 +119,7 @@ class ChatRepository @Inject constructor(
             ChatResult(
                 replies = listOf(
                     ReplyPart(
-                        text = "음... 잠깐 생각할게요! 다시 말해줄래요? \uD83D\uDE4F",
+                        text = "음... 잠깐 생각할게요! 다시 말해줄래요?",
                         emotion = "NEUTRAL",
                         delay = 500
                     )
@@ -123,7 +129,59 @@ class ChatRepository @Inject constructor(
         }
     }
 
+    suspend fun updateSendStatus(messageId: Long, status: String) {
+        dao.updateSendStatus(messageId, status)
+    }
+
     suspend fun clearMessages(characterId: Long) {
         dao.deleteByCharacter(characterId)
+    }
+
+    /** 피드백 제출: 로컬 저장 → 서버 동기화 (오프라인 우선) */
+    suspend fun submitFeedback(messageId: Long, characterId: Long, feedbackType: String) {
+        feedbackDao.insert(
+            FeedbackEntity(
+                messageId = messageId,
+                characterId = characterId,
+                feedbackType = feedbackType,
+            )
+        )
+        try {
+            api.submitFeedback(
+                FeedbackRequest(
+                    characterId = characterId.toString(),
+                    messageId = messageId.toString(),
+                    feedbackType = feedbackType,
+                )
+            )
+            val entity = feedbackDao.getByMessageId(messageId)
+            if (entity != null) feedbackDao.markSynced(entity.id)
+        } catch (_: Exception) {
+            // 서버 실패 시 로컬만 저장, 나중에 재시도
+        }
+    }
+
+    /** 특정 메시지의 로컬 피드백 조회 */
+    suspend fun getFeedbackForMessage(messageId: Long): String? {
+        return feedbackDao.getByMessageId(messageId)?.feedbackType
+    }
+
+    /** 미동기화 피드백 서버 전송 재시도 */
+    suspend fun syncPendingFeedback() {
+        val unsynced = feedbackDao.getUnsynced()
+        for (fb in unsynced) {
+            try {
+                api.submitFeedback(
+                    FeedbackRequest(
+                        characterId = fb.characterId.toString(),
+                        messageId = fb.messageId.toString(),
+                        feedbackType = fb.feedbackType,
+                    )
+                )
+                feedbackDao.markSynced(fb.id)
+            } catch (_: Exception) {
+                // 다음 시도에서 재시도
+            }
+        }
     }
 }

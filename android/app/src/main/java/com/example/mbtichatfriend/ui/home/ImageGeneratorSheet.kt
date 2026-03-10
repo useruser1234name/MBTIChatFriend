@@ -93,7 +93,7 @@ fun ImageGeneratorSheet(
     sheetState: SheetState,
     chatApi: ChatApi,
     onDismiss: () -> Unit,
-    onCharacterCreated: (name: String, mbti: String, speechStyle: String, relationship: String, avatarId: String) -> Unit
+    onCharacterCreated: (name: String, mbti: String, speechStyle: String, relationship: String, avatarId: String, revisedPrompt: String?) -> Unit
 ) {
     val scope = rememberCoroutineScope()
 
@@ -105,6 +105,7 @@ fun ImageGeneratorSheet(
     var customPrompt by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var generatedImageUrl by remember { mutableStateOf<String?>(null) }
+    var revisedPrompt by remember { mutableStateOf<String?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     // Step 2 state
@@ -154,6 +155,7 @@ fun ImageGeneratorSheet(
                                     ImageGenerateRequest(prompt = prompt)
                                 )
                                 generatedImageUrl = response.url
+                                revisedPrompt = response.revisedPrompt
                             } catch (e: Exception) {
                                 errorMessage = "오류: ${e.localizedMessage ?: "알 수 없는 오류"}"
                             } finally {
@@ -178,7 +180,7 @@ fun ImageGeneratorSheet(
                         val avatarId = "img:$generatedImageUrl"
                         onCharacterCreated(
                             charName, selectedMbti.name, selectedStyle.name,
-                            selectedRelationship.name, avatarId
+                            selectedRelationship.name, avatarId, revisedPrompt
                         )
                     }
                 )

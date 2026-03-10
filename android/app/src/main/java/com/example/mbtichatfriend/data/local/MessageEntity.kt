@@ -10,5 +10,7 @@ data class MessageEntity(
     val text: String,
     val isFromUser: Boolean,
     val emotion: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val sendStatus: String = "SENT",
+    val retryCount: Int = 0
 )

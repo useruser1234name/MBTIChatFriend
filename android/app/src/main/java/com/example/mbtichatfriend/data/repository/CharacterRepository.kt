@@ -45,6 +45,10 @@ class CharacterRepository @Inject constructor(
         dao.updateAffinity(id, newScore)
     }
 
+    suspend fun updateExpressionSet(id: Long, json: String) {
+        dao.updateExpressionSet(id, json)
+    }
+
     suspend fun delete(id: Long) {
         messageDao.deleteByCharacter(id)
         dao.deleteById(id)

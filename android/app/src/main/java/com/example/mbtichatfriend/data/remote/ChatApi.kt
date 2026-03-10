@@ -125,6 +125,36 @@ data class ImageGenerateResponse(
     @Json(name = "revised_prompt") val revisedPrompt: String? = null
 )
 
+@JsonClass(generateAdapter = false)
+data class ImageSetRequest(
+    @Json(name = "base_prompt") val basePrompt: String,
+    @Json(name = "character_id") val characterId: String,
+    val size: String = "1024x1024"
+)
+
+@JsonClass(generateAdapter = false)
+data class ImageSetResponse(
+    val status: String,
+    @Json(name = "task_id") val taskId: String
+)
+
+@JsonClass(generateAdapter = false)
+data class ImageSetStatusResponse(
+    val status: String,
+    val completed: Int = 0,
+    val total: Int = 15,
+    val urls: Map<String, String> = emptyMap()
+)
+
+@JsonClass(generateAdapter = false)
+data class FeedbackRequest(
+    @Json(name = "room_id") val roomId: String = "",
+    @Json(name = "character_id") val characterId: String = "",
+    @Json(name = "message_id") val messageId: String,
+    @Json(name = "feedback_type") val feedbackType: String,
+    @Json(name = "feedback_detail") val feedbackDetail: String = ""
+)
+
 interface ChatApi {
     @POST("api/v1/chat/send")
     suspend fun chat(@Body req: ChatRequest): ChatResponse
@@ -149,4 +179,13 @@ interface ChatApi {
 
     @POST("api/v1/image/generate")
     suspend fun generateImage(@Body req: ImageGenerateRequest): ImageGenerateResponse
+
+    @POST("api/v1/image/generate-set")
+    suspend fun generateImageSet(@Body req: ImageSetRequest): ImageSetResponse
+
+    @GET("api/v1/image/set-status/{taskId}")
+    suspend fun getImageSetStatus(@Path("taskId") taskId: String): ImageSetStatusResponse
+
+    @POST("api/v1/feedback/submit")
+    suspend fun submitFeedback(@Body req: FeedbackRequest): Response<Unit>
 }

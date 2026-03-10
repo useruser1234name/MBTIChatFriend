@@ -54,7 +54,7 @@ class DiaryRepository @Inject constructor(
             DiaryResult(diary = response.diary, emotion = response.emotion)
         } catch (e: Exception) {
             DiaryResult(
-                diary = "오늘은 왠지 말로 표현하기 어려운 하루였어... 나중에 다시 써야겠다. 😊",
+                diary = "오늘은 왠지 말로 표현하기 어려운 하루였어... 나중에 다시 써야겠다.",
                 emotion = "NEUTRAL"
             )
         }

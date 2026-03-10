@@ -9,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -86,7 +87,18 @@ import com.example.mbtichatfriend.model.CharacterEmotion
 import com.example.mbtichatfriend.model.ChatMessage
 import com.example.mbtichatfriend.ui.components.CharacterFace
 import com.example.mbtichatfriend.ui.components.LiveCharacter
+import com.example.mbtichatfriend.ui.components.LottieOneShot
+import com.example.mbtichatfriend.ui.components.TypingIndicatorBubble
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.BorderStroke
 import com.example.mbtichatfriend.ui.theme.AiBubble
 import com.example.mbtichatfriend.ui.theme.AiBubbleDark
@@ -261,7 +273,7 @@ fun ChatScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "\uD83D\uDCE1 네트워크 연결 없음 - 메시지 전송이 제한됩니다",
+                        text = "오프라인 - 메시지는 연결 시 자동 전송됩니다",
                         style = MaterialTheme.typography.labelMedium,
                         color = Color.White,
                         textAlign = TextAlign.Center,
@@ -278,7 +290,9 @@ fun ChatScreen(
                 isTyping = viewModel.isTyping,
                 avatarId = avatarId,
                 avatar = avatar,
-                affinityLevel = character?.affinityLevel ?: 1
+                affinityLevel = character?.affinityLevel ?: 1,
+                expressionUrls = viewModel.expressionUrls,
+                isTalking = viewModel.isTalking
             )
 
             // 채팅 영역
@@ -290,9 +304,10 @@ fun ChatScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "\uD83D\uDCAC",
-                            fontSize = 48.sp
+                        LottieOneShot(
+                            assetName = "lottie/empty_chat.json",
+                            modifier = Modifier.size(120.dp),
+                            iterations = Int.MAX_VALUE
                         )
                         Spacer(Modifier.height(12.dp))
                         Text(
@@ -320,7 +335,14 @@ fun ChatScreen(
                                 animationSpec = spring(stiffness = Spring.StiffnessLow)
                             )
                         ) {
-                            MessageBubble(msg, avatarId, avatar)
+                            MessageBubble(
+                                msg = msg,
+                                avatarId = avatarId,
+                                avatar = avatar,
+                                onRetry = { messageId -> viewModel.retrySend(messageId) },
+                                feedback = viewModel.feedbackMap[msg.id],
+                                onFeedback = { messageId, type -> viewModel.submitFeedback(messageId, type) }
+                            )
                         }
                     }
 
@@ -349,7 +371,7 @@ fun ChatScreen(
         )
     }
 
-    // 호감도 레벨업 축하 팝업
+    // 호감도 레벨업 축하 팝업 + Lottie 오버레이
     viewModel.levelUpEvent?.let { newLevel ->
         val levelName = when (newLevel) {
             2 -> "아는 사이"
@@ -358,15 +380,23 @@ fun ChatScreen(
             5 -> "연인"
             else -> ""
         }
-        val levelEmoji = when (newLevel) {
-            2 -> "\uD83C\uDF31"; 3 -> "\uD83C\uDF1F"; 4 -> "\uD83D\uDC96"; 5 -> "\uD83D\uDC8D"
-            else -> "\u2728"
+        val levelLabel = when (newLevel) {
+            2 -> "Lv.2"; 3 -> "Lv.3"; 4 -> "Lv.4"; 5 -> "Lv.5"
+            else -> ""
+        }
+        // 축하 Lottie 오버레이
+        Box(modifier = Modifier.fillMaxSize().zIndex(10f)) {
+            LottieOneShot(
+                assetName = "lottie/levelup.json",
+                modifier = Modifier.fillMaxSize(),
+                onFinished = { /* 애니메이션 종료 후 자동 사라짐 */ }
+            )
         }
         AlertDialog(
             onDismissRequest = { viewModel.dismissLevelUp() },
             title = {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text(levelEmoji, fontSize = 48.sp)
+                    Text(levelLabel, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.height(8.dp))
                     Text("관계가 발전했어요!", fontWeight = FontWeight.Bold)
                 }
@@ -389,7 +419,7 @@ fun ChatScreen(
             },
             confirmButton = {
                 TextButton(onClick = { viewModel.dismissLevelUp() }) {
-                    Text("좋아요! $levelEmoji")
+                    Text("좋아요!")
                 }
             }
         )
@@ -408,7 +438,12 @@ fun ChatScreen(
             onDismissRequest = { viewModel.dismissLevelDown() },
             title = {
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text("\uD83D\uDCA7", fontSize = 48.sp)
+                    Text(
+                        text = "...",
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(Modifier.height(8.dp))
                     Text("관계가 변했어요...", fontWeight = FontWeight.Bold)
                 }
@@ -466,12 +501,14 @@ private fun CharacterAnimationArea(
     isTyping: Boolean,
     avatarId: String = "",
     avatar: CharacterAvatar? = null,
-    affinityLevel: Int = 1
+    affinityLevel: Int = 1,
+    expressionUrls: Map<String, String>? = null,
+    isTalking: Boolean = false
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(160.dp)
+            .height(140.dp)
             .background(
                 Brush.verticalGradient(
                     when (affinityLevel) {
@@ -499,28 +536,7 @@ private fun CharacterAnimationArea(
         Column(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // 감정 이펙트
-            when (emotion) {
-                CharacterEmotion.LOVE -> Row(modifier = Modifier.offset(x = 50.dp, y = (-5).dp)) {
-                    Text("\u2764\uFE0F", fontSize = 20.sp)
-                    Text("\uD83D\uDC95", fontSize = 16.sp)
-                }
-                CharacterEmotion.HAPPY -> Row(modifier = Modifier.offset(x = 50.dp, y = (-5).dp)) {
-                    Text("\u2728", fontSize = 18.sp)
-                    Text("\uD83C\uDFB5", fontSize = 14.sp)
-                }
-                CharacterEmotion.ANGRY -> Row(modifier = Modifier.offset(x = 50.dp, y = (-8).dp)) {
-                    Text("\uD83D\uDCA2", fontSize = 16.sp)
-                    Text("\uD83D\uDD25", fontSize = 14.sp)
-                }
-                CharacterEmotion.SHY -> Text("\uD83D\uDCAB", fontSize = 16.sp, modifier = Modifier.offset(x = 50.dp, y = (-5).dp))
-                CharacterEmotion.SAD -> Text("\uD83D\uDCA7", fontSize = 16.sp, modifier = Modifier.offset(x = 50.dp, y = (-5).dp))
-                CharacterEmotion.SURPRISED -> Text("\u2757", fontSize = 18.sp, modifier = Modifier.offset(x = 50.dp, y = (-8).dp))
-                CharacterEmotion.PLAYFUL -> Text("\uD83C\uDFAD", fontSize = 16.sp, modifier = Modifier.offset(x = 50.dp, y = (-5).dp))
-                CharacterEmotion.WORRIED -> Text("\uD83D\uDCA6", fontSize = 16.sp, modifier = Modifier.offset(x = 50.dp, y = (-5).dp))
-                CharacterEmotion.TOUCHED -> Text("\uD83C\uDF1F", fontSize = 18.sp, modifier = Modifier.offset(x = 50.dp, y = (-5).dp))
-                else -> {}
-            }
+            // 감정 이펙트 (Lottie 애니메이션으로 표현)
 
             LiveCharacter(
                 emotion = emotion,
@@ -531,7 +547,9 @@ private fun CharacterAnimationArea(
                     CharacterFace(
                         avatarId = avatarId,
                         modifier = Modifier.size(if (avatarId.startsWith("img:")) 100.dp else 80.dp),
-                        emotion = emotion
+                        emotion = emotion,
+                        expressionUrls = expressionUrls,
+                        isTalking = isTalking
                     )
                 } else {
                     Text(
@@ -561,7 +579,14 @@ private fun CharacterAnimationArea(
 }
 
 @Composable
-private fun MessageBubble(msg: ChatMessage, avatarId: String = "", avatar: CharacterAvatar? = null) {
+private fun MessageBubble(
+    msg: ChatMessage,
+    avatarId: String = "",
+    avatar: CharacterAvatar? = null,
+    onRetry: ((Long) -> Unit)? = null,
+    feedback: String? = null,
+    onFeedback: ((Long, String) -> Unit)? = null
+) {
     val isFromUser = msg.isFromUser
     val isDark = isSystemInDarkTheme()
     val timeFormat = remember { SimpleDateFormat("a h:mm", Locale.KOREAN) }
@@ -580,7 +605,7 @@ private fun MessageBubble(msg: ChatMessage, avatarId: String = "", avatar: Chara
         ) {
             Surface(
                 shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp),
-                color = userBubbleColor,
+                color = if (msg.sendStatus == "FAILED") userBubbleColor.copy(alpha = 0.6f) else userBubbleColor,
                 shadowElevation = 1.dp,
                 modifier = Modifier.widthIn(max = 280.dp)
             ) {
@@ -591,12 +616,74 @@ private fun MessageBubble(msg: ChatMessage, avatarId: String = "", avatar: Chara
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
             }
-            Text(
-                text = timeText,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-            )
+            ) {
+                when (msg.sendStatus) {
+                    "PENDING" -> {
+                        val infiniteTransition = rememberInfiniteTransition(label = "pending")
+                        val alpha by infiniteTransition.animateFloat(
+                            initialValue = 0.3f,
+                            targetValue = 1f,
+                            animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+                            label = "pendingAlpha"
+                        )
+                        Text(
+                            text = "전송 대기 중",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
+                        )
+                    }
+                    "FAILED" -> {
+                        Icon(
+                            Icons.Default.ErrorOutline,
+                            contentDescription = "전송 실패",
+                            tint = AccentRed,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "전송 실패",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AccentRed
+                        )
+                        if (onRetry != null) {
+                            Spacer(Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = AccentRed.copy(alpha = 0.1f),
+                                modifier = Modifier.clickable { onRetry(msg.id) }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "재전송",
+                                        tint = AccentRed,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(Modifier.width(2.dp))
+                                    Text(
+                                        text = "재전송",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = AccentRed
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    else -> {
+                        Text(
+                            text = timeText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        )
+                    }
+                }
+            }
         }
     } else {
         // AI 메시지: 감정 표정 아바타 + 말풍선
@@ -669,12 +756,75 @@ private fun MessageBubble(msg: ChatMessage, avatarId: String = "", avatar: Chara
                     )
                 }
 
-                Text(
-                    text = timeText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                )
+                ) {
+                    Text(
+                        text = timeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    )
+
+                    // 피드백 아이콘 (500ms 후 fade-in)
+                    if (onFeedback != null) {
+                        var visible by remember { mutableStateOf(false) }
+                        LaunchedEffect(Unit) {
+                            kotlinx.coroutines.delay(500)
+                            visible = true
+                        }
+                        AnimatedVisibility(
+                            visible = visible,
+                            enter = fadeIn(tween(300))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(start = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                // 좋아요
+                                IconButton(
+                                    onClick = { onFeedback(msg.id, "thumbs_up") },
+                                    enabled = feedback == null,
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.ThumbUp,
+                                        contentDescription = "좋아요",
+                                        modifier = Modifier.size(14.dp).graphicsLayer {
+                                            alpha = when (feedback) {
+                                                "thumbs_up" -> 1f
+                                                "thumbs_down" -> 0.3f
+                                                else -> 0.5f
+                                            }
+                                        },
+                                        tint = if (feedback == "thumbs_up") MaterialTheme.colorScheme.primary
+                                               else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                // 아쉬워요
+                                IconButton(
+                                    onClick = { onFeedback(msg.id, "thumbs_down") },
+                                    enabled = feedback == null,
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.ThumbDown,
+                                        contentDescription = "아쉬워요",
+                                        modifier = Modifier.size(14.dp).graphicsLayer {
+                                            alpha = when (feedback) {
+                                                "thumbs_down" -> 1f
+                                                "thumbs_up" -> 0.3f
+                                                else -> 0.5f
+                                            }
+                                        },
+                                        tint = if (feedback == "thumbs_down") MaterialTheme.colorScheme.error
+                                               else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -708,7 +858,12 @@ private fun TypingBubble(avatarId: String = "", avatar: CharacterAvatar? = null)
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                Text(text = "\uD83E\uDD14", fontSize = 22.sp)
+                Icon(
+                    Icons.Default.MoreHoriz,
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
@@ -755,45 +910,64 @@ private fun ChatInputBar(
     onInputChange: (String) -> Unit,
     onSend: () -> Unit
 ) {
-    Surface(tonalElevation = 2.dp, color = MaterialTheme.colorScheme.surface) {
+    val sendEnabled = input.isNotBlank()
+    val sendScale by animateFloatAsState(
+        targetValue = if (sendEnabled) 1f else 0.85f,
+        label = "sendScale"
+    )
+
+    Surface(
+        tonalElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 4.dp
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedTextField(
                 value = input,
                 onValueChange = onInputChange,
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("메시지를 입력하세요", color = MaterialTheme.colorScheme.onSurfaceVariant) },
-                singleLine = true,
+                placeholder = {
+                    Text(
+                        "메시지를 입력하세요",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                singleLine = false,
+                maxLines = 4,
                 shape = RoundedCornerShape(24.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    unfocusedBorderColor = Color.Transparent,
                     focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
                 ),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { onSend() })
+                keyboardActions = KeyboardActions(onSend = { if (sendEnabled) onSend() })
             )
             Spacer(Modifier.width(8.dp))
             IconButton(
-                onClick = onSend,
+                onClick = { if (sendEnabled) onSend() },
+                enabled = sendEnabled,
                 modifier = Modifier
                     .size(48.dp)
+                    .graphicsLayer { scaleX = sendScale; scaleY = sendScale }
                     .clip(CircleShape)
                     .background(
-                        if (input.isNotBlank()) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outlineVariant
+                        if (sendEnabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                     )
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.Send,
                     contentDescription = "전송",
-                    tint = if (input.isNotBlank()) MaterialTheme.colorScheme.onPrimary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    tint = if (sendEnabled) MaterialTheme.colorScheme.onPrimary
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -802,16 +976,16 @@ private fun ChatInputBar(
 }
 
 private fun emotionEmoji(emotion: CharacterEmotion): String = when (emotion) {
-    CharacterEmotion.NEUTRAL -> "\uD83D\uDE0A"
-    CharacterEmotion.HAPPY -> "\uD83D\uDE04"
-    CharacterEmotion.SHY -> "\uD83D\uDE33"
-    CharacterEmotion.SAD -> "\uD83D\uDE22"
-    CharacterEmotion.ANGRY -> "\uD83D\uDE24"
-    CharacterEmotion.SURPRISED -> "\uD83D\uDE32"
-    CharacterEmotion.LOVE -> "\uD83E\uDD70"
-    CharacterEmotion.PLAYFUL -> "\uD83D\uDE1C"
-    CharacterEmotion.WORRIED -> "\uD83D\uDE1F"
-    CharacterEmotion.TOUCHED -> "\uD83E\uDD79"
+    CharacterEmotion.NEUTRAL -> "~"
+    CharacterEmotion.HAPPY -> "^^"
+    CharacterEmotion.SHY -> "//"
+    CharacterEmotion.SAD -> "ㅠ"
+    CharacterEmotion.ANGRY -> "!!"
+    CharacterEmotion.SURPRISED -> "?!"
+    CharacterEmotion.LOVE -> "<3"
+    CharacterEmotion.PLAYFUL -> ":P"
+    CharacterEmotion.WORRIED -> "..."
+    CharacterEmotion.TOUCHED -> "T_T"
 }
 
 private fun emotionBubbleLight(emotion: CharacterEmotion): Color = when (emotion) {

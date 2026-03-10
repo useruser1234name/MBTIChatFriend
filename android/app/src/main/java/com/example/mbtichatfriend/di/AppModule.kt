@@ -7,6 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.mbtichatfriend.data.local.AppDatabase
 import com.example.mbtichatfriend.data.local.CharacterDao
 import com.example.mbtichatfriend.data.local.DiaryDao
+import com.example.mbtichatfriend.data.local.FeedbackDao
 import com.example.mbtichatfriend.data.local.MemoryDao
 import com.example.mbtichatfriend.data.local.MessageDao
 import com.example.mbtichatfriend.BuildConfig
@@ -41,7 +42,7 @@ object AppModule {
             AppDatabase::class.java,
             "mbti_chat_db"
         )
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6, AppDatabase.MIGRATION_6_7)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     super.onCreate(db)
@@ -79,6 +80,9 @@ object AppModule {
 
     @Provides
     fun provideMemoryDao(db: AppDatabase): MemoryDao = db.memoryDao()
+
+    @Provides
+    fun provideFeedbackDao(db: AppDatabase): FeedbackDao = db.feedbackDao()
 
     @Provides
     @Singleton

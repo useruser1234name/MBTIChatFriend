@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -93,14 +95,62 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 프로필 섹션
-            SectionTitle("프로필")
-            SettingsItem(
-                icon = Icons.Default.Person,
-                title = "닉네임",
-                subtitle = nickname,
-                onClick = { showNicknameDialog = true }
-            )
+            // 프로필 섹션 - 아바타 포함
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 유저 아바타
+                    androidx.compose.material3.Surface(
+                        modifier = Modifier.size(56.dp),
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                    ) {
+                        androidx.compose.foundation.layout.Box(
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = nickname.take(1).uppercase(),
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = nickname.ifEmpty { "사용자" },
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = when (authProvider) {
+                                "google" -> "Google 계정"
+                                else -> "비회원"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = { showNicknameDialog = true }) {
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = "닉네임 수정",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
 
             Spacer(Modifier.height(8.dp))
 

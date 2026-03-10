@@ -157,6 +157,7 @@ fun HomeScreen(
         if (characters.isEmpty()) {
             EmptyState(
                 onGallery = onGallery,
+                onCreateCharacter = onCreateCharacter,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
@@ -197,8 +198,8 @@ fun HomeScreen(
             sheetState = imageGeneratorSheetState,
             chatApi = chatApi,
             onDismiss = { showImageGenerator = false },
-            onCharacterCreated = { name, mbti, speechStyle, relationship, avatarId ->
-                viewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId) { characterId ->
+            onCharacterCreated = { name, mbti, speechStyle, relationship, avatarId, revisedPrompt ->
+                viewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId, revisedPrompt) { characterId ->
                     showImageGenerator = false
                     onCharacterClick(characterId)
                 }
@@ -279,6 +280,29 @@ private fun CharacterCard(
                             )
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     )
+                    Spacer(Modifier.width(6.dp))
+                    // 호감도 레벨 표시
+                    val levelTag = when (character.affinityLevel) {
+                        2 -> "Lv.2"
+                        3 -> "Lv.3"
+                        4 -> "Lv.4"
+                        5 -> "Lv.5"
+                        else -> null
+                    }
+                    levelTag?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = affinityColor,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .background(
+                                    affinityColor.copy(alpha = 0.15f),
+                                    RoundedCornerShape(4.dp)
+                                )
+                                .padding(horizontal = 5.dp, vertical = 1.dp)
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(4.dp))
@@ -308,7 +332,7 @@ private fun CharacterCard(
                         else -> "낯선 사이"
                     }
                     Text(
-                        text = "$levelName \u2764 ${character.affinityScore}/100",
+                        text = "$levelName | ${character.affinityScore}/100",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -361,8 +385,6 @@ private fun GalleryBannerCard(onClick: () -> Unit) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("✨", fontSize = 22.sp)
-            Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "MBTI 캐릭터 갤러리",
@@ -400,8 +422,6 @@ private fun ImageGeneratorBannerCard(onClick: () -> Unit) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("\uD83C\uDFA8", fontSize = 22.sp)
-            Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "이상형 만들기",
@@ -425,33 +445,53 @@ private fun ImageGeneratorBannerCard(onClick: () -> Unit) {
 }
 
 @Composable
-private fun EmptyState(onGallery: () -> Unit = {}, modifier: Modifier = Modifier) {
+private fun EmptyState(onGallery: () -> Unit = {}, onCreateCharacter: () -> Unit = {}, modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier,
+        modifier = modifier.padding(horizontal = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text(text = "\uD83C\uDF1F", fontSize = 64.sp)
-        Spacer(Modifier.height(16.dp))
+        // Lottie 빈 채팅 애니메이션
+        com.example.mbtichatfriend.ui.components.LottieOneShot(
+            assetName = "lottie/empty_chat.json",
+            modifier = Modifier.size(160.dp),
+            iterations = Int.MAX_VALUE
+        )
+
+        Spacer(Modifier.height(20.dp))
+
         Text(
-            text = "아직 캐릭터가 없어요",
-            style = MaterialTheme.typography.titleMedium,
+            text = "아직 친구가 없어요",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onBackground
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "+ 버튼을 눌러 직접 만들거나",
+            text = "16가지 MBTI 성격의 캐릭터 중\n마음에 드는 친구를 골라보세요!",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
-        Text(
-            text = "갤러리에서 MBTI 친구를 골라보세요!",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.height(24.dp))
-        FilledTonalButton(onClick = onGallery, shape = RoundedCornerShape(14.dp)) {
-            Text("✨ 갤러리에서 캐릭터 고르기")
+        Spacer(Modifier.height(28.dp))
+        androidx.compose.material3.Button(
+            onClick = onGallery,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(52.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("갤러리에서 캐릭터 고르기", style = MaterialTheme.typography.titleSmall)
+        }
+        Spacer(Modifier.height(12.dp))
+        FilledTonalButton(
+            onClick = onCreateCharacter,
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("+ 직접 만들기", style = MaterialTheme.typography.titleSmall)
         }
     }
 }

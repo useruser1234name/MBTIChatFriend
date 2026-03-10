@@ -6,8 +6,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [MessageEntity::class, CharacterEntity::class, DiaryEntity::class, MemoryEntity::class],
-    version = 4,
+    entities = [MessageEntity::class, CharacterEntity::class, DiaryEntity::class, MemoryEntity::class, FeedbackEntity::class],
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -15,6 +15,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun characterDao(): CharacterDao
     abstract fun diaryDao(): DiaryDao
     abstract fun memoryDao(): MemoryDao
+    abstract fun feedbackDao(): FeedbackDao
 
     companion object {
         /** v1 → v2: characters 테이블에 avatarId 컬럼 추가 */
@@ -51,6 +52,38 @@ abstract class AppDatabase : RoomDatabase() {
                         characterId INTEGER NOT NULL,
                         key TEXT NOT NULL,
                         value TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL
+                    )"""
+                )
+            }
+        }
+
+        /** v4 → v5: messages 테이블에 sendStatus, retryCount 컬럼 추가 */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN sendStatus TEXT NOT NULL DEFAULT 'SENT'")
+                db.execSQL("ALTER TABLE messages ADD COLUMN retryCount INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** v5 → v6: characters 테이블에 expressionSet, expressionSetReady 컬럼 추가 */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE characters ADD COLUMN expressionSet TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE characters ADD COLUMN expressionSetReady INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /** v6 → v7: feedback 테이블 추가 */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS feedback (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        messageId INTEGER NOT NULL,
+                        characterId INTEGER NOT NULL,
+                        feedbackType TEXT NOT NULL,
+                        synced INTEGER NOT NULL DEFAULT 0,
                         createdAt INTEGER NOT NULL
                     )"""
                 )

@@ -6,6 +6,7 @@ import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.data.local.MessageDao
 import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.ChatApi
+import com.example.mbtichatfriend.data.remote.ImageSetRequest
 import com.example.mbtichatfriend.data.repository.CharacterRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,17 +46,14 @@ class HomeViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            characters.collect { chars ->
-                val map = mutableMapOf<Long, LastMessageInfo>()
-                chars.forEach { ch ->
-                    val msg = messageDao.getLastMessage(ch.id)
-                    if (msg != null) {
-                        map[ch.id] = LastMessageInfo(
-                            text = msg.text,
-                            timestamp = msg.createdAt,
-                            isFromUser = msg.isFromUser
-                        )
-                    }
+            characters.collect { _ ->
+                val lastMsgs = messageDao.getLastMessagePerCharacter()
+                val map = lastMsgs.associate { msg ->
+                    msg.characterId to LastMessageInfo(
+                        text = msg.text,
+                        timestamp = msg.createdAt,
+                        isFromUser = msg.isFromUser
+                    )
                 }
                 _lastMessages.value = map
             }
@@ -68,10 +66,30 @@ class HomeViewModel @Inject constructor(
         speechStyle: String,
         relationship: String,
         avatarId: String,
+        revisedPrompt: String? = null,
         onCreated: (Long) -> Unit
     ) {
         viewModelScope.launch {
             val id = characterRepo.create(name, mbti, speechStyle, relationship, avatarId)
+
+            // img: 캐릭터이고 revisedPrompt가 있으면 표정 세트 백그라운드 생성 시작
+            if (avatarId.startsWith("img:") && revisedPrompt != null) {
+                launch {
+                    try {
+                        val response = chatApi.generateImageSet(
+                            ImageSetRequest(
+                                basePrompt = revisedPrompt,
+                                characterId = id.toString()
+                            )
+                        )
+                        // taskId를 SharedPreferences에 저장하여 ChatViewModel에서 폴링
+                        prefs.setExpressionSetTaskId(id, response.taskId)
+                    } catch (e: Exception) {
+                        android.util.Log.w("HomeViewModel", "Expression set generation start failed", e)
+                    }
+                }
+            }
+
             onCreated(id)
         }
     }

@@ -27,6 +27,9 @@ interface CharacterDao {
     @Query("UPDATE characters SET affinityScore = :score, totalMessages = totalMessages + 1 WHERE id = :id")
     suspend fun updateAffinity(id: Long, score: Int)
 
+    @Query("UPDATE characters SET expressionSet = :json, expressionSetReady = 1 WHERE id = :id")
+    suspend fun updateExpressionSet(id: Long, json: String)
+
     @Query("DELETE FROM characters WHERE id = :id")
     suspend fun deleteById(id: Long)
 }

@@ -31,6 +31,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.mbtichatfriend.model.CharacterEmotion
+import com.example.mbtichatfriend.ui.components.EmotionLottieBackground
 
 private const val AGSL_WAVE_SHADER = """
     uniform float2 iResolution;
@@ -178,6 +179,10 @@ fun LiveCharacter(
             ),
         contentAlignment = Alignment.Center
     ) {
+        EmotionLottieBackground(
+            emotion = emotion,
+            modifier = Modifier.size(characterSize)
+        )
         content()
     }
 }

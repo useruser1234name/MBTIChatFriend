@@ -39,9 +39,9 @@ fun GenderScreen(
             Gender.entries.forEach { gender ->
                 val isSelected = viewModel.gender == gender
                 val label = when (gender) {
-                    Gender.MALE -> "\uD83D\uDE4B\u200D\u2642\uFE0F 남성"
-                    Gender.FEMALE -> "\uD83D\uDE4B\u200D\u2640\uFE0F 여성"
-                    Gender.OTHER -> "\uD83C\uDF1F 기타"
+                    Gender.MALE -> "남성"
+                    Gender.FEMALE -> "여성"
+                    Gender.OTHER -> "기타"
                 }
                 SelectionButton(
                     text = label,

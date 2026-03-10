@@ -3,6 +3,7 @@ package com.example.mbtichatfriend.ui.voicecall
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -59,13 +60,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.airbnb.lottie.compose.LottieAnimation
-import com.airbnb.lottie.compose.LottieCompositionSpec
-import com.airbnb.lottie.compose.LottieConstants
-import com.airbnb.lottie.compose.rememberLottieComposition
 import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.model.CharacterAvatar
 import com.example.mbtichatfriend.ui.components.CharacterFace
+import com.example.mbtichatfriend.ui.components.EmotionLottieBackground
 import com.example.mbtichatfriend.model.CharacterEmotion
 import android.Manifest
 
@@ -85,26 +83,38 @@ fun VoiceCallScreen(
     val avatarId      = character?.avatarId ?: ""
     val affinityLevel = character?.affinityLevel ?: 1
 
-    // 배경 그라디언트 색 (아바타 컬러 기반)
+    // 배경 그라디언트 색 (아바타 컬러 기반) - 부드러운 전환
     val baseColor = Color(AvatarConfig.bgColorLong(avatarId))
+
+    val bgAlpha by animateFloatAsState(
+        targetValue = when (callState) {
+            VoiceCallState.SPEAKING -> 0.55f
+            VoiceCallState.LISTENING -> 0.4f
+            VoiceCallState.PROCESSING -> 0.3f
+            else -> 0.25f
+        },
+        animationSpec = tween(600),
+        label = "bgAlpha"
+    )
+
     val bgGradient = when (callState) {
         VoiceCallState.SPEAKING -> listOf(
-            baseColor.copy(alpha = 0.55f),
-            baseColor.copy(alpha = 0.25f),
+            baseColor.copy(alpha = bgAlpha),
+            baseColor.copy(alpha = bgAlpha * 0.45f),
             Color(0xFF1A1A2E)
         )
         VoiceCallState.LISTENING -> listOf(
-            Color(0xFF1565C0).copy(alpha = 0.4f),
-            Color(0xFF0D47A1).copy(alpha = 0.2f),
+            Color(0xFF1565C0).copy(alpha = bgAlpha),
+            Color(0xFF0D47A1).copy(alpha = bgAlpha * 0.5f),
             Color(0xFF1A1A2E)
         )
         VoiceCallState.PROCESSING -> listOf(
-            Color(0xFF6A1B9A).copy(alpha = 0.3f),
-            Color(0xFF4A148C).copy(alpha = 0.15f),
+            Color(0xFF6A1B9A).copy(alpha = bgAlpha),
+            Color(0xFF4A148C).copy(alpha = bgAlpha * 0.5f),
             Color(0xFF1A1A2E)
         )
         else -> listOf(
-            baseColor.copy(alpha = 0.25f),
+            baseColor.copy(alpha = bgAlpha),
             Color(0xFF1A1A2E).copy(alpha = 0.8f),
             Color(0xFF1A1A2E)
         )
@@ -135,10 +145,9 @@ fun VoiceCallScreen(
     // 레벨업 다이얼로그
     if (levelUpEvent != null) {
         val lvl = levelUpEvent!!
-        val emoji = when (lvl) { 2 -> "👋"; 3 -> "😊"; 4 -> "💖"; 5 -> "💕"; else -> "✨" }
         AlertDialog(
             onDismissRequest = { viewModel.dismissLevelUp() },
-            title = { Text("관계가 깊어졌어요! $emoji") },
+            title = { Text("관계가 깊어졌어요!") },
             text = { Text("${character?.name}와(과)의 호감도가 올랐어요\n레벨 $lvl 달성!") },
             confirmButton = {
                 TextButton(onClick = { viewModel.dismissLevelUp() }) { Text("좋아요!") }
@@ -178,11 +187,27 @@ fun VoiceCallScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = callStateLabel(callState),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color.White.copy(alpha = 0.7f)
+                val stateIndicatorColor by animateColorAsState(
+                    targetValue = when (callState) {
+                        VoiceCallState.LISTENING -> Color(0xFF4FC3F7)
+                        VoiceCallState.SPEAKING -> Color(0xFF81C784)
+                        VoiceCallState.PROCESSING -> Color(0xFFCE93D8)
+                        else -> Color.White.copy(alpha = 0.7f)
+                    },
+                    animationSpec = tween(400),
+                    label = "stateColor"
                 )
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = stateIndicatorColor.copy(alpha = 0.2f)
+                ) {
+                    Text(
+                        text = callStateLabel(callState),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = stateIndicatorColor,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
                 Text(
                     text = character?.name ?: "",
                     style = MaterialTheme.typography.titleMedium,
@@ -190,7 +215,7 @@ fun VoiceCallScreen(
                     color = Color.White
                 )
                 Text(
-                    text = affinityEmoji(affinityLevel),
+                    text = affinityLabel(affinityLevel),
                     fontSize = 20.sp
                 )
             }
@@ -277,14 +302,6 @@ private fun VoiceCharacterArea(
     isSpeaking: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val lottieAsset = when (emotion) {
-        CharacterEmotion.HAPPY, CharacterEmotion.SURPRISED, CharacterEmotion.PLAYFUL -> "lottie/happy.json"
-        CharacterEmotion.LOVE, CharacterEmotion.SHY, CharacterEmotion.TOUCHED -> "lottie/love.json"
-        CharacterEmotion.SAD, CharacterEmotion.WORRIED -> "lottie/sad.json"
-        CharacterEmotion.ANGRY -> "lottie/angry.json"
-        else -> "lottie/idle.json"
-    }
-    val composition by rememberLottieComposition(LottieCompositionSpec.Asset(lottieAsset))
     val infiniteTransition = rememberInfiniteTransition(label = "voice_char")
 
     // 말할 때 약간 강조되는 bounce
@@ -327,13 +344,10 @@ private fun VoiceCharacterArea(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier.scale(emotionScale)
             ) {
-                if (composition != null) {
-                    LottieAnimation(
-                        composition = composition,
-                        iterations = LottieConstants.IterateForever,
-                        modifier = Modifier.size(160.dp)
-                    )
-                }
+                EmotionLottieBackground(
+                    emotion = emotion,
+                    modifier = Modifier.size(160.dp)
+                )
                 if (avatarId.startsWith("v2:")) {
                     CharacterFace(avatarId = avatarId, modifier = Modifier.size(90.dp))
                 } else {
@@ -356,15 +370,8 @@ private fun VoiceCharacterArea(
 
 @Composable
 private fun EmotionEffectRow(emotion: CharacterEmotion) {
-    when (emotion) {
-        CharacterEmotion.LOVE    -> Row { Text("❤️", fontSize = 22.sp); Text("💕", fontSize = 18.sp) }
-        CharacterEmotion.HAPPY   -> Row { Text("✨", fontSize = 20.sp); Text("🎵", fontSize = 16.sp) }
-        CharacterEmotion.ANGRY   -> Row { Text("💢", fontSize = 18.sp); Text("🔥", fontSize = 16.sp) }
-        CharacterEmotion.SHY     -> Text("💫", fontSize = 18.sp)
-        CharacterEmotion.SAD     -> Text("💧", fontSize = 18.sp)
-        CharacterEmotion.SURPRISED -> Text("‼️", fontSize = 20.sp)
-        else -> Spacer(Modifier.height(24.dp))
-    }
+    // 감정 이펙트는 Lottie 배경으로 표현
+    Spacer(Modifier.height(24.dp))
 }
 
 /** 음성 파형 애니메이션 바 */
@@ -595,11 +602,11 @@ private fun VoiceControlBar(
 
 private fun callStateLabel(state: VoiceCallState) = when (state) {
     VoiceCallState.IDLE       -> "대기 중"
-    VoiceCallState.LISTENING  -> "🔴 녹음 중"
-    VoiceCallState.PROCESSING -> "⏳ 처리 중"
-    VoiceCallState.SPEAKING   -> "🔊 재생 중"
+    VoiceCallState.LISTENING  -> "녹음 중"
+    VoiceCallState.PROCESSING -> "처리 중"
+    VoiceCallState.SPEAKING   -> "재생 중"
 }
 
-private fun affinityEmoji(level: Int) = when (level) {
-    1 -> "🤝"; 2 -> "👋"; 3 -> "😊"; 4 -> "💖"; 5 -> "💕"; else -> "🤝"
+private fun affinityLabel(level: Int) = when (level) {
+    1 -> "Lv.1"; 2 -> "Lv.2"; 3 -> "Lv.3"; 4 -> "Lv.4"; 5 -> "Lv.5"; else -> "Lv.1"
 }
