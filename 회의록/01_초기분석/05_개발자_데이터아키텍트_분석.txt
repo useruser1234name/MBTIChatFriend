@@ -1,0 +1,214 @@
+# MBTIChatFriend 시니어 개발자 & 데이터 아키텍트 분석 보고서
+
+분석 대상: Android (Kotlin/Compose, Hilt, Room) + FastAPI (Python, PostgreSQL, ChromaDB)
+분석 일자: 2026-03-10
+
+---
+
+## 1. 코드 품질 (SOLID, DRY, 복잡도)
+
+### Android
+
+**(1) Single Responsibility 위반 - ChatViewModel (심각도: HIGH)**
+- 544줄, 11개 의존성으로 과도한 책임 보유
+  - 메시지 송수신 (send, sendWithSse, fallbackToRest, retrySend)
+  - 오프라인 큐 처리 (init 블록의 네트워크 복구 로직)
+  - 표정 세트 생성/폴링 (startExpressionSetGeneration, pollExpressionSetStatus)
+  - 호감도 변화 처리 (handleAffinityDelta)
+  - 피드백 관리, 기억 추출 트리거
+- 권장: SendMessageUseCase, ExpressionSetManager, AffinityManager로 분리
+
+**(2) 코드 중복 - DRY 위반 (심각도: HIGH)**
+- 메시지 전송 준비 코드가 3곳에서 반복: send(), init 블록의 flushPendingMessages, retrySend()
+  - 동일 패턴: characterRepo.getById -> prefs.nickname.first() -> prefs.userMbti.first() -> remoteConfig 히스토리 -> messages.value.takeLast -> memoryRepo.loadMemories
+- 권장: prepareChatContext() 메서드로 추출
+
+**(3) ChatRequest 파라미터 과다 (심각도: MEDIUM)**
+- ChatRepository.streamMessage()과 sendMessage() 모두 11개 파라미터 시그니처
+- 권장: ChatContext data class 도입
+
+**(4) 감정 파싱 중복 (심각도: LOW)**
+- CharacterEmotion.valueOf() try-catch가 ChatViewModel 내 4곳에서 반복
+- 권장: CharacterEmotion.safeValueOf() 확장 함수
+
+### Server
+
+**(5) chat_service.py 과도한 크기 (심각도: HIGH)**
+- 1015줄, generate_reply() 단독 ~200줄
+- 호감도 계산, LLM 호출, 메모리 관리, 품질 체크가 한 함수에 혼재
+- _parse_reply()에 JSON 파싱 4단계 중첩
+- 권장: AffinityCalculator, LLMChatClient, ResponseParser로 분리
+
+**(6) Open/Closed 원칙 위반 (심각도: MEDIUM)**
+- 호감도 키워드 딕셔너리(_POSITIVE_CATEGORIES, _NEGATIVE_CATEGORIES)가 하드코딩
+- 권장: 외부 설정 파일(JSON/YAML)로 전환
+
+---
+
+## 2. 에러 핸들링
+
+### Android
+
+**(1) 무차별 예외 무시 (심각도: CRITICAL)**
+- catch (_: Exception) { false } (init 블록 181줄), catch (_: Exception) (retrySend 457줄, pollExpressionSetStatus 526줄) -- 모든 예외 조용히 삼킴, 로깅 없음
+- 권장: 최소 Log.w(), Crashlytics non-fatal 전송
+
+**(2) REST 폴백 가짜 성공 (심각도: HIGH)**
+- ChatRepository.sendMessage() 118-129줄: API 실패 시 하드코딩 응답("음... 잠깐 생각할게요!") 반환, 사용자가 에러인지 구분 불가, affinityDelta = 0으로 호감도 왜곡
+- 권장: Result<ChatResult> 패턴, UI 에러 상태 구분
+
+**(3) SSE 에러 후 상태 불일치 (심각도: HIGH)**
+- sendWithSse() catch에서 fallbackToRest() 호출 후 sseSucceeded = true 설정, 그러나 fallbackToRest가 내부에서 또 실패하면 isTyping/isTalking 미해제 가능
+
+### Server
+
+**(4) 콘텐츠 필터 비활성 (심각도: CRITICAL)**
+- content_filter.py: check_content()와 get_safety_system_prompt() 모두 코드 주석으로 비활성
+- chat_service.py 359-365줄, 510-519줄에도 TODO로 비활성
+- 프로덕션 배포 시 보안 사고 위험
+- 권장: CONTENT_FILTER_ENABLED 환경변수 토글
+
+**(5) asyncio.create_task 미추적 (심각도: MEDIUM)**
+- chat_service.py 527줄: fire-and-forget 태스크, 예외 미수집
+- 권장: task.add_done_callback()으로 예외 로깅
+
+---
+
+## 3. 데이터 모델 설계
+
+### Room DB (Android)
+
+**(1) 엔티티 구조:** CharacterEntity 합리적 (affinityLevel computed property). MessageEntity.sendStatus가 String -- enum으로 타입 안전성 확보 권장. FeedbackEntity의 오프라인-우선 동기화(synced 플래그) 잘 설계됨.
+
+**(2) 인덱스 부재 (심각도: HIGH)**
+- messages 테이블: (characterId, createdAt) 복합 인덱스 없음 -- 데이터 증가 시 성능 저하
+- feedback 테이블: messageId 인덱스 없음
+
+**(3) Foreign Key 미사용 (심각도: MEDIUM)**
+- MessageEntity.characterId 등이 FK 없이 사용, 캐릭터 삭제 시 수동 삭제 필요, 트랜잭션 미보호로 부분 삭제 위험
+
+**(4) 마이그레이션:** v1->v7까지 잘 관리됨. 스키마 JSON 파일(7.json) untracked.
+
+### PostgreSQL (Server)
+
+**(5) 스키마 이슈:**
+- story_state: room_id가 PK, 동일 room에 다른 character_id 지원 불가 (복합키 필요 가능)
+- metric_events: JSONB payload에 payload->>'quality_score' 캐스팅 반복
+- response_feedback.message_id가 TEXT (Android는 Long) -- 타입 불일치
+
+### ChromaDB
+
+**(6) 컬렉션 수 폭발 위험 (심각도: MEDIUM)**
+- 캐릭터별 2개 컬렉션(char_, ep_), list_collections() 매번 호출로 존재 확인 -- 캐시 권장
+
+---
+
+## 4. API 설계
+
+- 버전관리(/api/v1/) 적절
+- 동사 기반 URL (/chat/send, /diary/generate) -- REST 관습(명사)에서 벗어남
+- Rate limiting 잘 적용 (30/min 채팅, 10/min 다이어리, 5/min 이미지)
+- Pydantic 검증 우수 (Field, custom validator, XSS 기본 방어)
+- 에러 응답 비일관: HTTPException vs 200+에러필드 혼재 -- RFC 7807 통일 권장
+- SSE는 "전체 생성 후 순차 전송" 방식 -- 진정한 스트리밍 아님
+
+---
+
+## 5. 비동기 처리
+
+### Android
+- viewModelScope 활용 양호, Flow WhileSubscribed(5000) 적절
+- send() 동시 호출 보호 없음 (심각도: HIGH) -- race condition 가능
+
+### Server
+- **PostgreSQL 동기 호출이 async 엔드포인트에서 이벤트 루프 블로킹 (심각도: HIGH)**
+  - psycopg.connect() (동기), 매 호출마다 새 연결
+  - 권장: psycopg async 또는 asyncpg + 커넥션 풀
+- **커넥션 풀 미사용 (심각도: HIGH)**: 동시 요청 시 "too many connections" 위험
+
+---
+
+## 6. 캐싱 전략
+
+**(1) 인메모리 캐시 동시성 문제 (심각도: CRITICAL)**
+- memory_service.py 전역 Dict: 멀티 워커 시 프로세스별 독립 캐시, read-modify-write race condition
+- 권장: asyncio.Lock 또는 Redis
+
+**(2) 캐시 무효화 전략 부재 (심각도: HIGH)**
+- "이미 캐시에 있으면 스킵", TTL 없음, DB 직접 수정 반영 안 됨
+
+**(3) ChromaDB PersistentClient 멀티 워커 충돌 (심각도: MEDIUM)**
+- 파일 잠금 충돌 가능 -- HTTP 모드 전환 권장
+
+---
+
+## 7. 테스트 가능성
+
+**(1) 테스트 코드: 사실상 없음 (심각도: CRITICAL)**
+- Android: ExampleUnitTest.kt, ExampleInstrumentedTest.kt만 (기본 생성 파일)
+- Server: 프로젝트 테스트 파일 없음
+
+**(2) 테스트 용이성:**
+- 장점: Hilt DI, Repository 패턴, ChatApi 인터페이스
+- 단점: ChatViewModel 11개 의존성, SseClient 직접 OkHttp 의존, Server 전역 상태
+
+**(3) 우선 테스트 대상:** calculate_affinity_delta(), _parse_reply() (순수 함수), OfflineMessageQueue, content_filter.check_content()
+
+---
+
+## 8. 성능 이슈
+
+| 이슈 | 심각도 |
+|------|--------|
+| PostgreSQL 매 쿼리 커넥션 생성 | CRITICAL |
+| 메시지 전체 로드 후 takeLast | HIGH |
+| handleAffinityDelta N+1 쿼리 (read+update+read) | HIGH |
+| 단일 메시지당 최대 5회 LLM 호출 | MEDIUM |
+| ChromaDB list_collections() 반복 | MEDIUM |
+
+---
+
+## 9. 데이터 일관성
+
+- **호감도 클라이언트-서버 분리 (HIGH)**: 서버에 authoritative 상태 없음, 앱 재설치 시 유실
+- **메시지 ID 타입 불일치**: Android Long vs Server TEXT
+- **오프라인 메시지 순서 미보장**: 복구 시 타임라인 꼬임 가능
+- **캐릭터 삭제 불완전**: Diary, Memory, Feedback, 서버측 데이터, ChromaDB 미정리
+- **room_id 닉네임 변경 시 단절**: "{uid}:{character}:{nickname}" 패턴
+
+---
+
+## 10. 코드 개선 방안 (리팩토링 우선순위)
+
+### P0 - 즉시 수정
+1. **PostgreSQL 커넥션 풀** (1일)
+2. **콘텐츠 필터 환경변수 토글** (2시간)
+3. **인메모리 캐시 동시성 보호** (1일)
+
+### P1 - 1주 내
+4. **ChatViewModel 책임 분리** (2일)
+5. **Room DB 인덱스 추가** (2시간)
+6. **PostgreSQL 비동기 전환** (2일)
+7. **에러 핸들링 체계화** (2일)
+
+### P2 - 2주 내
+8. **테스트 코드 작성** (3일)
+9. **LLM 호출 최적화** (2일)
+10. **캐릭터 삭제 완전성** (1일)
+
+### P3 - 장기
+11. **서버 호감도 정합성** (5일)
+12. **메시지 페이징** (3일)
+13. **ChromaDB HTTP 모드** (1일)
+
+---
+
+## 핵심 위험 요소 Top 5
+
+1. PostgreSQL 커넥션 풀 미사용 -- 동시 접속 증가 시 서버 장애
+2. 인메모리 캐시 동시성 미보호 -- 데이터 유실/불일치
+3. 콘텐츠 필터 비활성화 -- 프로덕션 보안 사고 위험
+4. ChatViewModel 과도한 책임 + 코드 중복 -- 유지보수성 저하
+5. 단일 메시지당 최대 5회 LLM 호출 -- 비용/지연 시간 문제
+
+전반적으로 기능 구현은 상당히 성숙하나, 프로덕션 운영을 위한 안정성/성능/테스트 인프라가 부족한 상태이다.

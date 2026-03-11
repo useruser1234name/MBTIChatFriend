@@ -109,3 +109,52 @@ def send_push_notification(
     except Exception as e:
         logger.error(f"Failed to send push notification: {e}")
         return False
+
+
+async def send_notification_with_record(
+    user_id: str,
+    title: str,
+    body: str,
+    notification_type: str = "general",
+    data: Optional[dict] = None,
+    deep_link: Optional[str] = None,
+) -> bool:
+    """FCM 푸시 알림 발송 + notifications 테이블에 동시 INSERT.
+
+    Args:
+        user_id: 알림 수신자 user_id
+        title: 알림 제목
+        body: 알림 본문
+        notification_type: notifications.type 컬럼에 저장될 유형 문자열
+        data: FCM data payload (선택)
+        deep_link: 앱 내 딥링크 URL (선택, 예: "mbtichat://community/123")
+
+    Returns:
+        FCM 발송 성공 여부 (DB 기록은 발송 여부와 무관하게 시도)
+    """
+    from .postgres_async import get_async_db
+
+    # DB에 알림 기록
+    try:
+        db = get_async_db()
+        await db.execute(
+            """
+            INSERT INTO notifications (user_id, type, title, body, deep_link)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            user_id, notification_type, title, body, deep_link,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to record notification in DB for user {user_id[:8]}...: {e}")
+
+    # FCM 발송 (토큰이 없으면 skip)
+    token = get_token(user_id)
+    if not token:
+        return False
+
+    # deep_link를 FCM data 페이로드에 포함
+    fcm_data = dict(data) if data else {}
+    if deep_link:
+        fcm_data["deep_link"] = deep_link
+
+    return send_push_notification(token, title=title, body=body, data=fcm_data or None)

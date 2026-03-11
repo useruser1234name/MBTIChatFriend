@@ -35,6 +35,23 @@ class UserPreferences @Inject constructor(
         val FCM_TOKEN = stringPreferencesKey("fcm_token")
         val FCM_TOKEN_SYNCED = booleanPreferencesKey("fcm_token_synced")
         val OPENAI_API_KEY = stringPreferencesKey("openai_api_key")
+        val OPEN_BETA_BANNER_DISMISSED = booleanPreferencesKey("open_beta_banner_dismissed")
+        val DAU_10K_BANNER_DISMISSED = booleanPreferencesKey("dau_10k_milestone_shown")
+        val COMMUNITY_GUIDELINE_SHOWN = booleanPreferencesKey("community_guideline_shown")
+        val LORA8_BANNER_SHOWN = booleanPreferencesKey("lora8_banner_shown")
+        val LORA9_BANNER_SHOWN = booleanPreferencesKey("lora9_banner_shown")
+        // 33차 스프린트: ESFP 10종 완성
+        val LORA10_BANNER_SHOWN = booleanPreferencesKey("lora10_banner_shown")
+        // 34차 스프린트: ENTJ 11종, ISTJ 12종 완성
+        val LORA11_BANNER_SHOWN = booleanPreferencesKey("lora11_banner_shown")
+        val LORA12_BANNER_SHOWN = booleanPreferencesKey("lora12_banner_shown")
+        // 35차 스프린트: ESTP 13종 완성
+        val LORA13_BANNER_SHOWN = booleanPreferencesKey("lora13_banner_shown")
+        // 36차 스프린트: ENFJ 14종 완성, 언어 코드
+        val LORA14_BANNER_SHOWN = booleanPreferencesKey("lora14_banner_shown")
+        val LANGUAGE_CODE = stringPreferencesKey("language_code")
+        // 37차 스프린트: 16종 전체 완성
+        val ALL_MBTI_BANNER_SHOWN = booleanPreferencesKey("all_mbti_banner_shown")
     }
 
     val isOnboardingCompleted: Flow<Boolean> = context.dataStore.data.map { prefs ->
@@ -180,6 +197,131 @@ class UserPreferences @Inject constructor(
     suspend fun clearExpressionSetTaskId(characterId: Long) {
         context.dataStore.edit { prefs ->
             prefs.remove(stringPreferencesKey("expr_task_$characterId"))
+        }
+    }
+
+    val isOpenBetaBannerDismissed: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.OPEN_BETA_BANNER_DISMISSED] ?: false
+    }
+
+    suspend fun setOpenBetaBannerDismissed(dismissed: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.OPEN_BETA_BANNER_DISMISSED] = dismissed
+        }
+    }
+
+    val isDau10kBannerDismissed: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.DAU_10K_BANNER_DISMISSED] ?: false
+    }
+
+    suspend fun setDau10kBannerDismissed(dismissed: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.DAU_10K_BANNER_DISMISSED] = dismissed
+        }
+    }
+
+    val isCommunityGuidelineShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.COMMUNITY_GUIDELINE_SHOWN] ?: false
+    }
+
+    suspend fun setCommunityGuidelineShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.COMMUNITY_GUIDELINE_SHOWN] = shown
+        }
+    }
+
+    val isLora8BannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LORA8_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setLora8BannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LORA8_BANNER_SHOWN] = shown
+        }
+    }
+
+    val isLora9BannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LORA9_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setLora9BannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LORA9_BANNER_SHOWN] = shown
+        }
+    }
+
+    // ── 33차: ESFP 10종 완성 배너 ────────────────────────────────────────────
+    val isLora10BannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LORA10_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setLora10BannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LORA10_BANNER_SHOWN] = shown
+        }
+    }
+
+    // ── 34차: ENTJ 11종, ISTJ 12종 완성 배너 ─────────────────────────────────
+    val isLora11BannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LORA11_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setLora11BannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LORA11_BANNER_SHOWN] = shown
+        }
+    }
+
+    val isLora12BannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LORA12_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setLora12BannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LORA12_BANNER_SHOWN] = shown
+        }
+    }
+
+    // ── 35차: ESTP 13종 완성 배너 ────────────────────────────────────────────
+    val isLora13BannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LORA13_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setLora13BannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LORA13_BANNER_SHOWN] = shown
+        }
+    }
+
+    // ── 36차: ENFJ 14종 완성 배너, 언어 설정 ─────────────────────────────────
+    val isLora14BannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LORA14_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setLora14BannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LORA14_BANNER_SHOWN] = shown
+        }
+    }
+
+    val languageCode: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LANGUAGE_CODE] ?: "ko"
+    }
+
+    suspend fun setLanguageCode(code: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LANGUAGE_CODE] = code
+        }
+    }
+
+    // ── 37차: 16종 전체 완성 배너 ────────────────────────────────────────────
+    val isAllMbtiBannerShown: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.ALL_MBTI_BANNER_SHOWN] ?: false
+    }
+
+    suspend fun setAllMbtiBannerShown(shown: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.ALL_MBTI_BANNER_SHOWN] = shown
         }
     }
 

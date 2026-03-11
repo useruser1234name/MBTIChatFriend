@@ -109,6 +109,9 @@ dependencies {
     implementation(libs.credentials.play.services)
     implementation(libs.googleid)
 
+    // Play Billing
+    implementation("com.android.billingclient:billing:6.2.1")
+
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

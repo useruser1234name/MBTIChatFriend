@@ -1,5 +1,6 @@
 package com.example.mbtichatfriend.ui.settings
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,20 +21,25 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Snackbar
@@ -49,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -61,12 +68,18 @@ import androidx.hilt.navigation.compose.hiltViewModel
 fun SettingsScreen(
     onBack: () -> Unit,
     onLogout: () -> Unit,
+    onYearReport: () -> Unit = {},
+    onLanguageSetting: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val nickname by viewModel.nickname.collectAsState()
     val darkMode by viewModel.darkMode.collectAsState()
     val authProvider by viewModel.authProvider.collectAsState()
     val linkError by viewModel.linkError.collectAsState()
+    val referralCode by viewModel.referralCode.collectAsState()
+    val referralStats by viewModel.referralStats.collectAsState()
+    val referralDeepLink by viewModel.referralDeepLink.collectAsState()
+    val referralCtaText = viewModel.referralCtaText
     val context = LocalContext.current
     var showNicknameDialog by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
@@ -216,6 +229,141 @@ fun SettingsScreen(
                     modifier = Modifier.weight(1f)
                 )
             }
+
+            Spacer(Modifier.height(8.dp))
+
+            // 레퍼럴 섹션 (27차 스프린트 / 30차 A/B)
+            SectionTitle(referralCtaText)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // 레퍼럴 통계
+                    referralStats?.let { stats ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "${stats.invitedCount}명",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "내가 초대한 친구",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "+${stats.rewardDays}일",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.tertiary
+                                )
+                                Text(
+                                    text = "리워드",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                    }
+                    // 초대 코드 표시
+                    if (referralCode.isNotEmpty()) {
+                        Text(
+                            text = "내 초대 코드: $referralCode",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    // 공유 버튼들 (V3: 딥링크 URL 우선, 폴백 코드 텍스트)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 일반 공유 버튼 — 딥링크 URL 우선 공유 (A/B CTA 텍스트 적용, 30차 스프린트)
+                        FilledTonalButton(
+                            onClick = {
+                                viewModel.generateReferralLink { shareContent ->
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, shareContent)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, referralCtaText))
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Share,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(referralCtaText)
+                        }
+                        // 카카오톡 공유 버튼 — 딥링크 URL 우선, 미설치 시 일반 공유 폴백
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.generateReferralLink { shareContent ->
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, shareContent)
+                                        setPackage("com.kakao.talk")
+                                    }
+                                    runCatching {
+                                        context.startActivity(intent)
+                                    }.onFailure {
+                                        val fallback = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(Intent.EXTRA_TEXT, shareContent)
+                                        }
+                                        context.startActivity(Intent.createChooser(fallback, "친구 초대"))
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("카카오톡", color = Color(0xFFFFE812))
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // 언어 설정 섹션 (36차 스프린트)
+            SectionTitle("언어")
+            SettingsItem(
+                icon = Icons.Default.Language,
+                title = "언어 설정",
+                subtitle = "한국어 / English",
+                onClick = onLanguageSetting
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            // 리포트 섹션 (22차 스프린트)
+            SectionTitle("리포트")
+            SettingsItem(
+                icon = Icons.Default.EmojiEvents,
+                title = "2026 나의 대화 리포트",
+                subtitle = "올해 나의 대화를 돌아봐요",
+                onClick = onYearReport
+            )
 
             Spacer(Modifier.height(8.dp))
 

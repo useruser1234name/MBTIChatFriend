@@ -9,6 +9,8 @@ import com.example.mbtichatfriend.data.remote.ChatRequest
 import com.example.mbtichatfriend.data.remote.FeedbackRequest
 import com.example.mbtichatfriend.data.remote.MemoryItem
 import com.example.mbtichatfriend.data.remote.ReplyPart
+import com.example.mbtichatfriend.data.remote.SessionCheckRequest
+import com.example.mbtichatfriend.data.remote.SessionCheckResponse
 import com.example.mbtichatfriend.data.remote.SseClient
 import com.example.mbtichatfriend.data.remote.SseEvent
 import kotlinx.coroutines.flow.Flow
@@ -165,6 +167,13 @@ class ChatRepository @Inject constructor(
     suspend fun getFeedbackForMessage(messageId: Long): String? {
         return feedbackDao.getByMessageId(messageId)?.feedbackType
     }
+
+    /**
+     * Self-Regulation: 세션 사용 시간 및 연속 접속 점검.
+     * PSY-B 최은혜 + PM-B 손민준 설계 (4차 회의 합의).
+     */
+    suspend fun checkSession(req: SessionCheckRequest): SessionCheckResponse =
+        api.checkSession(req)
 
     /** 미동기화 피드백 서버 전송 재시도 */
     suspend fun syncPendingFeedback() {

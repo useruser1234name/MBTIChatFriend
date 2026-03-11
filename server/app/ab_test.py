@@ -1,0 +1,433 @@
+"""A/B 테스트 프레임워크 — DATA-B 신예린 설계 (3차 회의 합의)."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ABTestConfig:
+    """A/B 실험 설정."""
+
+    experiment_id: str
+    variant_a: str          # 대조군 (예: "gpt-4o-mini")
+    variant_b: str          # 실험군 (예: "gpt-4o")
+    traffic_split: float    # 0~1 사이 float; variant_b에 배정되는 비율
+    active: bool = True
+    character_filter: str = ""  # 특정 캐릭터 MBTI에만 적용 (빈 문자열이면 전체 적용)
+
+
+# ── 전역 실험 정의 ──────────────────────────────────────────────────────────
+
+EXPERIMENTS: Dict[str, ABTestConfig] = {
+    "model_routing": ABTestConfig(
+        experiment_id="model_routing",
+        variant_a="gpt-4o-mini",   # 대조군
+        variant_b="gpt-4o",        # 실험군
+        traffic_split=0.3,          # 30%에게 gpt-4o 제공
+        active=True,
+    )
+}
+
+EXPERIMENTS["lora_enfp_v2"] = ABTestConfig(
+    experiment_id="lora_enfp_v2",
+    variant_a="gpt-4o-mini",    # 기존 모델 (베이스라인)
+    variant_b="lora-enfp-v2",   # LoRA 적용 모델
+    traffic_split=1.0,           # 0.5 → 1.0: 전체 배포
+    active=True,
+)
+
+EXPERIMENTS["lora_infj_v1"] = ABTestConfig(
+    experiment_id="lora_infj_v1",
+    variant_a="gpt-4o-mini",
+    variant_b="lora-infj-v1",
+    traffic_split=1.0,  # 전체 배포
+    active=True,
+)
+
+EXPERIMENTS["lora_intj_v1"] = ABTestConfig(
+    experiment_id="lora_intj_v1",
+    variant_a="control",
+    variant_b="lora_intj",
+    traffic_split=1.0,   # 0.5 → 1.0: 전체 배포
+    active=True,
+)
+
+EXPERIMENTS["lora_isfj_v1"] = ABTestConfig(
+    experiment_id="lora_isfj_v1",
+    variant_a="control",
+    variant_b="lora_isfj",
+    traffic_split=1.0,  # 0.5 → 1.0: 전체 배포
+    active=True,
+)
+
+EXPERIMENTS["lora_infp_v1"] = ABTestConfig(
+    experiment_id="lora_infp_v1",
+    variant_a="control",
+    variant_b="lora_infp",
+    traffic_split=1.0,  # 0.5 → 1.0: 전체 배포
+    active=True,
+)
+
+EXPERIMENTS["cta_level3_v1"] = ABTestConfig(
+    experiment_id="cta_level3_v1",
+    variant_a="feature_gate",       # 현재: "레벨 4는 프리미엄에서만 경험할 수 있어요"
+    variant_b="relationship_growth", # 신규: "우리 관계가 깊어지고 있어요. 더 많은 감정을 표현할 수 있게 해줄게요"
+    traffic_split=0.5,
+    active=True,
+)
+
+EXPERIMENTS["lora_entp_v1"] = ABTestConfig(
+    experiment_id="lora_entp_v1",
+    variant_a="control",
+    variant_b="lora_entp",
+    traffic_split=1.0,  # 0.5 → 1.0: 19차 전체 배포
+    active=True,
+)
+
+EXPERIMENTS["lora_estj_v1"] = ABTestConfig(
+    experiment_id="lora_estj_v1",
+    variant_a="control",
+    variant_b="lora_estj_v1",
+    traffic_split=1.0,  # 23차 스프린트: ESTJ LoRA 전체 배포 (0.5 → 1.0)
+    active=True,
+)
+
+EXPERIMENTS["lora_isfp_v1"] = ABTestConfig(
+    experiment_id="lora_isfp_v1",
+    variant_a="control",
+    variant_b="lora_isfp",
+    traffic_split=1.0,  # 27차 스프린트: ISFP LoRA 전체 배포 (0.5 → 1.0)
+    active=True,
+    character_filter="ISFP",
+)
+
+EXPERIMENTS["lora_intp_v1"] = ABTestConfig(
+    experiment_id="lora_intp_v1",
+    variant_a="control",
+    variant_b="lora_intp",
+    traffic_split=1.0,  # A/B 종료, 전체 배포
+    active=True,
+    character_filter="INTP",
+)
+
+EXPERIMENTS["referral_cta_v1"] = ABTestConfig(
+    experiment_id="referral_cta_v1",
+    variant_a="control",
+    variant_b="referral_cta",
+    traffic_split=1.0,  # B 문구 전체 적용
+    active=True,
+)
+
+EXPERIMENTS["lora_esfp_v1"] = ABTestConfig(
+    experiment_id="lora_esfp_v1",
+    variant_a="control",
+    variant_b="lora_esfp",
+    traffic_split=1.0,  # A/B 종료, 10종 완성
+    active=True,
+    character_filter="ESFP",
+)
+
+EXPERIMENTS["lora_entj_v1"] = ABTestConfig(
+    experiment_id="lora_entj_v1",
+    variant_a="control",
+    variant_b="lora_entj",
+    traffic_split=1.0,  # 11종 완성
+    active=True,
+    character_filter="ENTJ",
+)
+
+EXPERIMENTS["lora_istj_v1"] = ABTestConfig(
+    experiment_id="lora_istj_v1",
+    variant_a="control",
+    variant_b="lora_istj",
+    traffic_split=1.0,  # 12종 완성
+    active=True,
+    character_filter="ISTJ",
+)
+
+EXPERIMENTS["lora_estp_v1"] = ABTestConfig(
+    experiment_id="lora_estp_v1",
+    variant_a="control",
+    variant_b="lora_estp",
+    traffic_split=1.0,  # 13종 완성
+    active=True,
+    character_filter="ESTP",
+)
+
+EXPERIMENTS["lora_enfj_v1"] = ABTestConfig(
+    experiment_id="lora_enfj_v1",
+    variant_a="control",
+    variant_b="lora_enfj",
+    traffic_split=1.0,  # 14종 완성
+    active=True,
+    character_filter="ENFJ",
+)
+
+EXPERIMENTS["lora_esfj_v1"] = ABTestConfig(
+    experiment_id="lora_esfj_v1",
+    variant_a="control",
+    variant_b="lora_esfj",
+    traffic_split=1.0,  # 15종 완성
+    active=True,
+    character_filter="ESFJ",
+)
+
+EXPERIMENTS["lora_istp_v1"] = ABTestConfig(
+    experiment_id="lora_istp_v1",
+    variant_a="control",
+    variant_b="lora_istp",
+    traffic_split=1.0,  # 16종 완성! 37차 스프린트 조기 전체 배포
+    active=True,
+    character_filter="ISTP",
+)
+
+
+class ABTestManager:
+    """A/B 실험 배정·기록·집계 매니저."""
+
+    # 인메모리 이벤트 버퍼 (PostgreSQL 미연결 환경 대비)
+    _buffer: List[dict] = []
+
+    # ── variant 배정 ────────────────────────────────────────────────────────
+
+    def assign_variant(
+        self,
+        user_id: str,
+        experiment_id: str,
+        character_id: str = "",
+    ) -> str:
+        """
+        variant 배정. character_id가 있으면 character_id 기준으로 분할.
+        lora_enfp_v2 실험은 character_id(ENFP 캐릭터) 기준으로 분할.
+
+        동일한 (split_key, experiment_id) 조합은 항상 동일 variant를 반환한다.
+        실험이 비활성화 상태이거나 존재하지 않으면 variant_a(대조군)를 반환한다.
+
+        Returns:
+            배정된 variant 문자열 (예: "gpt-4o-mini" 또는 "gpt-4o")
+        """
+        config = EXPERIMENTS.get(experiment_id)
+        if config is None or not config.active:
+            # 실험 없음 또는 비활성 → 대조군
+            if config:
+                return config.variant_a
+            return "gpt-4o-mini"  # 기본 fallback
+
+        # 분할 기준: character_id 우선, 없으면 user_id
+        split_key = character_id if character_id else user_id
+        hash_input = f"{split_key}:{experiment_id}".encode()
+        hash_value = int(hashlib.sha256(hash_input).hexdigest(), 16)
+        normalized = (hash_value % 10000) / 10000.0
+
+        return config.variant_b if normalized < config.traffic_split else config.variant_a
+
+    # ── 결과 기록 ────────────────────────────────────────────────────────────
+
+    def record_result(
+        self,
+        experiment_id: str,
+        variant: str,
+        metric_name: str,
+        value: float,
+        user_id: str = "",
+        character_id: str = "",
+    ) -> None:
+        """A/B 테스트 메트릭을 PostgreSQL ab_test_results 테이블에 기록.
+
+        DB 미연결 시 인메모리 버퍼에 저장 후 로깅으로 대체한다.
+        """
+        record = {
+            "experiment_id": experiment_id,
+            "variant": variant,
+            "user_id": user_id,
+            "character_id": character_id,
+            "metric_name": metric_name,
+            "metric_value": float(value),
+            "created_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+        # DB 기록 시도
+        try:
+            from .postgres import execute as pg_execute, postgres_enabled
+            if postgres_enabled():
+                pg_execute(
+                    """
+                    INSERT INTO ab_test_results
+                        (experiment_id, variant, user_id, character_id,
+                         metric_name, metric_value)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        experiment_id,
+                        variant,
+                        user_id,
+                        character_id,
+                        metric_name,
+                        float(value),
+                    ),
+                )
+                logger.debug(
+                    "[AB] recorded experiment=%s variant=%s metric=%s value=%s",
+                    experiment_id, variant, metric_name, value,
+                )
+                return
+        except Exception as exc:
+            logger.warning("[AB] DB 기록 실패, 인메모리 버퍼에 저장: %s", exc)
+
+        # DB 미연결 fallback: 인메모리 버퍼
+        self._buffer.append(record)
+        logger.info(
+            "[AB] buffered experiment=%s variant=%s metric=%s value=%s",
+            experiment_id, variant, metric_name, value,
+        )
+
+    # ── 결과 집계 ────────────────────────────────────────────────────────────
+
+    def get_experiment_summary(
+        self,
+        experiment_id: str,
+        days: int = 7,
+    ) -> dict:
+        """실험 결과 집계.
+
+        PostgreSQL 연결 시 DB 데이터를 집계하고,
+        미연결 시 인메모리 버퍼에서 집계한다.
+
+        Returns:
+            {
+                "experiment_id": str,
+                "period_days": int,
+                "config": {...},
+                "variants": {
+                    "<variant>": {
+                        "sample_count": int,
+                        "metrics": {
+                            "<metric_name>": {
+                                "count": int,
+                                "mean": float,
+                                "min": float,
+                                "max": float,
+                            }
+                        }
+                    }
+                }
+            }
+        """
+        config = EXPERIMENTS.get(experiment_id)
+        config_info = {}
+        if config:
+            config_info = {
+                "variant_a": config.variant_a,
+                "variant_b": config.variant_b,
+                "traffic_split": config.traffic_split,
+                "active": config.active,
+            }
+
+        # DB 집계 시도
+        try:
+            from .postgres import fetchall, postgres_enabled
+            if postgres_enabled():
+                rows = fetchall(
+                    """
+                    SELECT
+                        variant,
+                        metric_name,
+                        COUNT(*)            AS cnt,
+                        AVG(metric_value)   AS mean_val,
+                        MIN(metric_value)   AS min_val,
+                        MAX(metric_value)   AS max_val
+                    FROM ab_test_results
+                    WHERE experiment_id = %s
+                      AND created_at >= NOW() - INTERVAL '%s days'
+                    GROUP BY variant, metric_name
+                    ORDER BY variant, metric_name
+                    """,
+                    (experiment_id, days),
+                )
+
+                variants: dict = {}
+                for row in rows:
+                    v = row["variant"]
+                    m = row["metric_name"]
+                    if v not in variants:
+                        variants[v] = {"sample_count": 0, "metrics": {}}
+                    variants[v]["metrics"][m] = {
+                        "count": int(row["cnt"]),
+                        "mean": round(float(row["mean_val"]), 4),
+                        "min": round(float(row["min_val"]), 4),
+                        "max": round(float(row["max_val"]), 4),
+                    }
+                    variants[v]["sample_count"] += int(row["cnt"])
+
+                return {
+                    "experiment_id": experiment_id,
+                    "period_days": days,
+                    "config": config_info,
+                    "variants": variants,
+                }
+        except Exception as exc:
+            logger.warning("[AB] DB 집계 실패, 인메모리 버퍼 사용: %s", exc)
+
+        # 인메모리 버퍼 집계 fallback
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+        relevant = [
+            r for r in self._buffer
+            if r["experiment_id"] == experiment_id
+            and datetime.fromisoformat(r["created_at"]) >= cutoff
+        ]
+
+        variants_buf: dict = {}
+        for r in relevant:
+            v = r["variant"]
+            m = r["metric_name"]
+            val = r["metric_value"]
+            if v not in variants_buf:
+                variants_buf[v] = {"sample_count": 0, "metrics": {}}
+            if m not in variants_buf[v]["metrics"]:
+                variants_buf[v]["metrics"][m] = {
+                    "_values": [],
+                    "count": 0,
+                    "mean": 0.0,
+                    "min": 0.0,
+                    "max": 0.0,
+                }
+            variants_buf[v]["metrics"][m]["_values"].append(val)
+            variants_buf[v]["sample_count"] += 1
+
+        # 통계 계산
+        for v_data in variants_buf.values():
+            for m_name, m_data in v_data["metrics"].items():
+                vals = m_data.pop("_values", [])
+                if vals:
+                    m_data["count"] = len(vals)
+                    m_data["mean"] = round(sum(vals) / len(vals), 4)
+                    m_data["min"] = round(min(vals), 4)
+                    m_data["max"] = round(max(vals), 4)
+
+        return {
+            "experiment_id": experiment_id,
+            "period_days": days,
+            "config": config_info,
+            "variants": variants_buf,
+        }
+
+
+# ── 싱글턴 인스턴스 ──────────────────────────────────────────────────────────
+
+_manager: Optional[ABTestManager] = None
+
+
+def get_ab_manager() -> ABTestManager:
+    """ABTestManager 싱글턴 반환."""
+    global _manager
+    if _manager is None:
+        _manager = ABTestManager()
+    return _manager

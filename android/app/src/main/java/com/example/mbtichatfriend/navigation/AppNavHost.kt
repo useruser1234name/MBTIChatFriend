@@ -22,20 +22,34 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.example.mbtichatfriend.ui.character.CharacterProfileScreen
 import com.example.mbtichatfriend.ui.chat.ChatScreen
+import com.example.mbtichatfriend.ui.community.CommunityScreen
+import com.example.mbtichatfriend.ui.compatibility.CompatibilityScreen
+import com.example.mbtichatfriend.ui.profile.NotificationScreen
+import com.example.mbtichatfriend.ui.profile.YearReportScreen
+import com.example.mbtichatfriend.ui.community.PostDetailScreen
+import com.example.mbtichatfriend.ui.community.WritePostScreen
 import com.example.mbtichatfriend.ui.gallery.GalleryScreen
 import com.example.mbtichatfriend.ui.home.CreateCharacterSheet
 import com.example.mbtichatfriend.ui.home.HomeScreen
 import com.example.mbtichatfriend.ui.home.HomeViewModel
 import com.example.mbtichatfriend.ui.login.LoginScreen
+import com.example.mbtichatfriend.model.PRESET_CHARACTERS
 import com.example.mbtichatfriend.ui.onboarding.AgeScreen
 import com.example.mbtichatfriend.ui.onboarding.GenderScreen
 import com.example.mbtichatfriend.ui.onboarding.MbtiSelectScreen
 import com.example.mbtichatfriend.ui.onboarding.NicknameScreen
+import com.example.mbtichatfriend.ui.onboarding.OnboardingScreen
 import com.example.mbtichatfriend.ui.onboarding.OnboardingViewModel
+import com.example.mbtichatfriend.ui.onboarding.StarterSelectionScreen
 import com.example.mbtichatfriend.ui.onboarding.StyleSelectScreen
 import com.example.mbtichatfriend.ui.settings.SettingsScreen
 import com.example.mbtichatfriend.ui.splash.SplashScreen
+import com.example.mbtichatfriend.ui.chat.ChatViewModel
+import com.example.mbtichatfriend.ui.diary.DiaryEntryScreen
 import com.example.mbtichatfriend.ui.diary.DiaryScreen
+import com.example.mbtichatfriend.ui.diary.DiaryWeeklyReportScreen
+import com.example.mbtichatfriend.ui.premium.PremiumScreen
+import com.example.mbtichatfriend.ui.settings.LanguageSettingScreen
 import com.example.mbtichatfriend.ui.voicecall.VoiceCallScreen
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -121,14 +135,39 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
         }
 
         composable(Route.StyleSelect.route) {
-            StyleSelectScreen(
-                viewModel = onboardingViewModel,
-                onComplete = {
-                    navController.navigate(Route.Home.route) {
-                        popUpTo(0) { inclusive = true }
+            // MBTI 선택 + 캐릭터 추천을 인라인으로 통합한 OnboardingScreen.
+            // 기존 4단계(별도 캐릭터 추천 화면)를 3단계로 통합: MBTI 선택 완료 시 하단에 슬라이드인.
+            OnboardingScreen(
+                onMbtiSelected = { mbti ->
+                    runCatching { com.example.mbtichatfriend.model.MbtiType.valueOf(mbti) }
+                        .getOrNull()
+                        ?.let { onboardingViewModel.updatePartnerMbti(it) }
+                },
+                onSkipToTest = { /* 외부 MBTI 테스트 링크 — 추후 구현 */ },
+                onCharacterSelected = { character ->
+                    onboardingViewModel.updateSelectedCharacter(character)
+                    navController.navigate(Route.StarterSelection.route)
+                },
+            )
+        }
+
+        composable(Route.StarterSelection.route) {
+            val selectedCharacter = onboardingViewModel.selectedCharacter
+            val characterName = selectedCharacter?.name
+                ?: PRESET_CHARACTERS.firstOrNull { it.mbti == onboardingViewModel.partnerMbti.name }?.name
+                ?: "친구"
+            StarterSelectionScreen(
+                characterName = characterName,
+                starters = emptyList(),
+                isLoading = false,
+                onStarterConfirmed = { _ ->
+                    onboardingViewModel.saveOnboarding {
+                        navController.navigate(Route.Home.route) {
+                            popUpTo(0) { inclusive = true }
+                        }
                     }
                 },
-                onBack = { navController.popBackStack() }
+                viewModel = onboardingViewModel,
             )
         }
 
@@ -136,6 +175,7 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
         composable(Route.Home.route) {
             val homeViewModel: HomeViewModel = hiltViewModel()
             var showCreateSheet by remember { mutableStateOf(false) }
+            val homeUserMbti by homeViewModel.userMbti.collectAsState()
 
             HomeScreen(
                 onCharacterClick = { characterId ->
@@ -147,6 +187,13 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
                 },
                 onGallery = {
                     navController.navigate(Route.Gallery.route)
+                },
+                onCommunityPostClick = { postId ->
+                    navController.navigate(Route.PostDetail.createRoute(postId))
+                },
+                onCompatibility = {
+                    val myMbti = homeUserMbti.ifEmpty { "INFP" }
+                    navController.navigate(Route.Compatibility.createRoute(myMbti, "ENFP"))
                 },
                 viewModel = homeViewModel
             )
@@ -174,6 +221,11 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
             route = Route.Chat.route,
             arguments = listOf(navArgument("characterId") { type = NavType.StringType })
         ) {
+            val chatViewModel: ChatViewModel = hiltViewModel()
+            val chatUiState by chatViewModel.uiState.collectAsState()
+            val characterMbti = (chatUiState as? com.example.mbtichatfriend.ui.chat.ChatUiState.Success)
+                ?.character?.mbti ?: ""
+            val myMbti by chatViewModel.myMbti.collectAsState()
             ChatScreen(
                 onBack = { navController.popBackStack() },
                 onProfile = { characterId ->
@@ -181,7 +233,13 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
                 },
                 onVoiceCall = { characterId ->
                     navController.navigate(Route.VoiceCall.createRoute(characterId))
-                }
+                },
+                onNavigateToCompatibility = {
+                    if (myMbti.isNotEmpty() && characterMbti.isNotEmpty()) {
+                        navController.navigate(Route.Compatibility.createRoute(myMbti, characterMbti))
+                    }
+                },
+                viewModel = chatViewModel,
             )
         }
 
@@ -257,6 +315,33 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
             )
         }
 
+        // === 커뮤니티 ===
+        composable(Route.Community.route) {
+            CommunityScreen(
+                onNavigateToWrite = { navController.navigate(Route.WritePost.route) },
+                onNavigateToDetail = { postId -> navController.navigate(Route.PostDetail.createRoute(postId)) },
+            )
+        }
+
+        // === 고민 쓰기 ===
+        composable(Route.WritePost.route) {
+            WritePostScreen(
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        // === 게시글 상세 ===
+        composable(
+            route = Route.PostDetail.route,
+            arguments = listOf(navArgument("postId") { type = NavType.LongType }),
+        ) { backStackEntry ->
+            val postId = backStackEntry.arguments?.getLong("postId") ?: 0L
+            PostDetailScreen(
+                postId = postId,
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
         // === 설정 ===
         composable(Route.Settings.route) {
             SettingsScreen(
@@ -265,7 +350,119 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
                     navController.navigate(Route.Login.route) {
                         popUpTo(0) { inclusive = true }
                     }
-                }
+                },
+                onYearReport = {
+                    navController.navigate(Route.YearReport.route)
+                },
+                onLanguageSetting = {
+                    navController.navigate(Route.LanguageSetting.route)
+                },
+            )
+        }
+
+        // === 궁합 (21차 스프린트) ===
+        composable(
+            route = Route.Compatibility.route,
+            arguments = listOf(
+                navArgument("myMbti") { type = NavType.StringType },
+                navArgument("characterMbti") { type = NavType.StringType },
+            ),
+            enterTransition = { fadeIn(tween(300)) },
+            exitTransition = { fadeOut(tween(300)) },
+            popEnterTransition = { fadeIn(tween(300)) },
+            popExitTransition = { fadeOut(tween(300)) },
+        ) { backStackEntry ->
+            val myMbti = backStackEntry.arguments?.getString("myMbti") ?: ""
+            val characterMbti = backStackEntry.arguments?.getString("characterMbti") ?: ""
+            CompatibilityScreen(
+                myMbti = myMbti,
+                characterMbti = characterMbti,
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        // === 알림 (21차 스프린트) ===
+        composable(
+            route = Route.Notifications.route,
+            enterTransition = { fadeIn(tween(300)) },
+            exitTransition = { fadeOut(tween(300)) },
+            popEnterTransition = { fadeIn(tween(300)) },
+            popExitTransition = { fadeOut(tween(300)) },
+        ) {
+            NotificationScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToCommunityPost = { postId ->
+                    navController.navigate(Route.PostDetail.createRoute(postId))
+                },
+                onNavigateToReferral = {
+                    navController.navigate(Route.Settings.route)
+                },
+            )
+        }
+
+        // === 연말 대화 리포트 (22차 스프린트) ===
+        composable(
+            route = Route.YearReport.route,
+            enterTransition = { fadeIn(tween(300)) },
+            exitTransition = { fadeOut(tween(300)) },
+            popEnterTransition = { fadeIn(tween(300)) },
+            popExitTransition = { fadeOut(tween(300)) },
+        ) {
+            YearReportScreen(
+                onNavigateBack = { navController.popBackStack() },
+            )
+        }
+
+        // === 사용자 직접 입력 다이어리 (32차 스프린트) ===
+        composable(
+            route = Route.DiaryEntry.route,
+            arguments = listOf(navArgument("characterId") { type = NavType.StringType }),
+            enterTransition = { fadeIn(tween(300)) },
+            exitTransition = { fadeOut(tween(300)) },
+            popEnterTransition = { fadeIn(tween(300)) },
+            popExitTransition = { fadeOut(tween(300)) },
+        ) {
+            DiaryEntryScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        // === 주간 감정 리포트 (32차 스프린트) ===
+        composable(
+            route = Route.DiaryWeeklyReport.route,
+            enterTransition = { fadeIn(tween(300)) },
+            exitTransition = { fadeOut(tween(300)) },
+            popEnterTransition = { fadeIn(tween(300)) },
+            popExitTransition = { fadeOut(tween(300)) },
+        ) {
+            DiaryWeeklyReportScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        // === 프리미엄 구독 (36차 스프린트) ===
+        composable(
+            route = Route.Premium.route,
+            enterTransition = { fadeIn(tween(300)) },
+            exitTransition = { fadeOut(tween(300)) },
+            popEnterTransition = { fadeIn(tween(300)) },
+            popExitTransition = { fadeOut(tween(300)) },
+        ) {
+            PremiumScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        // === 언어 설정 (36차 스프린트) ===
+        composable(
+            route = Route.LanguageSetting.route,
+            enterTransition = { fadeIn(tween(300)) },
+            exitTransition = { fadeOut(tween(300)) },
+            popEnterTransition = { fadeIn(tween(300)) },
+            popExitTransition = { fadeOut(tween(300)) },
+        ) {
+            LanguageSettingScreen(
+                onBack = { navController.popBackStack() }
             )
         }
     }

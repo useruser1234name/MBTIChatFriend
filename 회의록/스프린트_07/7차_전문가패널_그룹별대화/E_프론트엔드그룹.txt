@@ -1,0 +1,153 @@
+================================================================
+[7차 전문가 패널 - 그룹 E] 프론트엔드 · Android 트랙
+일시: 2026-05-20 (수) 10:00 ~ 11:30
+참석: CTO-B 김태우, UI-A 기태호, UI-B 마세은
+비판 에이전트: CRITIC-E 이수민 (모바일 개발 전문가)
+서기: AI 서기
+================================================================
+
+[10:00] CTO-B 김태우 (Android 리드):
+"7차 프론트엔드 최우선 과제는 두 가지입니다.
+첫째, Google Play IAP 실제 검증 연동 (ARCH-A에서 서버 환경변수 주입 후 BillingRepository 교체).
+둘째, 캐릭터 편지 Android 수신 UI 구현.
+
+BillingManager.kt 현재 상태:
+- launchBillingFlow: 완성
+- PurchasesUpdatedListener: 완성
+- handlePurchase → acknowledgePurchase: 완성
+- verifyWithServer: Mock 구현 → 실제 API 교체 필요
+
+교체 작업 예상 시간: 약 2시간 (서버 환경변수가 준비된 후).
+BillingRepository.verifyPurchase()에서 Mock JSON 응답을 실제 API 호출로 교체하면 됩니다.
+Retrofit 인터페이스는 이미 준비돼 있습니다."
+
+근거 자료: 6차 스프린트 완료: BillingManager.kt, BillingRepository.kt 구현 확인
+
+[10:09] UI-A 기태호 (Android UI 개발):
+"캐릭터 편지 수신 UI 설계를 공유합니다.
+
+편지 기능 사용자 플로우:
+1. Android FCM 알림 수신
+   - 알림 채널: 'character_letter' (별도 채널 — 사용자가 독립적으로 on/off 가능)
+   - 알림 제목: '[캐릭터 이름]의 편지'
+   - 알림 본문: '지난 대화가 생각났나 봐요.'
+   - 탭 시: LetterDetailActivity 또는 ChatScreen 내 LetterBottomSheet로 이동
+
+2. 앱 내 편지 읽기 UI:
+   - HomeScreen에 '새 편지' 배지 (읽지 않은 편지 수)
+   - LetterScreen: 편지지 스타일 UI, 캐릭터 아바타, 편지 텍스트
+   - 읽은 후: '답장하기' 버튼 → ChatScreen으로 이동 (채팅 시작)
+   - 편지 히스토리: 설정 > '캐릭터 편지' 메뉴에서 모아보기
+
+3. 관련 Firebase Analytics 이벤트:
+   - notification_tapped_letter
+   - letter_opened
+   - letter_reply_started
+
+UI 컴포넌트 우선순위:
+P0: FCM 알림 수신 + LetterDetailBottomSheet
+P1: HomeScreen 배지 + LetterScreen
+P2: 편지 히스토리"
+
+근거 자료:
+- Android Material Design 3: Bottom Sheet 가이드라인
+- FCM Android 통합 가이드 (알림 채널 설정)
+
+[10:20] UI-B 마세은 (UI/애니메이션 담당):
+"편지 UI에서 감정적 설계 포인트를 추가로 제안합니다.
+
+편지 열기 애니메이션:
+Lottie를 활용해 편지 봉투가 열리는 애니메이션을 추가하면
+사용자 경험이 크게 향상됩니다.
+- 봉투 오픈 애니메이션: 약 1.5초
+- 편지지 펼치는 애니메이션: 약 1.0초
+- 로티 파일 크기 목표: 각 100KB 이하
+
+단, 이 애니메이션이 없어도 기본 기능은 동작합니다.
+7차 P0는 기능 구현이고, 애니메이션은 P2입니다.
+
+Lottie 호감도 시각화 완성 경험을 바탕으로:
+- ARCH-A와 설계 먼저 확정 후 구현
+- 봉투 애니메이션은 에셋 팀에서 제작 필요 — 현재 에셋 없음
+
+에셋 없이 가능한 대안: Compose Canvas 애니메이션으로 봉투 열림 효과를 구현.
+Jetpack Compose 애니메이션 API (animateFloatAsState, AnimatedContent)로 가능합니다."
+
+근거 자료: Jetpack Compose 공식 애니메이션 문서 (developer.android.com)
+
+[10:30] CRITIC-E 이수민 (비판 에이전트):
+"프론트엔드 설계에 몇 가지 중요한 문제를 지적합니다.
+
+CTO-B에게: BillingRepository Mock → 실제 API 교체가 '2시간'이라고 하셨는데,
+실제로는 더 복잡할 수 있습니다. Google Play 테스터 계정 설정, 상품 ID 연결,
+실제 구독 구매 테스트까지 포함하면 당일 완료가 어려울 수 있습니다.
+IAP 테스트는 반드시 실제 디바이스에서 실제 Google 계정으로 해야 합니다.
+에뮬레이터에서는 일부 IAP 플로우가 작동하지 않습니다. 이 점 인지하고 있으신가요?
+
+UI-A에게: 편지 알림 채널을 독립적으로 만드는 건 좋습니다.
+그런데 알림이 FCM을 통해 오면 앱이 종료된 상태에서도 받을 수 있어야 합니다.
+현재 ChatFirebaseMessagingService.kt가 이미 있는데,
+편지 알림을 기존 FCM 서비스에 통합할 건지, 별도 처리할 건지 명확히 해야 합니다.
+
+UI-B에게: 봉투 Lottie 애니메이션 제안은 매력적이지만,
+현재 팀에 에셋이 없고 7차에 구현할 수 있는 현실적인 범위인지 의문입니다.
+Compose Canvas 대안도 작업 시간이 Lottie보다 적지 않습니다.
+P2로 배치하고 실제로 7차 내에 완료할 수 있는 P0/P1에 집중하는 게 맞습니다."
+
+[10:40] CTO-B 김태우:
+"에뮬레이터 IAP 제한 — 알고 있습니다.
+테스터 계정 설정: Google Play Console → 테스터 계정 추가 (팀원 Gmail).
+실기기 테스트 환경: CTO-A 박지훈 님 Galaxy S23, CTO-B 본인 Pixel 8로 진행.
+IAP 전체 테스트 계획:
+D+1: Google Play Console 설정 완료 (CTO-A)
+D+2: 서버 환경변수 주입 + BillingRepository 교체 (CTO-B + ARCH-A)
+D+3: 실기기 테스터 구독 구매 테스트 (CTO-A + CTO-B)
+D+4: 서버 user_subscriptions DB 업데이트 확인 + 구독 상태 반영 테스트
+
+4일 계획입니다. '2시간'은 코드 교체만의 시간이었고, 전체 테스트 포함 D+4 완료로 정정합니다."
+
+[10:48] UI-A 기태호:
+"FCM 서비스 통합 방향 확정:
+기존 ChatFirebaseMessagingService.kt에 편지 알림을 추가합니다.
+notification_type 필드로 'chat' vs 'letter'를 구분합니다.
+
+코드 구조:
+```
+when (data['notification_type']) {
+    'chat' -> handleChatNotification(data)
+    'letter' -> handleLetterNotification(data)
+    'level_up' -> handleLevelUpNotification(data)
+}
+```
+
+notification_type 확장은 향후 추가 알림 타입 지원에도 유연합니다."
+
+[10:55] UI-B 마세은:
+"CRITIC-E의 지적 맞습니다. 봉투 애니메이션은 7차 범위에서 제외합니다.
+7차 P0: FCM 편지 알림 수신 + 편지 읽기 BottomSheet (텍스트 기반)
+7차 P1: HomeScreen 배지 + LetterScreen 전체 UI
+7차 P2 이월: 봉투 열기 애니메이션 (에셋 준비 필요)
+
+대신 편지 읽기 UI의 타이포그래피와 배경 디자인으로 감성을 살리겠습니다.
+편지지 스타일 배경 (Material3 Card + 약간의 텍스처 효과)는 Compose로 즉시 구현 가능합니다."
+
+근거 자료: Material Design 3 Card 컴포넌트 가이드 (m3.material.io)
+
+[11:05] CTO-B 김태우 (그룹 정리):
+"그룹 E 논의 결론 정리입니다.
+
+결정사항 1: IAP 실기기 테스트 계획 D+1 ~ D+4 확정.
+결정사항 2: 편지 FCM — ChatFirebaseMessagingService에 notification_type 분기 통합.
+결정사항 3: 편지 UI P0/P1/P2 범위 확정:
+  - P0: FCM 수신 + LetterDetailBottomSheet
+  - P1: HomeScreen 배지 + LetterScreen
+  - P2(이월): 봉투 오픈 Lottie 애니메이션
+결정사항 4: Analytics 이벤트 3개 추가 (notification_tapped_letter, letter_opened, letter_reply_started).
+결정사항 5: 편지 알림 PSY 화이트리스트 검수 후 알림 문구 최종 확정.
+
+플레너리 공유 사항: IAP 테스트 D+4 완료 계획, 편지 알림 PSY 검수 요청."
+
+================================================================
+[그룹 E 회의 종료: 11:30]
+서기 기록 완료. 결정사항 5개 플레너리 안건으로 이관.
+================================================================

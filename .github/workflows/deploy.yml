@@ -1,0 +1,96 @@
+name: Deploy to ECS
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'server/**'
+      - '.github/workflows/deploy.yml'
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: mbtichatfriend
+  ECS_CLUSTER: mbtichatfriend
+  ECS_SERVICE: mbtichatfriend-api
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG server/
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+          echo "Deployment triggered. Waiting for stability..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Register ECS Scalable Target
+        run: |
+          aws application-autoscaling register-scalable-target \
+            --service-namespace ecs \
+            --resource-id service/$ECS_CLUSTER/$ECS_SERVICE \
+            --scalable-dimension ecs:service:DesiredCount \
+            --min-capacity 2 \
+            --max-capacity 6
+
+      - name: Apply ECS Scheduled Scaling
+        run: |
+          # Apply each scheduled action from JSON
+          for action in $(cat server/ecs-scheduled-scaling.json | jq -c '.scheduledActions[]'); do
+            aws application-autoscaling put-scheduled-action \
+              --service-namespace ecs \
+              --scheduled-action-name $(echo $action | jq -r '.scheduledActionName') \
+              --resource-id $(echo $action | jq -r '.resourceId') \
+              --scalable-dimension $(echo $action | jq -r '.scalableDimension') \
+              --schedule $(echo $action | jq -r '.schedule') \
+              --scalable-target-action MinCapacity=$(echo $action | jq -r '.scalableTargetAction.minCapacity'),MaxCapacity=$(echo $action | jq -r '.scalableTargetAction.maxCapacity')
+          done
+
+      - name: Register ECS Target Tracking
+        run: |
+          aws application-autoscaling put-scaling-policy \
+            --service-namespace ecs \
+            --resource-id service/$ECS_CLUSTER/$ECS_SERVICE \
+            --scalable-dimension ecs:service:DesiredCount \
+            --policy-name cpu-target-tracking \
+            --policy-type TargetTrackingScaling \
+            --target-tracking-scaling-policy-configuration '{
+              "TargetValue": 70.0,
+              "PredefinedMetricSpecification": {"PredefinedMetricType": "ECSServiceAverageCPUUtilization"},
+              "ScaleInCooldown": 600,
+              "ScaleOutCooldown": 60
+            }'

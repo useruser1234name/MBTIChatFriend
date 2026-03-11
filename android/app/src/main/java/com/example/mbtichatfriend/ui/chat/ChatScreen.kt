@@ -12,7 +12,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,8 +31,10 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.SuggestionChip
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -39,6 +43,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
@@ -110,25 +115,30 @@ import com.example.mbtichatfriend.ui.theme.UserBubbleDark
 import com.example.mbtichatfriend.ui.theme.UserBubbleText
 import com.example.mbtichatfriend.ui.theme.UserBubbleTextDark
 import com.example.mbtichatfriend.ui.theme.*
+import androidx.compose.ui.platform.LocalContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
     onBack: () -> Unit,
     onProfile: (Long) -> Unit,
     onVoiceCall: (Long) -> Unit = {},
+    onNavigateToCompatibility: () -> Unit = {},
     viewModel: ChatViewModel = hiltViewModel()
 ) {
-    val messages by viewModel.messages.collectAsState()
-    val character by viewModel.character.collectAsState()
-    val isOnline by viewModel.isOnline.collectAsState()
+    val uiState by viewModel.uiState.collectAsState()
+    val messages = (uiState as? ChatUiState.Success)?.messages ?: emptyList()
+    val character = (uiState as? ChatUiState.Success)?.character
+    val isOnline = (uiState as? ChatUiState.Success)?.isOnline ?: true
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
+    var shareTargetIndex by remember { mutableStateOf<Int?>(null) }
+    val context = LocalContext.current
 
     LaunchedEffect(messages.size, viewModel.isTyping) {
         if (messages.isNotEmpty()) {
@@ -224,6 +234,9 @@ fun ChatScreen(
                 actions = {
                     IconButton(onClick = { character?.let { onVoiceCall(it.id) } }) {
                         Icon(Icons.Default.Phone, contentDescription = "음성 대화")
+                    }
+                    IconButton(onClick = onNavigateToCompatibility) {
+                        Icon(Icons.Default.Favorite, contentDescription = "궁합 보기")
                     }
                     IconButton(onClick = { character?.let { onProfile(it.id) } }) {
                         Icon(Icons.Default.Person, contentDescription = "프로필")
@@ -328,6 +341,7 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     items(messages, key = { it.id }) { msg ->
+                        val index = messages.indexOf(msg)
                         AnimatedVisibility(
                             visible = true,
                             enter = fadeIn(tween(300)) + slideInVertically(
@@ -341,7 +355,8 @@ fun ChatScreen(
                                 avatar = avatar,
                                 onRetry = { messageId -> viewModel.retrySend(messageId) },
                                 feedback = viewModel.feedbackMap[msg.id],
-                                onFeedback = { messageId, type -> viewModel.submitFeedback(messageId, type) }
+                                onFeedback = { messageId, type -> viewModel.submitFeedback(messageId, type) },
+                                onLongPress = { shareTargetIndex = index }
                             )
                         }
                     }
@@ -352,13 +367,16 @@ fun ChatScreen(
                 }
             }
 
-            // 입력 바
+            // 입력 바 (대화 스타터 chip 포함, 26차 스프린트)
             ChatInputBar(
                 input = input,
                 onInputChange = { input = it },
                 onSend = {
                     viewModel.send(input)
                     input = ""
+                },
+                onChipClick = { chipText ->
+                    viewModel.send(chipText)
                 }
             )
         }
@@ -493,6 +511,29 @@ fun ChatScreen(
             }
         )
     }
+
+    // 대화 공유 확인
+    if (shareTargetIndex != null) {
+        val targetIdx = shareTargetIndex!!
+        AlertDialog(
+            onDismissRequest = { shareTargetIndex = null },
+            title = { Text("이 대화를 공유할까요?") },
+            text = { Text("앞뒤 메시지 포함 최대 4개가 이미지로 저장됩니다.\n닉네임은 표시되지 않습니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val start = maxOf(0, targetIdx - 3)
+                    val snapshot = messages.subList(start, minOf(messages.size, targetIdx + 1))
+                    val mbti = character?.mbti ?: "MBTI"
+                    val bitmap = ShareMessageHelper.captureChatSnapshot(snapshot, mbti, context)
+                    ShareMessageHelper.shareSnapshot(bitmap, context)
+                    shareTargetIndex = null
+                }) { Text("공유하기") }
+            },
+            dismissButton = {
+                TextButton(onClick = { shareTargetIndex = null }) { Text("취소") }
+            }
+        )
+    }
 }
 
 @Composable
@@ -578,6 +619,7 @@ private fun CharacterAnimationArea(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     msg: ChatMessage,
@@ -585,7 +627,8 @@ private fun MessageBubble(
     avatar: CharacterAvatar? = null,
     onRetry: ((Long) -> Unit)? = null,
     feedback: String? = null,
-    onFeedback: ((Long, String) -> Unit)? = null
+    onFeedback: ((Long, String) -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null
 ) {
     val isFromUser = msg.isFromUser
     val isDark = isSystemInDarkTheme()
@@ -607,7 +650,12 @@ private fun MessageBubble(
                 shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp),
                 color = if (msg.sendStatus == "FAILED") userBubbleColor.copy(alpha = 0.6f) else userBubbleColor,
                 shadowElevation = 1.dp,
-                modifier = Modifier.widthIn(max = 280.dp)
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = { onLongPress?.invoke() }
+                    )
             ) {
                 Text(
                     text = msg.text,
@@ -746,7 +794,12 @@ private fun MessageBubble(
                     border = emotionBorder,
                     tonalElevation = 1.dp,
                     shadowElevation = 1.dp,
-                    modifier = Modifier.widthIn(max = 260.dp)
+                    modifier = Modifier
+                        .widthIn(max = 260.dp)
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = { onLongPress?.invoke() }
+                        )
                 ) {
                     Text(
                         text = msg.text,
@@ -908,7 +961,9 @@ private fun TypingBubble(avatarId: String = "", avatar: CharacterAvatar? = null)
 private fun ChatInputBar(
     input: String,
     onInputChange: (String) -> Unit,
-    onSend: () -> Unit
+    onSend: () -> Unit,
+    starterChips: List<String> = emptyList(),
+    onChipClick: (String) -> Unit = {},
 ) {
     val sendEnabled = input.isNotBlank()
     val sendScale by animateFloatAsState(
@@ -921,55 +976,83 @@ private fun ChatInputBar(
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 4.dp
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = onInputChange,
-                modifier = Modifier.weight(1f),
-                placeholder = {
-                    Text(
-                        "메시지를 입력하세요",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                },
-                singleLine = false,
-                maxLines = 4,
-                shape = RoundedCornerShape(24.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = Color.Transparent,
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
-                ),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { if (sendEnabled) onSend() })
-            )
-            Spacer(Modifier.width(8.dp))
-            IconButton(
-                onClick = { if (sendEnabled) onSend() },
-                enabled = sendEnabled,
+        Column {
+            // 대화 스타터 chip — 항상 노출 (26차 스프린트)
+            val chips = starterChips.ifEmpty {
+                listOf("오늘 하루 어땠어?", "나 고민이 있어", "재미있는 얘기 해줘!")
+            }
+            LazyRow(
                 modifier = Modifier
-                    .size(48.dp)
-                    .graphicsLayer { scaleX = sendScale; scaleY = sendScale }
-                    .clip(CircleShape)
-                    .background(
-                        if (sendEnabled) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                    )
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(horizontal = 4.dp)
             ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "전송",
-                    tint = if (sendEnabled) MaterialTheme.colorScheme.onPrimary
-                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                    modifier = Modifier.size(20.dp)
+                items(chips) { chipText ->
+                    SuggestionChip(
+                        onClick = { onChipClick(chipText) },
+                        label = {
+                            Text(
+                                text = chipText,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1
+                            )
+                        },
+                        shape = RoundedCornerShape(20.dp),
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = onInputChange,
+                    modifier = Modifier.weight(1f),
+                    placeholder = {
+                        Text(
+                            "메시지를 입력하세요",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    },
+                    singleLine = false,
+                    maxLines = 4,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = Color.Transparent,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { if (sendEnabled) onSend() })
                 )
+                Spacer(Modifier.width(8.dp))
+                IconButton(
+                    onClick = { if (sendEnabled) onSend() },
+                    enabled = sendEnabled,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .graphicsLayer { scaleX = sendScale; scaleY = sendScale }
+                        .clip(CircleShape)
+                        .background(
+                            if (sendEnabled) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        )
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "전송",
+                        tint = if (sendEnabled) MaterialTheme.colorScheme.onPrimary
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

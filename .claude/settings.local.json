@@ -12,7 +12,8 @@
       "Bash(grep:*)",
       "Bash(ls:*)",
       "Bash(python:*)",
-      "Bash(./gradlew compileDebugKotlin:*)"
+      "Bash(./gradlew compileDebugKotlin:*)",
+      "Bash(cd \"D:/app/MBTIChatFriend/회의록\" && \\\\\nmkdir -p \"01_초기분석\" \\\\\n  \"스프린트_02\" \"스프린트_03\" \"스프린트_04\" \"스프린트_05\" \\\\\n  \"스프린트_06\" \"스프린트_07\" \"스프린트_08\" \"스프린트_09\" \\\\\n  \"스프린트_10\" \"스프린트_11\" \\\\\n  \"전략문서\")"
     ]
   }
 }
