@@ -1,6 +1,7 @@
 package com.example.mbtichatfriend.data.remote
 
 import android.util.Log
+import com.example.mbtichatfriend.BuildConfig
 import com.example.mbtichatfriend.data.local.UserPreferences
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.flow.first
@@ -16,7 +17,7 @@ class FcmTokenManager @Inject constructor(
     suspend fun ensureTokenRegistered() {
         try {
             val token = FirebaseMessaging.getInstance().token.await()
-            Log.d(TAG, "FCM token: $token")
+            if (BuildConfig.DEBUG) { Log.d(TAG, "FCM token: ...${token.takeLast(6)}") }
 
             val savedToken = prefs.fcmToken.first()
             if (savedToken != token) {

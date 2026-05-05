@@ -1,6 +1,8 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Dict, List, Literal, Optional
 
+from .config import MAX_CONVERSATION_HISTORY, MAX_MESSAGE_LENGTH
+
 _VALID_MBTI_TYPES = {
     "INTJ", "INTP", "ENTJ", "ENTP",
     "INFJ", "INFP", "ENFJ", "ENFP",
@@ -11,7 +13,7 @@ _VALID_MBTI_TYPES = {
 
 class HistoryMessage(BaseModel):
     role: Literal["user", "assistant"] = "user"
-    content: str = ""
+    content: str = Field(default="", max_length=MAX_MESSAGE_LENGTH)
 
 
 class MemoryItem(BaseModel):
@@ -20,7 +22,7 @@ class MemoryItem(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=1000)
+    message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LENGTH)
     mbti: str = Field(..., pattern=r"^[A-Z]{4}$")
     speech_style: Literal["FORMAL", "CASUAL", "TSUNDERE", "SWEET"] = "CASUAL"
     relationship: Literal["FRIEND", "LOVER", "SENIOR_JUNIOR"] = "FRIEND"
@@ -33,14 +35,19 @@ class ChatRequest(BaseModel):
             raise ValueError(f"유효하지 않은 MBTI 타입: {v}")
         return v
     affinity_level: int = Field(default=1, ge=1, le=5)
-    conversation_history: List[HistoryMessage] = Field(default_factory=list)
+    conversation_history: List[HistoryMessage] = Field(default_factory=list, max_length=MAX_CONVERSATION_HISTORY)
     user_mbti: Optional[str] = Field(default=None, pattern=r"^[A-Z]{4}$")
     character_name: str = Field(default="")
     character_id: str = Field(default="")
+    persona_raw: str = Field(default="", max_length=2000)
+    persona_summary: str = Field(default="", max_length=2000)
+    dialogue_prompt: str = Field(default="", max_length=4000)
+    visual_prompt: str = Field(default="", max_length=4000)
     room_id: str = Field(default="", max_length=120)
     end_of_session: bool = False
     client_local_hour: Optional[int] = Field(default=None, ge=0, le=23)
     memories: List[MemoryItem] = Field(default_factory=list)
+    mood: Optional[str] = Field(default=None, description="사용자 오늘 기분 (좋아/슬퍼/화남/고민/피곤/설렘)")
 
     @field_validator("message")
     @classmethod
@@ -109,7 +116,7 @@ class FinetuneRequest(BaseModel):
     relationship: Literal["FRIEND", "LOVER", "SENIOR_JUNIOR"] = "FRIEND"
     nickname: str = ""
     affinity_level: int = Field(default=1, ge=1, le=5)
-    conversations: List[dict] = Field(default_factory=list)
+    conversations: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class FinetuneResponse(BaseModel):
@@ -135,8 +142,8 @@ class FinetuneActivateRequest(BaseModel):
 
 class ImageGenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=2000)
-    size: str = Field(default="1024x1024")
-    quality: str = Field(default="standard")
+    size: Literal["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"] = "1024x1024"
+    quality: Literal["standard", "hd"] = "standard"
 
 
 class ImageGenerateResponse(BaseModel):
@@ -147,7 +154,7 @@ class ImageGenerateResponse(BaseModel):
 class ImageSetRequest(BaseModel):
     base_prompt: str = Field(..., min_length=1, max_length=4000)
     character_id: str = Field(..., min_length=1)
-    size: str = Field(default="1024x1024")
+    size: Literal["256x256", "512x512", "1024x1024"] = "1024x1024"
 
 
 class ImageSetResponse(BaseModel):
@@ -170,6 +177,34 @@ class FeedbackRequest(BaseModel):
     feedback_detail: str = Field(default="", max_length=200)
 
 
+class DeleteConversationRequest(BaseModel):
+    room_id: str = Field(default="", max_length=120)
+    character_id: str = Field(default="", max_length=120)
+    character_name: str = Field(default="", max_length=120)
+    nickname: str = Field(default="", max_length=120)
+
+
+class DeleteConversationResponse(BaseModel):
+    deleted_count: int = 0
+    status: str = "ok"
+    deleted_targets: List[str] = Field(default_factory=list)
+    cleanup_warnings: List[str] = Field(default_factory=list)
+
+
+class SessionStartRequest(BaseModel):
+    character_id: str = Field(..., min_length=1)
+    current_affinity_score: int = Field(..., ge=0, le=100)
+    current_affinity_level: int = Field(..., ge=1, le=5)
+    last_chat_iso: Optional[str] = None  # ISO 8601 format
+
+
+class SessionStartResponse(BaseModel):
+    adjusted_score: int = 0
+    return_bonus: int = 0
+    original_score: int = 0
+    days_inactive: int = 0
+
+
 class QualityDashboardResponse(BaseModel):
     avg_quality_score: float = 0.0
     avg_mbti_consistency: float = 0.0
@@ -182,3 +217,65 @@ class QualityDashboardResponse(BaseModel):
     thumbs_down_count: int = 0
     thumbs_up_rate: float = 0.0
     quality_trend: List[dict] = []
+
+
+# === 무드 체크인 ===
+
+
+_VALID_MOODS = {"좋아", "슬퍼", "화남", "고민", "피곤", "설렘"}
+
+
+class MoodCheckinRequest(BaseModel):
+    mood: str  # "좋아", "슬퍼", "화남", "고민", "피곤", "설렘"
+    character_id: str = ""
+    character_name: str = ""
+    mbti: str = ""
+    nickname: str = ""
+
+    @field_validator("mood")
+    @classmethod
+    def validate_mood(cls, v: str) -> str:
+        if v not in _VALID_MOODS:
+            raise ValueError(f"유효하지 않은 무드: {v}. 허용: {', '.join(sorted(_VALID_MOODS))}")
+        return v
+
+
+class MoodCheckinResponse(BaseModel):
+    message: str  # 캐릭터의 무드 반응 메시지
+    emotion: str = "NEUTRAL"  # 캐릭터 감정 코드
+
+
+# === MBTI 궁합 ===
+
+
+class CompatibilityRequest(BaseModel):
+    user_mbti: str = Field(..., pattern=r"^[A-Z]{4}$")
+    character_mbti: str = Field(..., pattern=r"^[A-Z]{4}$")
+
+    @field_validator("user_mbti", "character_mbti")
+    @classmethod
+    def validate_mbti_type(cls, v: str) -> str:
+        if v.upper() not in _VALID_MBTI_TYPES:
+            raise ValueError(f"유효하지 않은 MBTI 타입: {v}")
+        return v.upper()
+
+
+class CompatibilityResponse(BaseModel):
+    score: int  # 1-5 궁합 점수
+    description: str  # 궁합 설명
+    strengths: List[str]  # 잘 맞는 점
+    challenges: List[str]  # 주의할 점
+
+
+# === 기억 조회 ===
+
+
+class MemoryListResponse(BaseModel):
+    summary: str = ""  # 대화 요약
+    facts: List[dict] = []  # [{key, value}]
+    total_conversations: int = 0
+
+
+class ClientConfigResponse(BaseModel):
+    max_message_length: int = MAX_MESSAGE_LENGTH
+    max_conversation_history: int = MAX_CONVERSATION_HISTORY

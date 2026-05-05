@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from openai import AsyncOpenAI
 
-from .config import OPENAI_API_KEY
+from .config import OPENAI_API_KEY, LLM_MODEL_SIMPLE, MAX_MESSAGE_LENGTH
 from .metrics_service import record_event
 from .postgres import fetchall, fetchone, postgres_enabled
 
@@ -33,7 +34,7 @@ async def score_response_async(
     room_id: str = "",
     character_id: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """gpt-4o-mini 를 사용해 응답 품질 4가지 축을 0-10으로 평가.
+    """gpt-4.1-mini 를 사용해 응답 품질 4가지 축을 0-10으로 평가.
 
     반환: {"mbti_consistency", "contextual_relevance",
            "emotional_naturalness", "engagement_quality",
@@ -53,7 +54,7 @@ async def score_response_async(
 
     try:
         resp = await _client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=100,
@@ -97,65 +98,54 @@ async def score_response_async(
 # ── 빠른 품질 체크 (응답 전 게이트) ──────────────────────────────
 
 
-async def quick_score(user_msg: str, ai_response: str, mbti: str) -> float:
-    """응답 전 빠른 품질 체크 (~100ms). 0.0~1.0 반환.
+def quick_score(user_msg: str, ai_response: str, mbti: str) -> float:
+    """응답 전 빠른 품질 체크 (LLM 호출 없이 ~1ms). 0.0~1.0 반환.
 
-    JSON 형식 유효성 + MBTI 일관성만 빠르게 확인.
+    JSON 형식 유효성만 확인. MBTI 일관성은 _post_response_quality_check에서 비동기 처리.
     """
-    if not _client:
-        return 1.0  # 클라이언트 없으면 통과
-
-    # 1. 기본 형식 체크 (LLM 없이)
-    format_score = 0.5
+    # JSON 배열 형식 검증 (LLM 불필요)
     try:
-        # JSON 배열 파싱 가능한지 확인
-        import re as _re
-        clean = _re.sub(r'```json?\s*', '', ai_response)
-        clean = _re.sub(r'```\s*', '', clean).strip()
+        clean = re.sub(r'```json?\s*', '', ai_response)
+        clean = re.sub(r'```\s*', '', clean).strip()
         start = clean.find("[")
         end = clean.rfind("]") + 1
-        if start >= 0 and end > start:
-            data = json.loads(clean[start:end])
-            if isinstance(data, list) and len(data) > 0:
-                has_text = all(isinstance(d, dict) and d.get("text") for d in data)
-                format_score = 1.0 if has_text else 0.3
-            else:
-                format_score = 0.2
+        if start < 0 or end <= start:
+            return 0.1
+
+        data = json.loads(clean[start:end])
+        if not isinstance(data, list) or len(data) == 0:
+            return 0.2
+
+        # 필수 필드 체크: text 존재 여부
+        has_text = all(isinstance(d, dict) and d.get("text") for d in data)
+        if not has_text:
+            return 0.3
+
+        # emotion 필드 유효성 체크
+        valid_emotions = {
+            "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
+            "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",
+        }
+        has_valid_emotion = all(
+            isinstance(d, dict) and d.get("emotion") in valid_emotions
+            for d in data
+        )
+
+        # 텍스트 길이 합리성 (너무 짧거나 너무 긴 응답 감점)
+        total_len = sum(len(d.get("text", "")) for d in data)
+        length_ok = 2 <= total_len <= MAX_MESSAGE_LENGTH
+
+        if has_valid_emotion and length_ok:
+            return 1.0
+        elif has_valid_emotion:
+            return 0.8
+        elif length_ok:
+            return 0.7
         else:
-            format_score = 0.1
+            return 0.5
+
     except (json.JSONDecodeError, Exception):
-        format_score = 0.1
-
-    # 형식이 매우 나쁘면 바로 반환 (LLM 호출 절약)
-    if format_score < 0.2:
-        return format_score
-
-    # 2. LLM으로 MBTI 일관성 빠르게 확인
-    try:
-        prompt = (
-            f"{mbti} 캐릭터의 응답이 자연스러운지 0-10으로 평가.\n"
-            f"사용자: \"{user_msg[:100]}\"\nAI: \"{ai_response[:200]}\"\n"
-            'JSON만: {"score": 0}'
-        )
-        resp = await _client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=30,
-        )
-        content = resp.choices[0].message.content or ""
-        s = content.find("{")
-        e = content.rfind("}") + 1
-        if s >= 0 and e > s:
-            data = json.loads(content[s:e])
-            llm_score = _clamp(data.get("score", 5)) / 10.0
-        else:
-            llm_score = 0.5
-    except Exception:
-        llm_score = 0.5
-
-    # 가중 평균: 형식 40% + MBTI 일관성 60%
-    return round(format_score * 0.4 + llm_score * 0.6, 2)
+        return 0.1
 
 
 # ── 응답 다양성 추적 ─────────────────────────────────────────────
@@ -166,9 +156,17 @@ def _bigrams(text: str) -> List[Tuple[str, str]]:
     return list(zip(tokens, tokens[1:])) if len(tokens) >= 2 else []
 
 
+def _scope_filter(room_id: str, character_id: str) -> Tuple[str, Tuple[Any, ...]]:
+    scoped_room_id = (room_id or "").strip()
+    if scoped_room_id:
+        return "room_id = %s", (scoped_room_id,)
+    return "character_id = %s", (character_id,)
+
+
 def check_diversity(
     character_id: str,
     new_response: str,
+    room_id: str = "",
     n_recent: int = 20,
 ) -> float:
     """최근 n_recent 개 응답과 bigram 겹침 비율을 계산해 diversity_score 반환.
@@ -179,16 +177,17 @@ def check_diversity(
     if not postgres_enabled():
         return 1.0
 
+    scope_sql, scope_params = _scope_filter(room_id, character_id)
     rows = fetchall(
-        """
+        f"""
         SELECT payload->>'ai_response' AS resp
         FROM metric_events
         WHERE event_type = 'quality_score'
-          AND character_id = %s
+          AND {scope_sql}
         ORDER BY created_at DESC
         LIMIT %s
         """,
-        (character_id, n_recent),
+        scope_params + (n_recent,),
     )
 
     if not rows:
@@ -220,6 +219,7 @@ def check_diversity(
     if diversity_score < 0.3:
         record_event(
             event_type="low_diversity_warning",
+            room_id=room_id,
             character_id=character_id,
             payload={
                 "diversity_score": diversity_score,
@@ -235,6 +235,7 @@ def check_diversity(
 
 def get_quality_filtered_conversations(
     character_id: str,
+    room_id: str = "",
     min_score: float = 0.6,
 ) -> List[Dict[str, Any]]:
     """quality_score >= min_score AND thumbs_down 아닌 대화만 반환."""
@@ -245,49 +246,29 @@ def get_quality_filtered_conversations(
     # 2) thumbs_down 받은 message_id 수집
     # 3) 나머지만 반환
 
-    quality_rows = fetchall(
-        """
-        SELECT room_id,
-               (payload->>'quality_score')::float AS qs
-        FROM metric_events
-        WHERE event_type = 'quality_score'
-          AND character_id = %s
+    # 3개 쿼리를 1개 통합 쿼리로: thumbs_down 받지 않고 quality_score >= min_score인 room_id만 반환
+    scope_sql, scope_params = _scope_filter(room_id, character_id)
+    rows = fetchall(
+        f"""
+        SELECT me.room_id,
+               (me.payload->>'quality_score')::float AS qs
+        FROM metric_events me
+        WHERE me.event_type = 'quality_score'
+          AND me.{scope_sql}
+          AND (me.payload->>'quality_score')::float >= %s
+          AND me.room_id NOT IN (
+              SELECT DISTINCT room_id
+              FROM response_feedback
+              WHERE {scope_sql}
+                AND feedback_type = 'thumbs_down'
+          )
         """,
-        (character_id,),
-    )
-
-    low_quality_rooms = {
-        r["room_id"] for r in quality_rows if (r.get("qs") or 0) < min_score
-    }
-
-    thumbs_down_rows = fetchall(
-        """
-        SELECT DISTINCT room_id
-        FROM response_feedback
-        WHERE character_id = %s AND feedback_type = 'thumbs_down'
-        """,
-        (character_id,),
-    )
-    thumbs_down_rooms = {r["room_id"] for r in thumbs_down_rows}
-
-    excluded_rooms = low_quality_rooms | thumbs_down_rooms
-
-    good_rows = fetchall(
-        """
-        SELECT room_id,
-               (payload->>'quality_score')::float AS qs
-        FROM metric_events
-        WHERE event_type = 'quality_score'
-          AND character_id = %s
-          AND (payload->>'quality_score')::float >= %s
-        """,
-        (character_id, min_score),
+        scope_params + (min_score,) + scope_params,
     )
 
     return [
         {"room_id": r["room_id"], "quality_score": r["qs"]}
-        for r in good_rows
-        if r["room_id"] not in excluded_rooms
+        for r in rows
     ]
 
 
@@ -297,6 +278,7 @@ def get_quality_filtered_conversations(
 def get_quality_dashboard(
     character_id: str,
     days: int = 30,
+    room_id: str = "",
 ) -> Dict[str, Any]:
     """character_id 에 대한 품질 대시보드 데이터를 집계."""
     empty = {
@@ -317,8 +299,10 @@ def get_quality_dashboard(
         return empty
 
     # 품질 점수 집계
+    scope_sql, scope_params = _scope_filter(room_id, character_id)
+
     agg = fetchone(
-        """
+        f"""
         SELECT
             COALESCE(AVG((payload->>'quality_score')::float), 0) AS avg_qs,
             COALESCE(AVG((payload->>'mbti_consistency')::float), 0) AS avg_mc,
@@ -328,51 +312,51 @@ def get_quality_dashboard(
             COUNT(*) AS total
         FROM metric_events
         WHERE event_type = 'quality_score'
-          AND character_id = %s
-          AND created_at >= NOW() - INTERVAL '%s days'
+          AND {scope_sql}
+          AND created_at >= NOW() - INTERVAL '1 day' * %s
         """,
-        (character_id, days),
+        scope_params + (days,),
     )
 
     # 다양성 점수 평균
     div_agg = fetchone(
-        """
+        f"""
         SELECT COALESCE(AVG((payload->>'diversity_score')::float), 0) AS avg_div
         FROM metric_events
         WHERE event_type = 'low_diversity_warning'
-          AND character_id = %s
-          AND created_at >= NOW() - INTERVAL '%s days'
+          AND {scope_sql}
+          AND created_at >= NOW() - INTERVAL '1 day' * %s
         """,
-        (character_id, days),
+        scope_params + (days,),
     )
 
     # 피드백 카운트
     fb = fetchone(
-        """
+        f"""
         SELECT
             COALESCE(SUM(CASE WHEN feedback_type = 'thumbs_up' THEN 1 ELSE 0 END), 0) AS up,
             COALESCE(SUM(CASE WHEN feedback_type = 'thumbs_down' THEN 1 ELSE 0 END), 0) AS down
         FROM response_feedback
-        WHERE character_id = %s
-          AND created_at >= NOW() - INTERVAL '%s days'
+        WHERE {scope_sql}
+          AND created_at >= NOW() - INTERVAL '1 day' * %s
         """,
-        (character_id, days),
+        scope_params + (days,),
     )
 
     # 일별 추이
     trend_rows = fetchall(
-        """
+        f"""
         SELECT
             DATE(created_at) AS d,
             AVG((payload->>'quality_score')::float) AS avg_score
         FROM metric_events
         WHERE event_type = 'quality_score'
-          AND character_id = %s
-          AND created_at >= NOW() - INTERVAL '%s days'
+          AND {scope_sql}
+          AND created_at >= NOW() - INTERVAL '1 day' * %s
         GROUP BY DATE(created_at)
         ORDER BY d
         """,
-        (character_id, days),
+        scope_params + (days,),
     )
 
     total_turns = (agg or {}).get("total", 0)
@@ -401,21 +385,22 @@ def get_quality_dashboard(
 # ── 다양성 리포트 ────────────────────────────────────────────────
 
 
-def get_diversity_report(character_id: str) -> Dict[str, Any]:
+def get_diversity_report(character_id: str, room_id: str = "") -> Dict[str, Any]:
     """최근 다양성 경고 이벤트 기반 리포트."""
     if not postgres_enabled():
         return {"warnings": [], "avg_diversity": 1.0}
 
+    scope_sql, scope_params = _scope_filter(room_id, character_id)
     rows = fetchall(
-        """
+        f"""
         SELECT payload, created_at
         FROM metric_events
         WHERE event_type = 'low_diversity_warning'
-          AND character_id = %s
+          AND {scope_sql}
         ORDER BY created_at DESC
         LIMIT 20
         """,
-        (character_id,),
+        scope_params,
     )
 
     if not rows:

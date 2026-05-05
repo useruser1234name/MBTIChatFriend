@@ -1,6 +1,7 @@
 package com.example.mbtichatfriend.ui.settings
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,10 +19,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
@@ -37,6 +40,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -70,12 +75,24 @@ fun SettingsScreen(
     val context = LocalContext.current
     var showNicknameDialog by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var showDeleteDataDialog by remember { mutableStateOf(false) }
+    val characters by viewModel.characters.collectAsState(initial = emptyList())
+    val deleteResult by viewModel.deleteResult.collectAsState(initial = null)
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    Column(
+    LaunchedEffect(deleteResult) {
+        deleteResult?.let { message ->
+            snackbarHostState.showSnackbar(message)
+            viewModel.clearDeleteResult()
+        }
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .systemBarsPadding()
     ) {
+        Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text("설정") },
             navigationIcon = {
@@ -227,6 +244,24 @@ fun SettingsScreen(
                 subtitle = BuildConfig.VERSION_NAME
             )
 
+            Spacer(Modifier.height(16.dp))
+
+            // 데이터 관리 섹션
+            Text(
+                "데이터 관리",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+            )
+
+            SettingsItem(
+                icon = Icons.Default.Delete,
+                title = "대화 데이터 삭제",
+                subtitle = "캐릭터별 서버 대화 기록 초기화",
+                onClick = { showDeleteDataDialog = true },
+                isDestructive = true
+            )
+
             Spacer(Modifier.height(8.dp))
 
             // 로그아웃
@@ -240,6 +275,15 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(32.dp))
         }
+        }
+
+        // 삭제 결과 Snackbar
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(16.dp)
+        )
     }
 
     // 계정 연동 에러 Snackbar
@@ -291,6 +335,42 @@ fun SettingsScreen(
             }
         )
     }
+
+    // 대화 데이터 삭제 다이얼로그
+    if (showDeleteDataDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDataDialog = false },
+            title = { Text("대화 데이터 삭제") },
+            text = {
+                Column {
+                    Text("삭제할 캐릭터를 선택하세요:")
+                    Spacer(Modifier.height(12.dp))
+                    if (characters.isEmpty()) {
+                        Text("캐릭터가 없습니다", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        characters.forEach { ch ->
+                            TextButton(
+                                onClick = {
+                                    showDeleteDataDialog = false
+                                    viewModel.deleteConversationData(ch.id.toString(), ch.name)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("${ch.name} (${ch.mbti})", modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showDeleteDataDialog = false }) {
+                    Text("닫기")
+                }
+            }
+        )
+    }
+
 }
 
 @Composable

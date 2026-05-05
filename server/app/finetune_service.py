@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set
 
 from openai import AsyncOpenAI
 
-from .config import OPENAI_API_KEY
+from .config import OPENAI_API_KEY, LLM_MODEL_BASE
 from .prompts import build_system_prompt, AFFINITY_BEHAVIORS
 
 logger = logging.getLogger(__name__)
@@ -20,14 +20,45 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 _MODELS_FILE = "./finetune_models.json"
 
 # 인메모리 캐시 (매 요청 파일 읽기 제거)
-_models_cache: Optional[Dict[str, str]] = None
+_models_cache: Optional[Dict[str, Dict[str, dict | str]]] = None
 _models_cache_mtime: float = 0.0
 
 
-def _load_models() -> Dict[str, str]:
+def _empty_store() -> Dict[str, Dict[str, dict | str]]:
+    return {"models": {}, "jobs": {}}
+
+
+def _scope_key(owner_uid: str, character_id: str) -> str:
+    return f"{owner_uid.strip()}:{character_id.strip()}"
+
+
+def _normalize_store(data: object) -> Dict[str, Dict[str, dict | str]]:
+    if isinstance(data, dict) and isinstance(data.get("models"), dict):
+        models = {str(k): str(v) for k, v in data.get("models", {}).items() if isinstance(v, str)}
+        jobs: Dict[str, dict] = {}
+        raw_jobs = data.get("jobs", {})
+        if isinstance(raw_jobs, dict):
+            for job_id, meta in raw_jobs.items():
+                if not isinstance(meta, dict):
+                    continue
+                owner_uid = str(meta.get("owner_uid", "")).strip()
+                character_id = str(meta.get("character_id", "")).strip()
+                if owner_uid and character_id:
+                    jobs[str(job_id)] = {"owner_uid": owner_uid, "character_id": character_id}
+        return {"models": models, "jobs": jobs}
+
+    legacy_models: Dict[str, str] = {}
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, str):
+                legacy_models[str(key)] = value
+    return {"models": legacy_models, "jobs": {}}
+
+
+def _load_store() -> Dict[str, Dict[str, dict | str]]:
     global _models_cache, _models_cache_mtime
     if not os.path.exists(_MODELS_FILE):
-        _models_cache = {}
+        _models_cache = _empty_store()
         return _models_cache
 
     mtime = os.path.getmtime(_MODELS_FILE)
@@ -36,18 +67,18 @@ def _load_models() -> Dict[str, str]:
 
     try:
         with open(_MODELS_FILE, encoding="utf-8") as f:
-            _models_cache = json.load(f)
+            _models_cache = _normalize_store(json.load(f))
             _models_cache_mtime = mtime
     except Exception:
-        _models_cache = {}
+        _models_cache = _empty_store()
     return _models_cache
 
 
-def _save_models(models: Dict[str, str]) -> None:
+def _save_store(store: Dict[str, Dict[str, dict | str]]) -> None:
     global _models_cache, _models_cache_mtime
     with open(_MODELS_FILE, "w", encoding="utf-8") as f:
-        json.dump(models, f, ensure_ascii=False, indent=2)
-    _models_cache = models
+        json.dump(store, f, ensure_ascii=False, indent=2)
+    _models_cache = store
     _models_cache_mtime = os.path.getmtime(_MODELS_FILE)
 
 
@@ -56,20 +87,46 @@ def _validate_model_id(model_id: str) -> bool:
     return bool(re.match(r'^(ft:|gpt-)', model_id))
 
 
-def get_model_for_character(character_id: str) -> str:
-    """캐릭터에 파인튜닝 모델이 있으면 반환, 없으면 기본 gpt-4o"""
+def get_model_for_character(character_id: str, owner_uid: str = "") -> str:
+    """캐릭터에 파인튜닝 모델이 있으면 반환, 없으면 기본 모델"""
     if not character_id:
-        return "gpt-4o"
-    return _load_models().get(character_id, "gpt-4o")
+        return LLM_MODEL_BASE
+    models = _load_store().get("models", {})
+    scoped_key = _scope_key(owner_uid, character_id) if owner_uid else ""
+    if scoped_key and scoped_key in models:
+        return str(models[scoped_key])
+    return LLM_MODEL_BASE
 
 
-def activate_model(character_id: str, model_id: str) -> None:
+def activate_model(character_id: str, model_id: str, owner_uid: str) -> None:
     """캐릭터에 파인튜닝 모델 활성화"""
     if not _validate_model_id(model_id):
         raise ValueError(f"유효하지 않은 model_id 형식: {model_id}")
-    models = _load_models()
-    models[character_id] = model_id
-    _save_models(models)
+    store = _load_store()
+    models = dict(store.get("models", {}))
+    models[_scope_key(owner_uid, character_id)] = model_id
+    store["models"] = models
+    _save_store(store)
+
+
+def _record_job_owner(job_id: str, owner_uid: str, character_id: str) -> None:
+    store = _load_store()
+    jobs = dict(store.get("jobs", {}))
+    jobs[job_id] = {
+        "owner_uid": owner_uid.strip(),
+        "character_id": character_id.strip(),
+    }
+    store["jobs"] = jobs
+    _save_store(store)
+
+
+def _assert_job_owner(job_id: str, owner_uid: str) -> None:
+    jobs = _load_store().get("jobs", {})
+    meta = jobs.get(job_id)
+    if not isinstance(meta, dict):
+        raise PermissionError("job ownership not found")
+    if meta.get("owner_uid") != owner_uid:
+        raise PermissionError("job does not belong to the authenticated user")
 
 
 def _build_training_examples(
@@ -116,6 +173,7 @@ def _build_training_examples(
 
 async def prepare_and_start_finetune(
     character_id: str,
+    owner_uid: str,
     character_name: str,
     mbti: str,
     speech_style: str,
@@ -203,11 +261,12 @@ async def prepare_and_start_finetune(
         suffix = f"mbti-{character_id[:8]}"
         job = await client.fine_tuning.jobs.create(
             training_file=file_obj.id,
-            model="gpt-4o-mini-2024-07-18",
+            model="gpt-4.1-mini-2025-04-14",
             suffix=suffix,
             hyperparameters={"n_epochs": 3}
         )
 
+        _record_job_owner(job.id, owner_uid, character_id)
         logger.info(f"Fine-tuning 시작: {job.id} / 캐릭터: {character_id}")
         return {
             "job_id": job.id,
@@ -217,6 +276,10 @@ async def prepare_and_start_finetune(
             "error": ""
         }
 
+    except PermissionError:
+        raise
+    except PermissionError:
+        raise
     except Exception as e:
         logger.error(f"Fine-tuning 시작 실패: {e}")
         return {
@@ -231,11 +294,12 @@ async def prepare_and_start_finetune(
             os.unlink(tmp_path)
 
 
-async def check_finetune_status(job_id: str) -> dict:
+async def check_finetune_status(job_id: str, owner_uid: str) -> dict:
     """Fine-tuning 잡 상태 조회"""
     if not client:
         return {"job_id": job_id, "status": "failed", "fine_tuned_model": "", "error": "API 키 없음"}
     try:
+        _assert_job_owner(job_id, owner_uid)
         job = await client.fine_tuning.jobs.retrieve(job_id)
         return {
             "job_id": job.id,

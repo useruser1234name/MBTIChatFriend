@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -66,6 +67,15 @@ fun OnboardingScaffold(
         }
 
         Spacer(Modifier.height(4.dp))
+
+        // 단계 텍스트
+        Text(
+            text = "$step/$totalSteps 단계",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
 
         LinearProgressIndicator(
             progress = { step.toFloat() / totalSteps },

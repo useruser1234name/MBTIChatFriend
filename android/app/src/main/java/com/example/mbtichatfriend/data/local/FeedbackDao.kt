@@ -18,4 +18,10 @@ interface FeedbackDao {
 
     @Query("UPDATE feedback SET synced = 1 WHERE id = :id")
     suspend fun markSynced(id: Long)
+
+    @Query("DELETE FROM feedback WHERE characterId = :characterId")
+    suspend fun deleteByCharacter(characterId: Long)
+
+    @Query("DELETE FROM feedback")
+    suspend fun deleteAll()
 }

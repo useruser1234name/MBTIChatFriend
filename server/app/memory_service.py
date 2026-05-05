@@ -1,22 +1,40 @@
 """대화 기억 서비스 - PostgreSQL 영속화 + 인메모리 캐시 패턴"""
 
+import asyncio
 import json
 import logging
+from collections import OrderedDict
 from typing import Dict, List, Optional
 
 from openai import AsyncOpenAI
 
-from .config import OPENAI_API_KEY
+from .config import OPENAI_API_KEY, LLM_MODEL_SIMPLE
 from .models import HistoryMessage
 from .postgres import fetchone, execute, postgres_enabled, to_jsonb
+from .scopes import build_legacy_memory_key, build_memory_key
 
 logger = logging.getLogger(__name__)
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# 인메모리 캐시 (PostgreSQL 앞단 캐시 레이어)
-_conversation_summaries: Dict[str, str] = {}
-_character_memories: Dict[str, List[dict]] = {}  # key-value 구조로 변경
+# 인메모리 캐시 (PostgreSQL 앞단 캐시 레이어) - OrderedDict로 FIFO eviction 지원
+_conversation_summaries: OrderedDict[str, str] = OrderedDict()
+_character_memories: OrderedDict[str, List[dict]] = OrderedDict()  # key-value 구조로 변경
+
+# 절대 제거하면 안 되는 핵심 팩트 키
+_CORE_FACT_KEYS = {"이름", "직업", "고민", "좋아하는것", "싫어하는것", "나이", "학교", "취미", "좋아하는 음식", "성격"}
+
+# 캐시 최대 크기
+_MAX_SUMMARIES = 200
+_MAX_MEMORIES = 200
+
+def _evict_if_needed() -> None:
+    """캐시 크기가 MAX를 초과하면 가장 오래된 항목(FIFO) 제거"""
+    while len(_conversation_summaries) > _MAX_SUMMARIES:
+        _conversation_summaries.popitem(last=False)
+    while len(_character_memories) > _MAX_MEMORIES:
+        _character_memories.popitem(last=False)
+
 
 SUMMARY_PROMPT = """아래는 AI 캐릭터와 사용자 간의 이전 대화 내용이야.
 이 대화를 간결하게 요약해줘. 반드시 다음 정보를 포함해:
@@ -59,23 +77,62 @@ def _build_conversation_text(history: List[HistoryMessage]) -> str:
     return "\n".join(lines)
 
 
-def get_memory_key(character_name: str, nickname: str) -> str:
-    """캐릭터+사용자 조합 키"""
-    return f"{character_name}_{nickname}"
+def get_memory_key(
+    character_name: str = "",
+    nickname: str = "",
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
+) -> str:
+    return build_memory_key(
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+        character_name=character_name,
+        nickname=nickname,
+    )
 
 
-def _load_from_db(key: str) -> None:
-    """PostgreSQL에서 캐시로 로드 (cold start 시)"""
+def _resolve_memory_keys(
+    character_name: str = "",
+    nickname: str = "",
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
+) -> tuple[str, list[str]]:
+    primary_key = get_memory_key(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    fallback_keys: list[str] = []
+    legacy_key = build_legacy_memory_key(character_name, nickname)
+    if not user and not room_id and not character_id and legacy_key and legacy_key != primary_key:
+        fallback_keys.append(legacy_key)
+    return primary_key, fallback_keys
+
+
+async def _load_from_db(key: str, fallback_keys: Optional[list[str]] = None) -> None:
+    """PostgreSQL에서 캐시로 로드 (cold start 시) - async"""
     if not postgres_enabled():
         return
     if key in _conversation_summaries:
         return  # 이미 캐시에 있음
 
-    row = fetchone(
-        "SELECT summary, facts FROM conversation_memory WHERE memory_key = %s",
-        (key,),
-    )
-    if row:
+    candidate_keys = [key] + [candidate for candidate in (fallback_keys or []) if candidate]
+    for candidate_key in candidate_keys:
+        row = await asyncio.to_thread(
+            fetchone,
+            "SELECT summary, facts FROM conversation_memory WHERE memory_key = %s",
+            (candidate_key,),
+        )
+        if not row:
+            continue
+
         _conversation_summaries[key] = row.get("summary", "")
         facts_raw = row.get("facts", [])
         if isinstance(facts_raw, list):
@@ -85,15 +142,20 @@ def _load_from_db(key: str) -> None:
                 _character_memories[key] = json.loads(facts_raw)
             except (json.JSONDecodeError, TypeError):
                 _character_memories[key] = []
+        else:
+            _character_memories[key] = []
+        _evict_if_needed()
+        return
 
 
-def _save_to_db(key: str) -> None:
-    """인메모리 캐시 → PostgreSQL 영속화"""
+async def _save_to_db(key: str) -> None:
+    """인메모리 캐시 → PostgreSQL 영속화 - async"""
     if not postgres_enabled():
         return
     summary = _conversation_summaries.get(key, "")
     facts = _character_memories.get(key, [])
-    execute(
+    await asyncio.to_thread(
+        execute,
         """
         INSERT INTO conversation_memory (memory_key, summary, facts, updated_at)
         VALUES (%s, %s, %s, NOW())
@@ -106,17 +168,43 @@ def _save_to_db(key: str) -> None:
     )
 
 
-def get_existing_summary(character_name: str, nickname: str) -> str:
-    """기존 요약 가져오기 (캐시 미스 시 DB 로드)"""
-    key = get_memory_key(character_name, nickname)
-    _load_from_db(key)
+async def get_existing_summary(
+    character_name: str,
+    nickname: str,
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
+) -> str:
+    """기존 요약 가져오기 (캐시 미스 시 DB 로드) - async"""
+    key, fallback_keys = _resolve_memory_keys(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    await _load_from_db(key, fallback_keys)
     return _conversation_summaries.get(key, "")
 
 
-def get_existing_facts(character_name: str, nickname: str) -> List[dict]:
-    """기존 핵심 정보 가져오기 (key-value 구조)"""
-    key = get_memory_key(character_name, nickname)
-    _load_from_db(key)
+async def get_existing_facts(
+    character_name: str,
+    nickname: str,
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
+) -> List[dict]:
+    """기존 핵심 정보 가져오기 (key-value 구조) - async"""
+    key, fallback_keys = _resolve_memory_keys(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    await _load_from_db(key, fallback_keys)
     return _character_memories.get(key, [])
 
 
@@ -124,13 +212,29 @@ async def summarize_conversation(
     character_name: str,
     nickname: str,
     conversation_history: List[HistoryMessage],
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
 ) -> str:
     """대화 내용을 요약하여 저장하고 반환"""
     if not client or len(conversation_history) < 4:
-        return get_existing_summary(character_name, nickname)
+        return await get_existing_summary(
+            character_name,
+            nickname,
+            user=user,
+            room_id=room_id,
+            character_id=character_id,
+        )
 
-    key = get_memory_key(character_name, nickname)
-    _load_from_db(key)
+    key, fallback_keys = _resolve_memory_keys(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    await _load_from_db(key, fallback_keys)
     existing = _conversation_summaries.get(key, "")
 
     conv_text = _build_conversation_text(conversation_history)
@@ -141,7 +245,7 @@ async def summarize_conversation(
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": conv_text}
@@ -151,7 +255,8 @@ async def summarize_conversation(
         )
         summary = response.choices[0].message.content or ""
         _conversation_summaries[key] = summary.strip()
-        _save_to_db(key)
+        await _save_to_db(key)
+        _evict_if_needed()
         logger.info(f"대화 요약 갱신 [{key}]: {summary[:50]}...")
         return summary.strip()
     except Exception as e:
@@ -163,13 +268,29 @@ async def extract_facts(
     character_name: str,
     nickname: str,
     conversation_history: List[HistoryMessage],
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
 ) -> List[dict]:
     """대화에서 사용자에 대한 핵심 정보 추출 (key-value 구조)"""
     if not client or len(conversation_history) < 2:
-        return get_existing_facts(character_name, nickname)
+        return await get_existing_facts(
+            character_name,
+            nickname,
+            user=user,
+            room_id=room_id,
+            character_id=character_id,
+        )
 
-    key = get_memory_key(character_name, nickname)
-    _load_from_db(key)
+    key, fallback_keys = _resolve_memory_keys(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    await _load_from_db(key, fallback_keys)
     existing = _character_memories.get(key, [])
     known = "\n".join(
         f"- {f['key']}: {f['value']}" for f in existing if isinstance(f, dict)
@@ -183,7 +304,7 @@ async def extract_facts(
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=300
@@ -215,8 +336,13 @@ async def extract_facts(
             merged = list(existing) + [
                 f for f in new_facts if f["key"] not in existing_keys
             ]
-            _character_memories[key] = merged[-15:]
-            _save_to_db(key)
+            # 핵심 정보는 절대 제거하지 않음
+            core = [f for f in merged if isinstance(f, dict) and f.get("key") in _CORE_FACT_KEYS]
+            non_core = [f for f in merged if isinstance(f, dict) and f.get("key") not in _CORE_FACT_KEYS]
+            max_non_core = max(0, 15 - len(core))
+            _character_memories[key] = core + (non_core[-max_non_core:] if max_non_core > 0 else [])
+            await _save_to_db(key)
+            _evict_if_needed()
             logger.info(f"핵심 정보 업데이트 [{key}]: +{len(new_facts)}개")
 
         return _character_memories.get(key, existing)
@@ -248,6 +374,7 @@ async def extract_episodes(
     nickname: str,
     conversation_history: "List[HistoryMessage]",
     character_id: str = "",
+    room_id: str = "",
 ) -> list:
     """대화에서 감정적으로 의미 있는 에피소드 추출 → ChromaDB에 저장"""
     if not client or len(conversation_history) < 4:
@@ -259,7 +386,7 @@ async def extract_episodes(
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=[
                 {"role": "system", "content": EXTRACT_EPISODES_PROMPT},
                 {"role": "user", "content": f"캐릭터: {character_name}, 사용자: {nickname}\n\n{conv_text}"},
@@ -280,10 +407,11 @@ async def extract_episodes(
             if isinstance(ep, dict) and ep.get("text")
         ]
 
-        if valid_episodes and character_id:
+        scope_id = room_id.strip() or character_id.strip()
+        if valid_episodes and scope_id:
             store = get_store()
             if store:
-                store.upsert_episodes(character_id, valid_episodes)
+                store.upsert_episodes(scope_id, valid_episodes)
 
         logger.info(f"에피소드 추출 [{character_name}]: {len(valid_episodes)}개")
         return valid_episodes
@@ -293,10 +421,29 @@ async def extract_episodes(
         return []
 
 
-def build_memory_context(character_name: str, nickname: str) -> str:
+async def build_memory_context(
+    character_name: str,
+    nickname: str,
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
+) -> str:
     """프롬프트에 포함할 기억 컨텍스트 생성 (캐릭터 시점)"""
-    summary = get_existing_summary(character_name, nickname)
-    facts = get_existing_facts(character_name, nickname)
+    summary = await get_existing_summary(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    facts = await get_existing_facts(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
 
     parts = []
     if summary:

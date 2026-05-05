@@ -12,7 +12,7 @@ interface MessageDao {
     fun observeByCharacter(characterId: Long): Flow<List<MessageEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(message: MessageEntity)
+    suspend fun insert(message: MessageEntity): Long
 
     @Query("DELETE FROM messages WHERE characterId = :characterId")
     suspend fun deleteByCharacter(characterId: Long)
@@ -25,6 +25,9 @@ interface MessageDao {
 
     @Query("DELETE FROM messages")
     suspend fun deleteAll()
+
+    @Query("DELETE FROM messages WHERE id = :id")
+    suspend fun deleteById(id: Long)
 
     @Query("""
         SELECT m.* FROM messages m

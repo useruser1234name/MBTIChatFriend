@@ -1,14 +1,19 @@
 package com.example.mbtichatfriend.data.local
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
@@ -20,6 +25,20 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 class UserPreferences @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
+    // EncryptedSharedPreferences - 민감 정보 (UID, FCM 토큰) 전용
+    private val encryptedPrefs: SharedPreferences by lazy {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        EncryptedSharedPreferences.create(
+            context,
+            "secure_user_prefs",
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
     private object Keys {
         val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
         val NICKNAME = stringPreferencesKey("nickname")
@@ -30,12 +49,37 @@ class UserPreferences @Inject constructor(
         val SPEECH_STYLE = stringPreferencesKey("speech_style")
         val RELATIONSHIP = stringPreferencesKey("relationship")
         val DARK_MODE = stringPreferencesKey("dark_mode") // "system", "light", "dark"
-        val FIREBASE_UID = stringPreferencesKey("firebase_uid")
         val AUTH_PROVIDER = stringPreferencesKey("auth_provider") // "anonymous", "google", "none"
-        val FCM_TOKEN = stringPreferencesKey("fcm_token")
         val FCM_TOKEN_SYNCED = booleanPreferencesKey("fcm_token_synced")
-        val OPENAI_API_KEY = stringPreferencesKey("openai_api_key")
+        val TODAY_MOOD = stringPreferencesKey("today_mood")
+        val MOOD_CHECK_DATE = stringPreferencesKey("mood_check_date")
     }
+
+    // EncryptedSharedPreferences 키 상수
+    private object SecureKeys {
+        const val FIREBASE_UID = "secure_firebase_uid"
+        const val FCM_TOKEN = "secure_fcm_token"
+    }
+
+    // ---- EncryptedSharedPreferences 기반 민감 데이터 ----
+
+    private val _firebaseUid = MutableStateFlow(encryptedPrefs.getString(SecureKeys.FIREBASE_UID, "") ?: "")
+    val firebaseUid: Flow<String> = _firebaseUid.asStateFlow()
+
+    private val _fcmToken = MutableStateFlow(encryptedPrefs.getString(SecureKeys.FCM_TOKEN, "") ?: "")
+    val fcmToken: Flow<String> = _fcmToken.asStateFlow()
+
+    fun updateFirebaseUidSync(uid: String) {
+        encryptedPrefs.edit().putString(SecureKeys.FIREBASE_UID, uid).apply()
+        _firebaseUid.value = uid
+    }
+
+    fun updateFcmTokenSync(token: String) {
+        encryptedPrefs.edit().putString(SecureKeys.FCM_TOKEN, token).apply()
+        _fcmToken.value = token
+    }
+
+    // ---- DataStore 기반 일반 데이터 ----
 
     val isOnboardingCompleted: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.ONBOARDING_COMPLETED] ?: false
@@ -73,25 +117,32 @@ class UserPreferences @Inject constructor(
         prefs[Keys.DARK_MODE] ?: "system"
     }
 
-    val firebaseUid: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[Keys.FIREBASE_UID] ?: ""
-    }
-
     val authProvider: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[Keys.AUTH_PROVIDER] ?: "none"
-    }
-
-    val fcmToken: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[Keys.FCM_TOKEN] ?: ""
     }
 
     val fcmTokenSynced: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.FCM_TOKEN_SYNCED] ?: false
     }
 
-    suspend fun updateFirebaseUid(uid: String) {
+    val todayMood: Flow<String?> = context.dataStore.data.map { prefs ->
+        val checkDate = prefs[Keys.MOOD_CHECK_DATE] ?: ""
+        val today = java.time.LocalDate.now().toString()
+        if (checkDate == today) prefs[Keys.TODAY_MOOD] else null
+    }
+
+    suspend fun updateTodayMood(mood: String) {
         context.dataStore.edit { prefs ->
-            prefs[Keys.FIREBASE_UID] = uid
+            prefs[Keys.TODAY_MOOD] = mood
+            prefs[Keys.MOOD_CHECK_DATE] = java.time.LocalDate.now().toString()
+        }
+    }
+
+    suspend fun updateFirebaseUid(uid: String) {
+        updateFirebaseUidSync(uid)
+        // 기존 DataStore에 저장된 uid 제거 (마이그레이션)
+        context.dataStore.edit { prefs ->
+            prefs.remove(stringPreferencesKey("firebase_uid"))
         }
     }
 
@@ -102,8 +153,10 @@ class UserPreferences @Inject constructor(
     }
 
     suspend fun updateFcmToken(token: String) {
+        updateFcmTokenSync(token)
+        // 기존 DataStore에 저장된 fcm_token 제거 (마이그레이션)
         context.dataStore.edit { prefs ->
-            prefs[Keys.FCM_TOKEN] = token
+            prefs.remove(stringPreferencesKey("fcm_token"))
             prefs[Keys.FCM_TOKEN_SYNCED] = false
         }
     }
@@ -155,16 +208,6 @@ class UserPreferences @Inject constructor(
         }
     }
 
-    val openAiApiKey: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[Keys.OPENAI_API_KEY] ?: ""
-    }
-
-    suspend fun updateOpenAiApiKey(key: String) {
-        context.dataStore.edit { prefs ->
-            prefs[Keys.OPENAI_API_KEY] = key
-        }
-    }
-
     suspend fun setExpressionSetTaskId(characterId: Long, taskId: String) {
         context.dataStore.edit { prefs ->
             prefs[stringPreferencesKey("expr_task_$characterId")] = taskId
@@ -185,5 +228,8 @@ class UserPreferences @Inject constructor(
 
     suspend fun clearAll() {
         context.dataStore.edit { it.clear() }
+        encryptedPrefs.edit().clear().apply()
+        _firebaseUid.value = ""
+        _fcmToken.value = ""
     }
 }

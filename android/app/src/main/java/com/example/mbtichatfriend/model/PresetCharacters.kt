@@ -15,8 +15,23 @@ data class PresetCharacter(
 enum class MbtiGroup(val label: String, val tag: String) {
     NT("분석형", "NT"),
     NF("외교형", "NF"),
-    SJ("관리형", "SJ"),
-    SP("탐험형", "SP")
+    ST("실행형", "ST"),
+    SF("조화형", "SF");
+
+    companion object {
+        /**
+         * 레거시 enum 이름("SJ" → ST, "SP" → SF)을 포함하여 안전하게 파싱합니다.
+         * Room TypeConverter 또는 직렬화된 문자열에서 역직렬화 실패를 방지합니다.
+         */
+        fun fromStringOrDefault(value: String?): MbtiGroup {
+            if (value == null) return NT
+            return when (value.uppercase()) {
+                "SJ" -> ST   // 레거시: 감각판단형 → 실행형
+                "SP" -> SF   // 레거시: 감각인식형 → 조화형
+                else -> entries.firstOrNull { it.name == value.uppercase() } ?: NT
+            }
+        }
+    }
 }
 
 // skinTone(0-4), hairStyle(0-5: LONG/BOB/TWIN/PONYTAIL/SHORT/BUN),
@@ -76,55 +91,55 @@ val PRESET_CHARACTERS: List<PresetCharacter> = listOf(
         group = MbtiGroup.NF
     ),
 
-    // ── SJ 관리형 ──────────────────────────────────────────────
+    // ── ST 실행형 (S+T: 감각+사고) ─────────────────────────────
     PresetCharacter(
         mbti = "ISTJ", name = "준혁", concept = "믿음직한 수호자",
         speechStyle = "FORMAL", relationship = "FRIEND",
         avatarConfig = AvatarConfig(skinTone = 1, hairStyle = 4, hairColor = 0, eyeStyle = 0, blushEnabled = false, accessory = 0, bgColorIndex = 7),
-        group = MbtiGroup.SJ
+        group = MbtiGroup.ST
     ),
     PresetCharacter(
-        mbti = "ISFJ", name = "나연", concept = "세심한 배려자",
-        speechStyle = "SWEET", relationship = "FRIEND",
-        avatarConfig = AvatarConfig(skinTone = 0, hairStyle = 0, hairColor = 3, eyeStyle = 1, blushEnabled = true, accessory = 5, bgColorIndex = 5),
-        group = MbtiGroup.SJ
+        mbti = "ISTP", name = "태오", concept = "쿨한 만능 장인",
+        speechStyle = "CASUAL", relationship = "FRIEND",
+        avatarConfig = AvatarConfig(skinTone = 2, hairStyle = 4, hairColor = 1, eyeStyle = 0, blushEnabled = false, accessory = 3, bgColorIndex = 3),
+        group = MbtiGroup.ST
     ),
     PresetCharacter(
         mbti = "ESTJ", name = "민준", concept = "든든한 관리자",
         speechStyle = "CASUAL", relationship = "SENIOR_JUNIOR",
         avatarConfig = AvatarConfig(skinTone = 2, hairStyle = 4, hairColor = 1, eyeStyle = 0, blushEnabled = false, accessory = 0, bgColorIndex = 7),
-        group = MbtiGroup.SJ
-    ),
-    PresetCharacter(
-        mbti = "ESFJ", name = "지아", concept = "다정한 분위기메이커",
-        speechStyle = "SWEET", relationship = "FRIEND",
-        avatarConfig = AvatarConfig(skinTone = 0, hairStyle = 5, hairColor = 2, eyeStyle = 2, blushEnabled = true, accessory = 1, bgColorIndex = 5),
-        group = MbtiGroup.SJ
-    ),
-
-    // ── SP 탐험형 ──────────────────────────────────────────────
-    PresetCharacter(
-        mbti = "ISTP", name = "태오", concept = "쿨한 만능 장인",
-        speechStyle = "CASUAL", relationship = "FRIEND",
-        avatarConfig = AvatarConfig(skinTone = 2, hairStyle = 4, hairColor = 1, eyeStyle = 0, blushEnabled = false, accessory = 3, bgColorIndex = 3),
-        group = MbtiGroup.SP
-    ),
-    PresetCharacter(
-        mbti = "ISFP", name = "채아", concept = "감성적인 예술가",
-        speechStyle = "CASUAL", relationship = "FRIEND",
-        avatarConfig = AvatarConfig(skinTone = 0, hairStyle = 0, hairColor = 5, eyeStyle = 2, blushEnabled = true, accessory = 5, bgColorIndex = 3),
-        group = MbtiGroup.SP
+        group = MbtiGroup.ST
     ),
     PresetCharacter(
         mbti = "ESTP", name = "시우", concept = "에너지 넘치는 행동파",
         speechStyle = "CASUAL", relationship = "FRIEND",
         avatarConfig = AvatarConfig(skinTone = 1, hairStyle = 4, hairColor = 7, eyeStyle = 1, blushEnabled = false, accessory = 0, bgColorIndex = 4),
-        group = MbtiGroup.SP
+        group = MbtiGroup.ST
+    ),
+
+    // ── SF 조화형 (S+F: 감각+감정) ─────────────────────────────
+    PresetCharacter(
+        mbti = "ISFJ", name = "나연", concept = "세심한 배려자",
+        speechStyle = "SWEET", relationship = "FRIEND",
+        avatarConfig = AvatarConfig(skinTone = 0, hairStyle = 0, hairColor = 3, eyeStyle = 1, blushEnabled = true, accessory = 5, bgColorIndex = 5),
+        group = MbtiGroup.SF
+    ),
+    PresetCharacter(
+        mbti = "ISFP", name = "채아", concept = "감성적인 예술가",
+        speechStyle = "CASUAL", relationship = "FRIEND",
+        avatarConfig = AvatarConfig(skinTone = 0, hairStyle = 0, hairColor = 5, eyeStyle = 2, blushEnabled = true, accessory = 5, bgColorIndex = 3),
+        group = MbtiGroup.SF
+    ),
+    PresetCharacter(
+        mbti = "ESFJ", name = "지아", concept = "다정한 분위기메이커",
+        speechStyle = "SWEET", relationship = "FRIEND",
+        avatarConfig = AvatarConfig(skinTone = 0, hairStyle = 5, hairColor = 2, eyeStyle = 2, blushEnabled = true, accessory = 1, bgColorIndex = 5),
+        group = MbtiGroup.SF
     ),
     PresetCharacter(
         mbti = "ESFP", name = "루아", concept = "태양 같은 엔터테이너",
         speechStyle = "SWEET", relationship = "FRIEND",
         avatarConfig = AvatarConfig(skinTone = 0, hairStyle = 2, hairColor = 7, eyeStyle = 2, blushEnabled = true, accessory = 4, bgColorIndex = 5),
-        group = MbtiGroup.SP
+        group = MbtiGroup.SF
     ),
 )

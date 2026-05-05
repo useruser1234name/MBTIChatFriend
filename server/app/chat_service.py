@@ -3,13 +3,16 @@
 import asyncio
 import json
 import logging
+import math
 import random
 import re
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from openai import AsyncOpenAI
 
-from .config import OPENAI_API_KEY
+from .config import OPENAI_API_KEY, LLM_MODEL_COMPLEX, LLM_MODEL_SIMPLE, LLM_MODEL_BASE
+from .background_tasks import create_tracked_task
 from .content_filter import check_content, get_safety_system_prompt
 from .models import HistoryMessage, MemoryItem, ReplyPart
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
@@ -17,11 +20,51 @@ from .vector_store import get_store
 from .finetune_service import get_model_for_character
 from .memory_service import summarize_conversation, extract_facts, extract_episodes, build_memory_context
 from .quality_service import check_diversity, quick_score, score_response_async
+from .metrics_service import record_event
 
 logger = logging.getLogger(__name__)
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
+# ── 품질 게이트 임계값 (0.0~1.0, 낮을수록 재생성 빈도 ↑) ─────────
+QUALITY_GATE_THRESHOLD = 0.4
+
+# ── LLM 비용 단가 (USD per 1K tokens, 2025-04 기준) ──────────────
+_MODEL_COSTS = {
+    "gpt-4.1":      {"prompt": 0.002, "completion": 0.008},
+    "gpt-4.1-mini": {"prompt": 0.0004, "completion": 0.0016},
+    # Legacy fallback
+    "gpt-4o":       {"prompt": 0.0025, "completion": 0.0100},
+    "gpt-4o-mini":  {"prompt": 0.00015, "completion": 0.0006},
+}
+
+
+def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """주어진 토큰 수로 예상 비용(USD)을 계산한다."""
+    costs = _MODEL_COSTS.get(model, _MODEL_COSTS["gpt-4.1-mini"])
+    return (prompt_tokens / 1000 * costs["prompt"]
+            + completion_tokens / 1000 * costs["completion"])
+
+
+# ── MBTI별 호감도 증가 트리거 ───────────────────────────────────
+_MBTI_AFFINITY_TRIGGERS = {
+    "INTJ": "효율성 인정, 지적 토론, 전략적 조언",
+    "INTP": "독창적 아이디어 공유, 논리적 분석, 지적 호기심",
+    "ENTJ": "리더십 인정, 목표 달성 격려, 능력 칭찬",
+    "ENTP": "재치있는 대화, 새로운 관점 제시, 토론",
+    "INFJ": "깊은 공감, 의미있는 대화, 가치관 공유",
+    "INFP": "진심어린 감정 표현, 창의적 공감, 이상 공유",
+    "ENFJ": "따뜻한 격려, 성장 응원, 진심어린 관심",
+    "ENFP": "새로운 경험 공유, 열정적 반응, 자유로운 표현",
+    "ISTJ": "약속 이행, 신뢰 표현, 안정적 태도",
+    "ISFJ": "배려, 챙김, 감사 표현, 따뜻한 관심",
+    "ESTJ": "책임감 인정, 효율적 소통, 명확한 의사표현",
+    "ESFJ": "따뜻한 칭찬, 함께하는 활동, 소속감 표현",
+    "ISTP": "능력 인정, 자유 존중, 실용적 도움",
+    "ISFP": "감성 공유, 취향 존중, 부드러운 관심",
+    "ESTP": "도전적 제안, 활동적 대화, 솔직한 반응",
+    "ESFP": "즐거운 분위기, 긍정적 에너지, 함께 즐기기",
+}
 
 # ── 호감도 키워드 카테고리 ──────────────────────────────────────
 
@@ -77,27 +120,51 @@ def _get_mbti_group(mbti: str) -> str:
 def _classify_message_complexity(message: str, history_len: int) -> str:
     """메시지 복잡도 분류: 'simple' | 'complex'.
 
-    simple: 인사, 짧은 반응, 단순 질문 → gpt-4o-mini
-    complex: 감정 상담, 복잡한 질문, 갈등, 긴 텍스트 → gpt-4o
+    가중 점수제로 판단:
+    - complex_patterns 매칭: +1점/패턴
+    - 길이 100자 초과: +1점, 50자 초과: +0.5점
+    - 질문형('?') + 30자 이상: +0.5점
+    - history_len > 10: +0.5점
+    - 임계값 1.5 이상이면 complex
+
+    simple: 인사, 짧은 반응, 단순 질문 → gpt-4.1-mini
+    complex: 감정 상담, 복잡한 질문, 갈등, 긴 텍스트 → gpt-4.1
     """
     msg = message.strip()
     msg_lower = msg.lower()
 
-    # 짧고 단순한 메시지
+    # 짧고 단순한 메시지 → 즉시 simple 반환 (점수 계산 불필요)
     simple_patterns = ["안녕", "ㅎㅎ", "ㅋㅋ", "응", "어", "ㅇㅇ", "그래", "오키",
                        "ㅎ", "ㄱㄱ", "ㅇㅋ", "하이", "반가", "좋아", "ㄴㄴ"]
     if len(msg) < 10 and any(w in msg_lower for w in simple_patterns):
         return "simple"
 
-    # 감정적/복잡한 키워드
+    # 가중 점수 계산
+    score = 0.0
+
+    # 감정적/복잡한 키워드 매칭: +1점/패턴
     complex_patterns = ["고민", "힘들", "어떻게", "왜", "속상", "우울", "걱정",
                         "화나", "짜증", "슬프", "불안", "상담", "조언", "도와줘",
                         "진지하게", "솔직히", "사실은", "고백", "미안"]
-    if len(msg) > 50 or any(w in msg_lower for w in complex_patterns):
-        return "complex"
+    for w in complex_patterns:
+        if w in msg_lower:
+            score += 1.0
 
-    # 대화 초반은 simple, 깊어지면 complex
-    return "simple" if history_len < 5 else "complex"
+    # 길이 기반
+    if len(msg) > 100:
+        score += 1.0
+    elif len(msg) > 50:
+        score += 0.5
+
+    # 질문형 + 30자 이상
+    if "?" in msg and len(msg) > 30:
+        score += 0.5
+
+    # 대화가 깊어졌을 때
+    if history_len > 10:
+        score += 0.5
+
+    return "complex" if score >= 1.5 else "simple"
 
 
 def calculate_compatibility(char_mbti: str, user_mbti: Optional[str]) -> float:
@@ -198,16 +265,16 @@ def calculate_affinity_delta(
             break
 
     # 5. 질문 여부 (관심 표현)
-    if "?" in message or "?" in message:
+    if "?" in message or "？" in message:
         delta += 0.3
 
     # 6. 문맥 의존 가중치 (호감도 높을 때 긍정 키워드 효과 감소)
     if affinity_level >= 4 and delta > 0:
         delta *= 0.7  # 이미 친한 상태에서 긍정 효과 감소 (쉽게 안 오름)
 
-    # 7. 중립 메시지 기본 호감도
+    # 7. 중립 메시지: 호감도 변화 없음 (일방향 상승 편향 제거)
     if abs(delta) < 0.1:
-        delta = random.choice([0, 0, 0.5, 0.5, 1.0])
+        delta = 0.0
 
     # 8. 호감도 레벨별 변화량 차등 (초반 빠른 상승, 후반 느린 상승)
     level_multiplier = {1: 1.5, 2: 1.3, 3: 1.0, 4: 0.7, 5: 0.4}
@@ -229,6 +296,68 @@ def calculate_affinity_delta(
     delta *= KEYWORD_SCALE
 
     return round(delta)
+
+
+# ── 호감도 후퇴 메커니즘 (전문가 합의안) ────────────────────────
+
+# 호감도 레벨별 최소 점수
+AFFINITY_LEVEL_THRESHOLDS = {1: 0, 2: 20, 3: 40, 4: 60, 5: 80}
+
+FREEZE_DAYS = 7            # 동결 기간 (일)
+DECAY_PER_WEEK = 2         # 주당 하락 점수
+RETURN_RECOVERY_RATE = 0.5 # 복귀 시 하락분 회복률
+
+
+def calculate_affinity_decay(
+    current_score: int,
+    current_level: int,
+    last_chat_time: Optional[datetime],
+) -> int:
+    """
+    미접속 기간에 따른 호감도 감쇠 계산.
+
+    규칙 (전문가 합의):
+    - 7일 이하: 동결 (변화 없음)
+    - 7일 초과: 주당 -2점
+    - 하한: 현재 레벨 -1의 최소 점수 (Level 1 이하로 떨어지지 않음)
+
+    Returns: 감쇠 후 점수
+    """
+    if last_chat_time is None:
+        return current_score
+
+    now = datetime.now(timezone.utc)
+    if last_chat_time.tzinfo is None:
+        last_chat_time = last_chat_time.replace(tzinfo=timezone.utc)
+
+    days_inactive = (now - last_chat_time).days
+
+    if days_inactive <= FREEZE_DAYS:
+        return current_score
+
+    weeks_after_freeze = (days_inactive - FREEZE_DAYS) / 7
+    decay = int(weeks_after_freeze * DECAY_PER_WEEK)
+
+    # 하한: 현재 레벨 -1 최소 점수 (최소 Level 1 = 0점)
+    lower_level = max(1, current_level - 1)
+    min_score = AFFINITY_LEVEL_THRESHOLDS.get(lower_level, 0)
+
+    return max(current_score - decay, min_score)
+
+
+def calculate_return_bonus(original_score: int, current_score: int) -> int:
+    """
+    복귀 시 하락분의 50% 회복.
+    Returns: 보너스 점수
+    """
+    lost = original_score - current_score
+    if lost <= 0:
+        return 0
+    return int(lost * RETURN_RECOVERY_RATE)
+
+
+def _storage_scope_id(room_id: str = "", character_id: str = "") -> str:
+    return room_id.strip() or character_id.strip()
 
 
 async def analyze_affinity_with_llm(
@@ -254,6 +383,9 @@ async def analyze_affinity_with_llm(
         "SF": "이 캐릭터는 관심과 배려, 함께하는 시간, 즐거운 대화에 높은 점수를 줌",
     }.get(group, "")
 
+    mbti_trigger = _MBTI_AFFINITY_TRIGGERS.get(char_mbti, "")
+    trigger_section = f"\n- 이 캐릭터({char_mbti})의 호감도 증가 요인: {mbti_trigger}" if mbti_trigger else ""
+
     prompt = f"""사용자 메시지를 분석해서 {char_mbti} 캐릭터에 대한 호감도 변화를 -3~+5 정수로 판단해.
 고려 사항:
 - 메시지의 감정적 뉘앙스 (단순 키워드가 아닌 전체 맥락)
@@ -262,7 +394,7 @@ async def analyze_affinity_with_llm(
 - 부정: 비난, 무시, 적대 → 음수
 - 중립/일상: 0 또는 약간의 양수
 - 연속 긍정/부정 흐름 감지: 3턴 이상 같은 흐름이면 보너스/페널티
-- {mbti_weight_desc}{context_section}{memory_section}
+- {mbti_weight_desc}{trigger_section}{context_section}{memory_section}
 
 사용자 메시지: "{message}"
 
@@ -270,10 +402,11 @@ JSON만 출력: {{"delta": 정수, "reason": "이유"}}"""
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=50
+            max_tokens=100,
+            timeout=30,
         )
         content = response.choices[0].message.content or ""
         start = content.find("{")
@@ -284,6 +417,15 @@ JSON만 출력: {{"delta": 정수, "reason": "이유"}}"""
             delta = max(-3, min(5, delta))
             logger.info(f"LLM 호감도 분석: delta={delta}, reason={data.get('reason', '')}")
             return delta
+
+        # JSON 파싱 실패 (토큰 잘림 등): "delta" 값만 regex 추출
+        m = re.search(r'"delta"\s*:\s*(-?\d+)', content)
+        if m:
+            delta = max(-3, min(5, int(m.group(1))))
+            logger.info(f"LLM 호감도 분석 (regex fallback): delta={delta}")
+            return delta
+
+        logger.warning(f"LLM 호감도 파싱 실패: {content[:100]}")
     except Exception as e:
         logger.warning(f"LLM 호감도 분석 실패 (fallback 사용): {e}")
     return 0
@@ -293,7 +435,8 @@ async def extract_memories(
     character_name: str,
     nickname: str,
     conversation_history: List[HistoryMessage],
-    character_id: str = ""
+    character_id: str = "",
+    room_id: str = "",
 ) -> List[MemoryItem]:
     """대화에서 장기 기억 추출 (key-value 쌍)"""
     if not client or len(conversation_history) < 2:
@@ -309,7 +452,7 @@ async def extract_memories(
         messages.append({"role": "user", "content": "위 대화에서 중요한 개인 정보를 추출해줘."})
 
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=messages,
             temperature=0.2,
             max_tokens=300
@@ -325,15 +468,59 @@ async def extract_memories(
                 for item in data
                 if isinstance(item, dict) and item.get("key") and item.get("value")
             ]
-            # Chroma에 임베딩 저장 (character_id가 있을 때)
-            if memories and character_id:
+            scope_id = _storage_scope_id(room_id, character_id)
+            if memories and scope_id:
                 store = get_store()
                 if store:
-                    store.upsert_memories(character_id, memories)
+                    store.upsert_memories(scope_id, memories)
             return memories
     except Exception as e:
         logger.error(f"메모리 추출 실패: {e}")
     return []
+
+
+async def _background_memory_extraction(
+    character_name: str,
+    nickname: str,
+    conversation_history: List[HistoryMessage],
+    character_id: str,
+    room_id: str,
+) -> None:
+    """백그라운드 메모리 추출 (사용자 응답 블로킹 방지)"""
+    try:
+        scope_id = _storage_scope_id(room_id, character_id)
+        await summarize_conversation(
+            character_name,
+            nickname,
+            conversation_history,
+            room_id=room_id,
+            character_id=character_id,
+        )
+        await extract_facts(
+            character_name,
+            nickname,
+            conversation_history,
+            room_id=room_id,
+            character_id=character_id,
+        )
+        if scope_id:
+            await extract_memories(
+                character_name,
+                nickname,
+                conversation_history,
+                character_id,
+                room_id,
+            )
+            await extract_episodes(
+                character_name,
+                nickname,
+                conversation_history,
+                character_id,
+                room_id,
+            )
+        logger.info(f"백그라운드 메모리 추출 완료: {character_name}")
+    except Exception as e:
+        logger.warning(f"백그라운드 메모리 추출 실패: {e}")
 
 
 async def generate_reply(
@@ -347,29 +534,40 @@ async def generate_reply(
     user_mbti: Optional[str] = None,
     character_name: str = "",
     character_id: str = "",
-    memories: List[MemoryItem] = None
+    persona_raw: str = "",
+    persona_summary: str = "",
+    dialogue_prompt: str = "",
+    visual_prompt: str = "",
+    memories: List[MemoryItem] = None,
+    mood: Optional[str] = None,
+    room_id: str = "",
+    owner_uid: str = "",
 ) -> Tuple[List[ReplyPart], int]:
     """LLM을 사용하여 대화 응답 생성, (replies, affinity_delta) 반환"""
 
     if conversation_history is None:
         conversation_history = []
 
-    # 1. 사용자 입력 필터링 (테스트 모드: 스킵)
-    # TODO: 프로덕션 배포 시 필터 복원 필요
-    # is_safe, reason = check_content(message)
-    # if not is_safe:
-    #     return [ReplyPart(
-    #         text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요?",
-    #         emotion="SAD",
-    #         delay=2000
-    #     )], -2
+    # 1. 사용자 입력 필터링
+    is_safe, reason = check_content(message)
+    if not is_safe:
+        return [ReplyPart(
+            text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요?",
+            emotion="SAD",
+            delay=2000
+        )], -2
 
     # 2. 호감도 변화 계산 (LLM 우선, 실패 시 키워드 fallback)
     affinity_delta = 0
     # 선행 memory_context 조회 (호감도 분석에 활용)
     _pre_mem_ctx = ""
     if character_name and nickname:
-        _pre_mem_ctx = build_memory_context(character_name, nickname)
+        _pre_mem_ctx = await build_memory_context(
+            character_name,
+            nickname,
+            room_id=room_id,
+            character_id=character_id,
+        )
 
     if client:
         recent_context = ""
@@ -379,17 +577,15 @@ async def generate_reply(
                 f"{'사용자' if h.role == 'user' else '캐릭터'}: {h.content}"
                 for h in recent_msgs if h.content.strip()
             )
-        affinity_delta = await analyze_affinity_with_llm(
-            message, affinity_level, mbti, recent_context,
-            memory_context=_pre_mem_ctx,
-        )
-        if affinity_delta == 0:
-            # LLM이 0을 반환하거나 실패 시 키워드 방식 보조
-            keyword_delta = calculate_affinity_delta(
-                message, affinity_level, conversation_history, user_mbti, mbti
+        # 호감도 분석을 비동기 태스크로 시작 (메인 LLM 호출과 병렬 실행)
+        affinity_task = asyncio.create_task(
+            analyze_affinity_with_llm(
+                message, affinity_level, mbti, recent_context,
+                memory_context=_pre_mem_ctx,
             )
-            affinity_delta = keyword_delta
+        )
     else:
+        affinity_task = None
         affinity_delta = calculate_affinity_delta(
             message, affinity_level, conversation_history, user_mbti, mbti
         )
@@ -400,31 +596,37 @@ async def generate_reply(
 
     # 4. LLM 호출
     try:
-        # 대화 요약 기억 (memory_service): 10메시지마다 요약/핵심정보 갱신
-        mem_ctx = ""
+        # 대화 요약 기억 (memory_service): 10메시지마다 요약/핵심정보 갱신 (백그라운드)
+        mem_ctx = _pre_mem_ctx  # 이미 조회한 memory_context 재사용
         if character_name and nickname and conversation_history:
             hist_len = len(conversation_history)
             if hist_len >= 4 and hist_len % 10 == 0:
-                await summarize_conversation(character_name, nickname, conversation_history)
-                await extract_facts(character_name, nickname, conversation_history)
-                # 장기 기억도 함께 추출하여 Chroma에 저장
-                if character_id:
-                    await extract_memories(
-                        character_name, nickname, conversation_history, character_id
-                    )
-                    # 에피소드 추출
-                    await extract_episodes(
-                        character_name, nickname, conversation_history, character_id
-                    )
-            mem_ctx = build_memory_context(character_name, nickname)
+                create_tracked_task(
+                    _background_memory_extraction(
+                        character_name,
+                        nickname,
+                        conversation_history,
+                        character_id,
+                        room_id,
+                    ),
+                    name="memory-extraction",
+                )
+            if not mem_ctx:
+                mem_ctx = await build_memory_context(
+                    character_name,
+                    nickname,
+                    room_id=room_id,
+                    character_id=character_id,
+                )
 
         # RAG: Chroma에서 현재 메시지와 관련된 기억 시맨틱 검색
         all_memories = list(memories or [])
         episode_context = ""
-        if character_id:
+        scope_id = _storage_scope_id(room_id, character_id)
+        if scope_id:
             store = get_store()
             if store:
-                rag_docs = store.search_relevant(character_id, message, n_results=3)
+                rag_docs = store.search_relevant(scope_id, message, n_results=3)
                 existing_keys = {m.key for m in all_memories}
                 for doc in rag_docs:
                     if ": " in doc:
@@ -434,7 +636,7 @@ async def generate_reply(
                             existing_keys.add(key)
 
                 # 에피소드 기억 검색
-                episodes = store.search_episodes(character_id, message, n_results=3)
+                episodes = store.search_episodes(scope_id, message, n_results=3)
                 if episodes:
                     ep_lines = ["## 떠오르는 기억"]
                     ep_lines.append("이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해.")
@@ -451,16 +653,24 @@ async def generate_reply(
             character_name=character_name,
             affinity_level=affinity_level,
             user_mbti=user_mbti or "",
+            persona_raw=persona_raw,
+            persona_summary=persona_summary,
+            dialogue_prompt=dialogue_prompt,
+            visual_prompt=visual_prompt,
             memories=memory_dicts if memory_dicts else None,
             memory_context=mem_ctx,
             episode_context=episode_context,
         )
-        # 메시지 구성 (시스템 + safety + 히스토리 + 현재 메시지)
+        # 메시지 구성 (시스템 + safety 인라인 + 히스토리 + 현재 메시지)
+        # safety_prompt는 거의 변하지 않으므로 정적 system_prompt에 인라인하여 prefix caching 효율 극대화
         safety_prompt = get_safety_system_prompt()
         combined_prompt = f"{system_prompt}\n\n{safety_prompt}" if safety_prompt else system_prompt
         messages = [
             {"role": "system", "content": combined_prompt}
         ]
+        # mood만 별도 system 메시지로 분리 (동적 블록)
+        if mood:
+            messages.append({"role": "system", "content": f"[사용자 오늘 기분: {mood}]"})
 
         # 대화 히스토리 추가 (최근 20개로 확대)
         for hist in conversation_history[-20:]:
@@ -468,70 +678,120 @@ async def generate_reply(
             if hist.content.strip():
                 messages.append({"role": role, "content": hist.content})
 
-        # 현재 메시지
-        messages.append({"role": "user", "content": message})
+        # 현재 메시지 (prompt injection 방어를 위한 명시적 경계)
+        messages.append({"role": "user", "content": f"[사용자 메시지]\n{message}\n[/사용자 메시지]"})
 
         # 모델 선택 (Phase 5: 복잡도 기반 라우팅)
-        finetuned_model = get_model_for_character(character_id) if character_id else None
-        if finetuned_model and finetuned_model != "gpt-4o":
+        complexity = _classify_message_complexity(message, len(conversation_history))
+        finetuned_model = get_model_for_character(character_id, owner_uid=owner_uid) if character_id else None
+        if finetuned_model and finetuned_model not in ("gpt-4o", "gpt-4.1", LLM_MODEL_BASE):
             model_id = finetuned_model  # 파인튜닝 모델 우선
         else:
-            complexity = _classify_message_complexity(message, len(conversation_history))
-            model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
+            model_id = LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE
 
         response = await client.chat.completions.create(
             model=model_id,
             messages=messages,
             temperature=0.85,
-            max_tokens=1200
+            max_tokens=1200,
+            timeout=60,
         )
 
         content = response.choices[0].message.content or ""
         replies = _parse_reply(content)
 
-        # 품질 게이트: 매우 저품질 시 1회 재생성
+        # 호감도 분석 태스크 결과 수집 (메인 LLM과 병렬 실행됨)
+        if affinity_task is not None:
+            try:
+                affinity_delta = await affinity_task
+            except Exception as e:
+                logger.warning(f"호감도 분석 태스크 실패, 키워드 폴백 사용: {e}")
+                affinity_delta = 0
+            if affinity_delta == 0:
+                affinity_delta = calculate_affinity_delta(
+                    message, affinity_level, conversation_history, user_mbti, mbti
+                )
+
+        # 토큰 사용량 추적
+        total_prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+        total_completion_tokens = response.usage.completion_tokens if response.usage else 0
+        llm_call_count = 1
+
+        # 품질 게이트: 매우 저품질 시 1회 재생성, 점수 비교 후 교체
         if replies:
-            full_text = " ".join(r.text for r in replies)
-            score = await quick_score(message, content, mbti)
-            if score < 0.4:
+            score = quick_score(message, content, mbti)
+            if score < QUALITY_GATE_THRESHOLD:
                 logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
                 retry_response = await client.chat.completions.create(
                     model=model_id,
                     messages=messages,
-                    temperature=0.9,
+                    temperature=0.7,
                     max_tokens=1200,
                 )
                 retry_content = retry_response.choices[0].message.content or ""
                 retry_replies = _parse_reply(retry_content)
                 if retry_replies:
-                    replies = retry_replies
-                    content = retry_content
+                    retry_score = quick_score(message, retry_content, mbti)
+                    if retry_score > score:
+                        replies = retry_replies
+                        content = retry_content
+                        logger.info(f"재생성 채택 (원본={score}, 재생성={retry_score})")
+                    else:
+                        logger.info(f"재생성 기각 (원본={score}, 재생성={retry_score})")
+                # 재시도 토큰 누적
+                if retry_response.usage:
+                    total_prompt_tokens += retry_response.usage.prompt_tokens
+                    total_completion_tokens += retry_response.usage.completion_tokens
+                    llm_call_count += 1
 
-        # 테스트 모드: AI 응답 필터링 스킵
-        # TODO: 프로덕션 배포 시 필터 복원 필요
-        # filtered_replies = []
-        # for reply in replies:
-        #     is_safe, _ = check_content(reply.text)
-        #     if is_safe:
-        #         filtered_replies.append(reply)
-        # result = filtered_replies if filtered_replies else [
-        #     ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
-        # ]
-
-        result = replies if replies else [
+        # AI 응답 안전성 필터
+        filtered_replies = []
+        for reply in replies:
+            is_safe, _ = check_content(reply.text)
+            if is_safe:
+                filtered_replies.append(reply)
+        result = filtered_replies if filtered_replies else [
             ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
         ]
 
+        # 비용 메트릭 기록
+        estimated_cost = _estimate_cost(model_id, total_prompt_tokens, total_completion_tokens)
+        record_event(
+            "llm_usage",
+            room_id=room_id or "",
+            character_id=character_id or "",
+            payload={
+                "model": model_id,
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+                "total_tokens": total_prompt_tokens + total_completion_tokens,
+                "estimated_cost_usd": round(estimated_cost, 6),
+                "llm_calls": llm_call_count,
+                "complexity": complexity,
+                "finetuned": bool(finetuned_model and finetuned_model not in ("gpt-4o", "gpt-4.1", LLM_MODEL_BASE)),
+            },
+        )
+
         # 백그라운드 품질 평가 (사용자 지연 0)
         full_response = " ".join(r.text for r in result)
-        asyncio.create_task(_post_response_quality_check(
-            message, full_response, mbti, affinity_level,
-            character_id=character_id,
-        ))
+        create_tracked_task(
+            _post_response_quality_check(
+                message,
+                full_response,
+                mbti,
+                affinity_level,
+                room_id=room_id,
+                character_id=character_id,
+            ),
+            name="quality-check",
+        )
 
         return result, affinity_delta
 
     except Exception as e:
+        # 병렬 호감도 분석 태스크가 남아있으면 정리
+        if affinity_task is not None and not affinity_task.done():
+            affinity_task.cancel()
         logger.error(f"LLM 호출 실패: {e}")
         return [ReplyPart(
             text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?",
@@ -559,7 +819,7 @@ async def _post_response_quality_check(
             character_id=character_id,
         )
         if character_id:
-            check_diversity(character_id, ai_response)
+            check_diversity(character_id, ai_response, room_id=room_id)
     except Exception as e:
         logger.warning(f"백그라운드 품질 평가 오류: {e}")
 
@@ -599,7 +859,7 @@ async def generate_diary(
             messages.append({"role": "user", "content": "위 대화를 바탕으로 오늘 일기를 써줘."})
 
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model=LLM_MODEL_SIMPLE,
             messages=messages,
             temperature=0.9,
             max_tokens=600
@@ -671,7 +931,7 @@ async def generate_night_diary(
         )
 
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model=LLM_MODEL_SIMPLE,
             messages=messages,
             temperature=0.85,
             max_tokens=700,

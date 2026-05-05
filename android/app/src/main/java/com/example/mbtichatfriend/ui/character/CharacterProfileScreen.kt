@@ -6,6 +6,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -82,7 +85,22 @@ fun CharacterProfileScreen(
 ) {
     val character by viewModel.getCharacter(characterId).collectAsState(initial = null)
     val finetuneState = viewModel.finetuneState
+    val compatibility = viewModel.compatibility
+    val memories = viewModel.memories
+    val userMbti by viewModel.userMbti.collectAsState()
+    val nickname by viewModel.nickname.collectAsState()
     var showDeleteDialog by remember { mutableStateOf(false) }
+
+    // 궁합/기억 로드 - character 객체 전체 대신 id와 userMbti를 키로 사용하여
+    // 불필요한 재실행 방지 (character 데이터 변경 시에도 id가 동일하면 재호출하지 않음)
+    LaunchedEffect(character?.id, userMbti) {
+        character?.let { ch ->
+            if (userMbti.isNotEmpty()) {
+                viewModel.loadCompatibility(userMbti, ch.mbti)
+            }
+            viewModel.loadMemories(ch.id, ch.name, nickname.ifEmpty { "사용자" })
+        }
+    }
 
     // 삭제 확인 다이얼로그
     if (showDeleteDialog) {
@@ -181,8 +199,8 @@ fun CharacterProfileScreen(
                 ) {
                     CharacterFace(
                         avatarId = ch.avatarId,
-                        modifier = Modifier.size(110.dp),
-                        legacyFontSize = 72f
+                        modifier = Modifier.size(140.dp),
+                        legacyFontSize = 90f
                     )
                 }
             }
@@ -237,8 +255,8 @@ fun CharacterProfileScreen(
                         progress = { ch.affinityScore / 100f },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(4.dp)),
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(6.dp)),
                         color = MaterialTheme.colorScheme.primary,
                         trackColor = MaterialTheme.colorScheme.outlineVariant,
                     )
@@ -248,6 +266,61 @@ fun CharacterProfileScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // 해금 콘텐츠 카드
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text("해금된 기능", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(12.dp))
+                    val unlocked = com.example.mbtichatfriend.model.AffinityUnlocks.getUnlockedItems(ch.affinityLevel)
+                    val nextUnlocks = com.example.mbtichatfriend.model.AffinityUnlocks.getNextUnlocks(ch.affinityLevel)
+                    unlocked.forEach { item ->
+                        Row(
+                            modifier = Modifier.padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(item.icon, fontSize = 18.sp)
+                            Spacer(Modifier.width(10.dp))
+                            Text(item.title, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    if (nextUnlocks.isNotEmpty()) {
+                        Spacer(Modifier.height(10.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "다음 레벨에서 해금",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        nextUnlocks.forEach { item ->
+                            Row(
+                                modifier = Modifier.padding(vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("\uD83D\uDD12", fontSize = 16.sp)
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    "${item.title} — ${item.description}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -269,6 +342,120 @@ fun CharacterProfileScreen(
                     InfoRow("말투", try { SpeechStyle.valueOf(ch.speechStyle).label } catch (_: Exception) { ch.speechStyle })
                     InfoRow("관계", try { Relationship.valueOf(ch.relationship).label } catch (_: Exception) { ch.relationship })
                     InfoRow("대화 수", "${ch.totalMessages}회")
+                }
+            }
+
+            // MBTI 궁합 카드
+            compatibility?.let { compat ->
+                Spacer(Modifier.height(16.dp))
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Text("MBTI 궁합", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "${"⭐".repeat(compat.score)}${"☆".repeat(5 - compat.score)}",
+                                fontSize = 18.sp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "${compat.score}/5",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = compat.description,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (compat.strengths.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Text("\uD83D\uDC9A 잘 맞는 점", style = MaterialTheme.typography.labelLarge)
+                            compat.strengths.forEach { s ->
+                                Text("  • $s", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        if (compat.challenges.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            Text("\uD83D\uDCA1 주의할 점", style = MaterialTheme.typography.labelLarge)
+                            compat.challenges.forEach { c ->
+                                Text("  • $c", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 캐릭터 기억 카드
+            memories?.takeIf { it.summary.isNotEmpty() || it.facts.isNotEmpty() }?.let { mem ->
+                Spacer(Modifier.height(16.dp))
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("\uD83E\uDDE0", fontSize = 20.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("${ch.name}의 기억", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        }
+                        if (mem.summary.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                text = mem.summary,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (mem.facts.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            Spacer(Modifier.height(10.dp))
+                            mem.facts.forEach { fact ->
+                                val key = fact["key"] ?: ""
+                                val value = fact["value"] ?: ""
+                                if (key.isNotEmpty()) {
+                                    Row(modifier = Modifier.padding(vertical = 2.dp)) {
+                                        Text(
+                                            text = "$key:",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.widthIn(min = 72.dp)
+                                        )
+                                        Text(
+                                            text = value,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (mem.totalConversations > 0) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = "총 ${mem.totalConversations}회 대화",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
 
@@ -311,7 +498,7 @@ fun CharacterProfileScreen(
                             contentColor = MaterialTheme.colorScheme.error
                         )
                     ) {
-                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Delete, contentDescription = "캐릭터 삭제", modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("삭제", style = MaterialTheme.typography.labelLarge)
                     }
@@ -323,7 +510,7 @@ fun CharacterProfileScreen(
                             .height(52.dp),
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        Icon(Icons.Default.Phone, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.Phone, contentDescription = "음성 통화", modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("통화", style = MaterialTheme.typography.labelLarge)
                     }
@@ -335,7 +522,7 @@ fun CharacterProfileScreen(
                             .height(52.dp),
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = "일기 보기", modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("일기", style = MaterialTheme.typography.labelLarge)
                     }
@@ -349,7 +536,7 @@ fun CharacterProfileScreen(
                         .height(56.dp),
                     shape = RoundedCornerShape(16.dp)
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null)
+                    Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "대화하기")
                     Spacer(Modifier.width(8.dp))
                     Text("대화하기", style = MaterialTheme.typography.titleMedium)
                 }

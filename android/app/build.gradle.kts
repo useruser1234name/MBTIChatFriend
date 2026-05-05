@@ -19,11 +19,12 @@ android {
         versionName = "0.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        buildConfigField("String", "BASE_URL", "\"http://192.168.219.108:8090/\"")
     }
 
     buildTypes {
+        debug {
+            buildConfigField("String", "BASE_URL", "\"http://192.168.219.107:8090/\"")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -31,6 +32,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            buildConfigField("String", "BASE_URL", "\"https://api.mbtifriend.com/\"")
         }
     }
     compileOptions {
@@ -90,6 +92,9 @@ dependencies {
 
     // DataStore
     implementation(libs.datastore.preferences)
+
+    // Security Crypto (EncryptedSharedPreferences)
+    implementation(libs.security.crypto)
 
     // Lottie (애니메이션)
     implementation(libs.lottie.compose)

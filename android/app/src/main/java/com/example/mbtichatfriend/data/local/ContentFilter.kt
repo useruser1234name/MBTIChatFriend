@@ -1,8 +1,10 @@
 package com.example.mbtichatfriend.data.local
 
+import com.example.mbtichatfriend.data.MessageConstraints
+
 /**
- * 클라이언트 사전 입력 필터링
- * 서버 필터와 별도로 빠른 차단을 위한 1차 필터
+ * Android only does lightweight input validation.
+ * Moderation and crisis policy are enforced on the server.
  */
 object ContentFilter {
 
@@ -11,64 +13,19 @@ object ContentFilter {
         val reason: String = ""
     )
 
-    private val bannedPatterns = listOf(
-        // 성적 표현 (명확한 것만)
-        "섹스", "성관계", "야동", "포르노", "자위", "오르가",
-        "알몸", "나체", "음란",
-        // 폭력
-        "자살", "자해", "죽여", "살인", "칼빵",
-        // 혐오
-        "니거", "한남충", "한녀충", "틀딱", "급식충",
-    )
-
-    // 단독으로 사용될 때만 차단 (다른 글자 사이에 섞여 있으면 무시)
-    private val standalonePatterns = listOf(
-        Regex("(^|\\s)ㅅㅅ($|\\s)"),    // "ㅅㅅ" 단독
-        Regex("(^|\\s)ㅂㅇ($|\\s)"),    // "ㅂㅇ" 단독
-    )
-
-    private val suspiciousPatterns = listOf(
-        // 반복 특수문자 (스팸)
-        Regex("(.{1,2})\\1{5,}"),
-        // 과도한 특수문자
-        Regex("[^가-힣a-zA-Z0-9\\s]{10,}"),
-    )
-
-    fun check(input: String): FilterResult {
+    fun check(
+        input: String,
+        maxLength: Int = MessageConstraints.MAX_MESSAGE_LENGTH
+    ): FilterResult {
         val trimmed = input.trim()
 
         if (trimmed.isEmpty()) {
-            return FilterResult(false, "빈 메시지는 보낼 수 없어요")
+            return FilterResult(false, "빈 메시지는 보낼 수 없어요.")
         }
 
-        if (trimmed.length > 500) {
-            return FilterResult(false, "메시지가 너무 길어요 (최대 500자)")
+        if (trimmed.length > maxLength) {
+            return FilterResult(false, "메시지는 ${maxLength}자 이내로 입력해주세요!")
         }
-
-        // TODO: 테스트 모드 - 금칙어/패턴 필터 비활성화
-        // 프로덕션 배포 시 아래 주석 해제 필요
-
-        // // 금칙어 체크
-        // val lowerInput = trimmed.lowercase()
-        // for (word in bannedPatterns) {
-        //     if (lowerInput.contains(word)) {
-        //         return FilterResult(false, "부적절한 표현이 포함되어 있어요")
-        //     }
-        // }
-
-        // // 단독 사용 패턴 체크
-        // for (pattern in standalonePatterns) {
-        //     if (pattern.containsMatchIn(trimmed)) {
-        //         return FilterResult(false, "부적절한 표현이 포함되어 있어요")
-        //     }
-        // }
-
-        // // 의심 패턴 체크
-        // for (pattern in suspiciousPatterns) {
-        //     if (pattern.containsMatchIn(trimmed)) {
-        //         return FilterResult(false, "올바른 메시지를 입력해주세요")
-        //     }
-        // }
 
         return FilterResult(true)
     }

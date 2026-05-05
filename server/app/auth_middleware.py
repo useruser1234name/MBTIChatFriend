@@ -18,6 +18,27 @@ except ImportError:
     _firebase_auth_available = False
 
 
+async def require_auth_always(
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """
+    관리자/민감 엔드포인트용 — REQUIRE_AUTH 설정과 무관하게 항상 인증 요구.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="인증이 필요합니다.")
+
+    if not _firebase_auth_available:
+        raise HTTPException(status_code=503, detail="인증 서비스를 사용할 수 없습니다.")
+
+    try:
+        token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+        decoded = auth.verify_id_token(token)
+        return decoded
+    except Exception as e:
+        logger.warning(f"Token verification failed (strict): {e}")
+        raise HTTPException(status_code=401, detail="유효하지 않은 인증 토큰입니다.")
+
+
 async def verify_firebase_token(
     authorization: Optional[str] = Header(default=None),
 ) -> Optional[dict]:

@@ -10,37 +10,39 @@ dist/
 build/
 .eggs/
 
-# 가상환경
+# Virtual environments
 venv/
 .venv/
 env/
-.env.local
 
-# 환경 변수 (민감 정보)
+# Environment files
 .env
+.env.*
+!.env.example
 
-# OpenAI / 서버 생성 데이터
+# Generated data
 chroma_db/
 finetune_models.json
 fcm_tokens.json
 *.jsonl
+_test_results.txt
 
-# 로그
+# Logs
 *.log
 logs/
 
-# IDE
+# pytest / coverage
+.pytest_cache/
+.pytest-tmp*/
+.pytest-os-tmp*/
+.coverage
+htmlcov/
+
+# IDE / OS
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# pytest / coverage
-.pytest_cache/
-.coverage
-htmlcov/

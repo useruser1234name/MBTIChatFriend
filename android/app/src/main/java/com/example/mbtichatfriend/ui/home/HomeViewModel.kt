@@ -2,16 +2,17 @@ package com.example.mbtichatfriend.ui.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.data.local.MessageDao
 import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.ChatApi
 import com.example.mbtichatfriend.data.remote.ImageSetRequest
+import com.example.mbtichatfriend.data.remote.MoodCheckinApiRequest
 import com.example.mbtichatfriend.data.repository.CharacterRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -39,8 +40,17 @@ class HomeViewModel @Inject constructor(
     private val _lastMessages = MutableStateFlow<Map<Long, LastMessageInfo>>(emptyMap())
     val lastMessages = _lastMessages.asStateFlow()
 
+    val todayMood = prefs.todayMood
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    private val _moodResponse = MutableStateFlow<String?>(null)
+    val moodResponse = _moodResponse.asStateFlow()
+
+    fun dismissMoodResponse() {
+        _moodResponse.value = null
+    }
+
     init {
-        // 캐릭터가 없으면 프리셋 자동 생성
         viewModelScope.launch {
             characterRepo.seedPresetsIfEmpty()
         }
@@ -60,33 +70,68 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    fun selectMood(mood: String) {
+        viewModelScope.launch {
+            prefs.updateTodayMood(mood)
+            try {
+                val nick = prefs.nickname.first()
+                val chars = characters.value
+                val lastMsgMap = _lastMessages.value
+                val activeChar = if (lastMsgMap.isNotEmpty()) {
+                    val mostRecentId = lastMsgMap.maxByOrNull { it.value.timestamp }?.key
+                    chars.firstOrNull { it.id == mostRecentId } ?: chars.firstOrNull()
+                } else {
+                    chars.firstOrNull()
+                }
+                val response = chatApi.moodCheckin(
+                    MoodCheckinApiRequest(
+                        mood = mood,
+                        characterId = activeChar?.id?.toString() ?: "",
+                        characterName = activeChar?.name ?: "",
+                        mbti = activeChar?.mbti ?: "",
+                        nickname = nick
+                    )
+                )
+                _moodResponse.value = response.message
+            } catch (_: Exception) {
+                // Mood check-in should not block local mood persistence.
+            }
+        }
+    }
+
     fun createCharacter(
         name: String,
         mbti: String,
         speechStyle: String,
         relationship: String,
         avatarId: String,
+        personaRaw: String = "",
         revisedPrompt: String? = null,
         onCreated: (Long) -> Unit
     ) {
         viewModelScope.launch {
-            val id = characterRepo.create(name, mbti, speechStyle, relationship, avatarId)
+            val safeVisualPrompt = revisedPrompt ?: personaRaw
+            val id = characterRepo.create(
+                name = name,
+                mbti = mbti,
+                speechStyle = speechStyle,
+                relationship = relationship,
+                avatarId = avatarId,
+                personaRaw = personaRaw,
+                visualPrompt = safeVisualPrompt
+            )
 
-            // img: 캐릭터이고 revisedPrompt가 있으면 표정 세트 백그라운드 생성 시작
-            if (avatarId.startsWith("img:") && revisedPrompt != null) {
-                launch {
-                    try {
-                        val response = chatApi.generateImageSet(
-                            ImageSetRequest(
-                                basePrompt = revisedPrompt,
-                                characterId = id.toString()
-                            )
+            if (avatarId.startsWith("img:") && safeVisualPrompt.isNotBlank()) {
+                try {
+                    val response = chatApi.generateImageSet(
+                        ImageSetRequest(
+                            basePrompt = safeVisualPrompt,
+                            characterId = id.toString()
                         )
-                        // taskId를 SharedPreferences에 저장하여 ChatViewModel에서 폴링
-                        prefs.setExpressionSetTaskId(id, response.taskId)
-                    } catch (e: Exception) {
-                        android.util.Log.w("HomeViewModel", "Expression set generation start failed", e)
-                    }
+                    )
+                    prefs.setExpressionSetTaskId(id, response.taskId)
+                } catch (e: Exception) {
+                    android.util.Log.w("HomeViewModel", "Expression set generation start failed", e)
                 }
             }
 

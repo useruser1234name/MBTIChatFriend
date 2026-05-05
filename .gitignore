@@ -1,28 +1,46 @@
-﻿# Android
+# Android / Gradle
 android/.gradle/
+android/.kotlin/
 android/**/build/
 android/local.properties
+android/app/google-services.json
 android/.idea/
 android/*.iml
 
 # Python server
 server/venv/
+server/.venv/
+server/env/
 server/**/__pycache__/
-server/*.pyc
+server/**/*.py[cod]
 server/.env
+server/.env.*
+!server/.env.example
 server/fcm_tokens.json
 server/eval_report.json
 server/chroma_db/
 server/finetune_models.json
+server/*.jsonl
+server/_test_results.txt
+server/.pytest_cache/
+server/.pytest-tmp*/
+server/.pytest-os-tmp*/
+server/.coverage
+server/htmlcov/
 
-# IDE/OS
+# Local assistant/tool state
+**/.claude/settings.local.json
+**/.claude/agent-memory/
+**/.claude/agents/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / OS
 .idea/
 .vscode/
 *.iml
 .DS_Store
 Thumbs.db
-
-# Global docs/venv
-*.md
-venv/
-.venv/

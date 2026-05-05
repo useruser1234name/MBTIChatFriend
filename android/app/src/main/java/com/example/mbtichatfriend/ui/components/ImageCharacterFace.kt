@@ -24,7 +24,7 @@ import kotlinx.coroutines.delay
  * 전체 이미지 교체 방식으로 표정 전환, 눈깜빡임, 입 움직임 구현.
  * - 기본 상태: 현재 감정에 맞는 전체 이미지
  * - 깜빡임: 감정 이미지 → eyes_closed 이미지 → 감정 이미지 (260ms)
- * - 대화 중: mouth_small/medium/open 이미지를 120ms 간격 교체
+ * - 대화 중: speaking 이미지를 짧게 표시하여 생성 이미지 드리프트를 줄임
  */
 @Composable
 fun ImageCharacterFace(
@@ -52,8 +52,8 @@ fun ImageCharacterFace(
     // 눈깜빡임 상태: 0=normal, 1=eyes_half_closed, 2=eyes_closed
     var blinkState by remember { mutableIntStateOf(0) }
 
-    // 입 움직임 상태
-    val mouthKeys = listOf("mouth_small", "mouth_medium", "mouth_open", "mouth_medium")
+    // 말하는 동안은 독립 입모양 루프보다 안정적인 speaking 표정을 우선 사용한다.
+    val mouthKeys = listOf("speaking")
     var mouthIndex by remember { mutableIntStateOf(0) }
 
     // 눈깜빡임 애니메이션 (3~6초 랜덤 간격)
@@ -79,7 +79,7 @@ fun ImageCharacterFace(
         }
         mouthIndex = 0
         while (true) {
-            delay(120)
+            delay(240)
             mouthIndex = (mouthIndex + 1) % mouthKeys.size
         }
     }

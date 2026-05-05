@@ -1,17 +1,15 @@
 """Firebase Admin SDK 서비스 - FCM 푸시 알림 및 토큰 관리"""
 
-import json
 import logging
-from pathlib import Path
 from typing import Optional
 
 from .config import FIREBASE_CREDENTIALS_PATH
+from .postgres import execute, fetchone, postgres_enabled
 
 logger = logging.getLogger(__name__)
 
 # Firebase Admin SDK (선택적 의존성)
 _firebase_initialized = False
-_TOKEN_FILE = Path(__file__).parent.parent / "fcm_tokens.json"
 
 try:
     import firebase_admin
@@ -22,30 +20,36 @@ except ImportError:
     _firebase_available = False
     logger.warning("firebase-admin not installed, FCM features disabled")
 
-
-def _load_tokens() -> dict[str, str]:
-    """파일에서 FCM 토큰 로드"""
-    try:
-        if _TOKEN_FILE.exists():
-            return json.loads(_TOKEN_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning(f"Failed to load FCM tokens: {e}")
-    return {}
+# PostgreSQL 미사용 시 메모리 폴백
+_memory_store: dict[str, str] = {}
 
 
-def _save_tokens(tokens: dict[str, str]) -> None:
-    """FCM 토큰을 파일에 저장"""
-    try:
-        _TOKEN_FILE.write_text(
-            json.dumps(tokens, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as e:
-        logger.warning(f"Failed to save FCM tokens: {e}")
+def _db_load_token(user_id: str) -> Optional[str]:
+    """PostgreSQL에서 FCM 토큰 조회"""
+    if not postgres_enabled():
+        return _memory_store.get(user_id)
+    row = fetchone(
+        "SELECT token FROM fcm_tokens WHERE user_id = %s",
+        (user_id,),
+    )
+    return row["token"] if row else None
 
 
-# 시작 시 파일에서 로드
-_token_store: dict[str, str] = _load_tokens()
+def _db_save_token(user_id: str, token: str) -> None:
+    """PostgreSQL에 FCM 토큰 저장 (upsert)"""
+    if not postgres_enabled():
+        _memory_store[user_id] = token
+        return
+    execute(
+        """
+        INSERT INTO fcm_tokens (user_id, token, updated_at)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (user_id) DO UPDATE SET
+            token = EXCLUDED.token,
+            updated_at = NOW()
+        """,
+        (user_id, token),
+    )
 
 
 def init_firebase() -> bool:
@@ -75,15 +79,14 @@ def init_firebase() -> bool:
 
 
 def register_token(user_id: str, token: str) -> None:
-    """FCM 토큰을 등록하고 파일에 영속화"""
-    _token_store[user_id] = token
-    _save_tokens(_token_store)
+    """FCM 토큰을 등록하고 DB에 영속화"""
+    _db_save_token(user_id, token)
     logger.info(f"FCM token registered for user: {user_id[:8]}...")
 
 
 def get_token(user_id: str) -> Optional[str]:
     """사용자의 FCM 토큰 조회"""
-    return _token_store.get(user_id)
+    return _db_load_token(user_id)
 
 
 def send_push_notification(

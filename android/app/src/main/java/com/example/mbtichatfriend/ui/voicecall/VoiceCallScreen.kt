@@ -64,8 +64,10 @@ import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.model.CharacterAvatar
 import com.example.mbtichatfriend.ui.components.CharacterFace
 import com.example.mbtichatfriend.ui.components.EmotionLottieBackground
+import com.example.mbtichatfriend.ui.components.ImageCharacterFace
 import com.example.mbtichatfriend.model.CharacterEmotion
 import android.Manifest
+import org.json.JSONObject
 
 @Composable
 fun VoiceCallScreen(
@@ -82,6 +84,13 @@ fun VoiceCallScreen(
 
     val avatarId      = character?.avatarId ?: ""
     val affinityLevel = character?.affinityLevel ?: 1
+    val expressionUrls = remember(character?.expressionSetReady, character?.expressionSet) {
+        if (character?.expressionSetReady == true) {
+            parseExpressionSet(character?.expressionSet)
+        } else {
+            null
+        }
+    }
 
     // 배경 그라디언트 색 (아바타 컬러 기반) - 부드러운 전환
     val baseColor = Color(AvatarConfig.bgColorLong(avatarId))
@@ -142,18 +151,12 @@ fun VoiceCallScreen(
         }
     }
 
-    // 레벨업 다이얼로그
-    if (levelUpEvent != null) {
-        val lvl = levelUpEvent!!
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissLevelUp() },
-            title = { Text("관계가 깊어졌어요!") },
-            text = { Text("${character?.name}와(과)의 호감도가 올랐어요\n레벨 $lvl 달성!") },
-            confirmButton = {
-                TextButton(onClick = { viewModel.dismissLevelUp() }) { Text("좋아요!") }
-            }
-        )
-    }
+    // 레벨업 축하 오버레이
+    com.example.mbtichatfriend.ui.components.LevelUpOverlay(
+        visible = levelUpEvent != null,
+        newLevel = levelUpEvent ?: 1,
+        onDismiss = { viewModel.dismissLevelUp() }
+    )
 
     // 권한 안내 다이얼로그
     if (showPermissionRationale) {
@@ -226,6 +229,7 @@ fun VoiceCallScreen(
             VoiceCharacterArea(
                 emotion = currentEmotion,
                 avatarId = avatarId,
+                expressionUrls = expressionUrls,
                 affinityLevel = affinityLevel,
                 isSpeaking = callState == VoiceCallState.SPEAKING,
                 modifier = Modifier.weight(1f)
@@ -298,6 +302,7 @@ fun VoiceCallScreen(
 private fun VoiceCharacterArea(
     emotion: CharacterEmotion,
     avatarId: String,
+    expressionUrls: Map<String, String>?,
     affinityLevel: Int,
     isSpeaking: Boolean,
     modifier: Modifier = Modifier
@@ -348,7 +353,15 @@ private fun VoiceCharacterArea(
                     emotion = emotion,
                     modifier = Modifier.size(160.dp)
                 )
-                if (avatarId.startsWith("v2:")) {
+                if (avatarId.startsWith("img:")) {
+                    ImageCharacterFace(
+                        baseImageUrl = avatarId.removePrefix("img:"),
+                        expressionUrls = expressionUrls,
+                        emotion = emotion,
+                        isTalking = isSpeaking,
+                        modifier = Modifier.size(120.dp)
+                    )
+                } else if (avatarId.startsWith("v2:")) {
                     CharacterFace(avatarId = avatarId, modifier = Modifier.size(90.dp))
                 } else {
                     Text(
@@ -599,6 +612,21 @@ private fun VoiceControlBar(
 }
 
 // ── 헬퍼 ─────────────────────────────────────────────────────
+
+private fun parseExpressionSet(json: String?): Map<String, String>? {
+    if (json.isNullOrBlank()) return null
+    return runCatching {
+        val obj = JSONObject(json)
+        buildMap {
+            obj.keys().forEach { key ->
+                val value = obj.optString(key)
+                if (value.isNotBlank()) {
+                    put(key, value)
+                }
+            }
+        }
+    }.getOrNull()
+}
 
 private fun callStateLabel(state: VoiceCallState) = when (state) {
     VoiceCallState.IDLE       -> "대기 중"

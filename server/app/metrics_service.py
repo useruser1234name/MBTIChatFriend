@@ -14,6 +14,7 @@ def record_event(
     event_type: str,
     room_id: str = "",
     character_id: str = "",
+    user_id: str = "",
     payload: Optional[dict[str, Any]] = None,
 ) -> None:
     if not event_type:
@@ -24,13 +25,14 @@ def record_event(
     try:
         execute(
             """
-            INSERT INTO metric_events (event_type, room_id, character_id, payload)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO metric_events (event_type, room_id, character_id, user_id, payload)
+            VALUES (%s, %s, %s, %s, %s)
             """,
             (
                 event_type,
                 room_id or None,
                 character_id or None,
+                user_id or None,
                 to_jsonb(payload or {}),
             ),
         )

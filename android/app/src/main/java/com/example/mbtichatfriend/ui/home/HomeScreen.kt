@@ -1,8 +1,14 @@
 package com.example.mbtichatfriend.ui.home
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -77,6 +83,7 @@ fun HomeScreen(
     val characters by viewModel.characters.collectAsState()
     val nickname by viewModel.nickname.collectAsState()
     val lastMessages by viewModel.lastMessages.collectAsState()
+    val todayMood by viewModel.todayMood.collectAsState()
 
     var deleteTarget by remember { mutableStateOf<CharacterEntity?>(null) }
     var showImageGenerator by remember { mutableStateOf(false) }
@@ -119,11 +126,11 @@ fun HomeScreen(
                 title = {
                     Column {
                         Text(
-                            text = "안녕, $nickname!",
+                            text = "반가워요, $nickname!",
                             style = MaterialTheme.typography.titleLarge
                         )
                         Text(
-                            text = "누구와 대화할까요?",
+                            text = "오늘은 누구와 대화할까요?",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -173,8 +180,20 @@ fun HomeScreen(
                     .fillMaxSize()
                     .padding(padding),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // 무드 체크인 카드 (하루 한 번, 선택 전에만 표시)
+                item {
+                    AnimatedVisibility(
+                        visible = todayMood == null,
+                        enter = fadeIn() + slideInVertically(),
+                        exit = fadeOut() + shrinkVertically()
+                    ) {
+                        MoodCheckIn(
+                            onMoodSelected = { mood -> viewModel.selectMood(mood) }
+                        )
+                    }
+                }
                 item {
                     GalleryBannerCard(onClick = onGallery)
                 }
@@ -198,13 +217,66 @@ fun HomeScreen(
             sheetState = imageGeneratorSheetState,
             chatApi = chatApi,
             onDismiss = { showImageGenerator = false },
-            onCharacterCreated = { name, mbti, speechStyle, relationship, avatarId, revisedPrompt ->
-                viewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId, revisedPrompt) { characterId ->
+            onCharacterCreated = { name, mbti, speechStyle, relationship, avatarId, personaRaw, revisedPrompt ->
+                viewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId, personaRaw, revisedPrompt) { characterId ->
                     showImageGenerator = false
                     onCharacterClick(characterId)
                 }
             }
         )
+    }
+}
+
+@Composable
+fun MoodCheckIn(
+    onMoodSelected: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val moods = listOf(
+        "\uD83D\uDE0A" to "좋아",
+        "\uD83D\uDE22" to "슬퍼",
+        "\uD83D\uDE24" to "화남",
+        "\uD83E\uDD14" to "고민",
+        "\uD83D\uDE34" to "피곤",
+        "\uD83E\uDD70" to "설렘"
+    )
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "오늘 기분은 어떠세요?",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                moods.forEach { (emoji, label) ->
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onMoodSelected(label) }
+                            .padding(8.dp)
+                    ) {
+                        Text(emoji, fontSize = 28.sp)
+                        Spacer(Modifier.height(4.dp))
+                        Text(label, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -253,7 +325,7 @@ private fun CharacterCard(
             CharacterFace(
                 avatarId = avatarId,
                 modifier = Modifier
-                    .size(60.dp)
+                    .size(72.dp)
                     .clip(CircleShape),
                 legacyFontSize = 32f
             )
@@ -344,8 +416,8 @@ private fun CharacterCard(
                     progress = { character.affinityScore / 100f },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp)),
                     color = affinityColor,
                     trackColor = MaterialTheme.colorScheme.outlineVariant,
                 )
@@ -400,7 +472,7 @@ private fun GalleryBannerCard(onClick: () -> Unit) {
             }
             Icon(
                 Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = null,
+                contentDescription = "갤러리로 이동",
                 tint = MaterialTheme.colorScheme.onPrimaryContainer
             )
         }
@@ -437,7 +509,7 @@ private fun ImageGeneratorBannerCard(onClick: () -> Unit) {
             }
             Icon(
                 Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = null,
+                contentDescription = "이상형 만들기",
                 tint = MaterialTheme.colorScheme.onTertiaryContainer
             )
         }
@@ -461,7 +533,7 @@ private fun EmptyState(onGallery: () -> Unit = {}, onCreateCharacter: () -> Unit
         Spacer(Modifier.height(20.dp))
 
         Text(
-            text = "아직 친구가 없어요",
+            text = "새로운 친구를 만나보세요",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onBackground
@@ -481,7 +553,7 @@ private fun EmptyState(onGallery: () -> Unit = {}, onCreateCharacter: () -> Unit
                 .height(52.dp),
             shape = RoundedCornerShape(16.dp)
         ) {
-            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+            Icon(Icons.Default.Add, contentDescription = "캐릭터 선택", modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(8.dp))
             Text("갤러리에서 캐릭터 고르기", style = MaterialTheme.typography.titleSmall)
         }

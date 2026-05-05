@@ -42,7 +42,15 @@ object AppModule {
             AppDatabase::class.java,
             "mbti_chat_db"
         )
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6, AppDatabase.MIGRATION_6_7)
+            .addMigrations(
+                AppDatabase.MIGRATION_1_2,
+                AppDatabase.MIGRATION_2_3,
+                AppDatabase.MIGRATION_3_4,
+                AppDatabase.MIGRATION_4_5,
+                AppDatabase.MIGRATION_5_6,
+                AppDatabase.MIGRATION_6_7,
+                AppDatabase.MIGRATION_7_8
+            )
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     super.onCreate(db)
@@ -70,18 +78,23 @@ object AppModule {
     }
 
     @Provides
+    @Singleton
     fun provideMessageDao(db: AppDatabase): MessageDao = db.messageDao()
 
     @Provides
+    @Singleton
     fun provideCharacterDao(db: AppDatabase): CharacterDao = db.characterDao()
 
     @Provides
+    @Singleton
     fun provideDiaryDao(db: AppDatabase): DiaryDao = db.diaryDao()
 
     @Provides
+    @Singleton
     fun provideMemoryDao(db: AppDatabase): MemoryDao = db.memoryDao()
 
     @Provides
+    @Singleton
     fun provideFeedbackDao(db: AppDatabase): FeedbackDao = db.feedbackDao()
 
     @Provides

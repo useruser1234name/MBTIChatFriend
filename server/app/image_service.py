@@ -9,6 +9,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
+from .background_tasks import create_tracked_task
 from .config import OPENAI_API_KEY, FIREBASE_STORAGE_BUCKET
 
 logger = logging.getLogger(__name__)
@@ -59,14 +60,20 @@ EMOTION_PROMPTS = {
 OVERLAY_PROMPTS = {
     "eyes_half_closed": "same face, eyes half closed, drowsy look",
     "eyes_closed": "same face, eyes completely closed, peaceful",
-    "mouth_small": "same face, mouth slightly open, speaking softly",
-    "mouth_medium": "same face, mouth moderately open, speaking normally",
-    "mouth_open": "same face, mouth wide open, talking loudly or laughing",
+    "thinking": "same character, thoughtful expression, eyes focused slightly downward",
+    "listening": "same character, attentive gentle expression, calm eye contact",
+    "speaking": "same character, mouth slightly open as if speaking softly",
 }
 
 # ── 진행 중인 표정 세트 작업 ──
 
 _tasks: dict[str, dict] = {}
+
+
+def get_storage_health() -> dict[str, object]:
+    if not FIREBASE_STORAGE_BUCKET:
+        return {"status": "disabled", "bucket": ""}
+    return {"status": "ready" if _storage_bucket else "degraded", "bucket": FIREBASE_STORAGE_BUCKET}
 
 
 def _upload_to_storage(data: bytes, path: str, content_type: str = "image/png") -> str:
@@ -86,14 +93,15 @@ async def generate_single_image(
     quality: str = "standard",
 ) -> tuple[bytes, Optional[str]]:
     """gpt-image-1으로 이미지 1장 생성, (bytes, revised_prompt) 반환."""
+    quality_map = {"standard": "medium", "hd": "high"}
+    mapped_quality = quality_map.get(quality, quality)
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     response = await client.images.generate(
         model="gpt-image-1",
         prompt=prompt,
         n=1,
         size=size,
-        quality=quality,
-        response_format="b64_json",
+        quality=mapped_quality,
     )
     image_data = response.data[0]
 
@@ -122,8 +130,21 @@ async def generate_and_upload_base(
 ) -> tuple[str, Optional[str]]:
     """기본 이미지 생성 → Firebase Storage 업로드 → (url, revised_prompt)."""
     img_bytes, revised = await generate_single_image(prompt, size, quality)
-    path = f"characters/{character_id}/base.png"
-    url = _upload_to_storage(img_bytes, path)
+
+    # Storage가 초기화되어 있으면 업로드, 아니면 명시적 오류 발생
+    if _storage_bucket:
+        path = f"characters/{character_id}/base.png"
+        url = _upload_to_storage(img_bytes, path)
+    else:
+        logger.error(
+            "Firebase Storage가 초기화되지 않았습니다. "
+            "FIREBASE_STORAGE_BUCKET 환경변수와 FIREBASE_CREDENTIALS_PATH를 확인하세요."
+        )
+        raise RuntimeError(
+            "Firebase Storage가 설정되지 않아 이미지를 업로드할 수 없습니다. "
+            "서버 관리자에게 FIREBASE_STORAGE_BUCKET 설정을 요청하세요."
+        )
+
     return url, revised
 
 
@@ -136,18 +157,13 @@ async def _generate_expression(
 ) -> tuple[str, str]:
     """표정 하나 생성 → 업로드 → (key, url)."""
     is_overlay = expression_key in OVERLAY_PROMPTS
-    if is_overlay:
-        prompt = (
-            f"Same character as described: {base_prompt}. "
-            f"Extreme close-up of face only. {expression_desc}. "
-            f"Same art style, same colors, same lighting, clean background."
-        )
-    else:
-        prompt = (
-            f"Same character as described: {base_prompt}. "
-            f"Expression: {expression_desc}. "
-            f"Same art style, same angle, same lighting, same background."
-        )
+    prompt = (
+        f"Same adult character as described: {base_prompt}. "
+        f"Keep the exact same face shape, hairstyle, hair color, eye shape, outfit, "
+        f"camera angle, art style, lighting, and clean background. "
+        f"Change only the facial expression and subtle gaze. Expression: {expression_desc}. "
+        f"Upper body and face visible, fully clothed, non-sexual companion character portrait."
+    )
 
     img_bytes, _ = await generate_single_image(prompt, size, quality="standard")
 
@@ -197,9 +213,12 @@ async def generate_expression_set(task_id: str, base_prompt: str, character_id: 
                 _tasks[task_id]["urls"][key] = url
                 _tasks[task_id]["completed"] += 1
 
-        _tasks[task_id]["status"] = "completed"
+        if _tasks[task_id]["completed"] == total:
+            _tasks[task_id]["status"] = "completed"
+        else:
+            _tasks[task_id]["status"] = "failed"
         logger.info(
-            f"Expression set completed for {character_id}: "
+            f"Expression set {_tasks[task_id]['status']} for {character_id}: "
             f"{_tasks[task_id]['completed']}/{total}"
         )
     except Exception as e:
@@ -210,7 +229,10 @@ async def generate_expression_set(task_id: str, base_prompt: str, character_id: 
 def start_expression_set_task(base_prompt: str, character_id: str, size: str = "1024x1024") -> str:
     """표정 세트 생성 백그라운드 작업 시작. task_id 반환."""
     task_id = str(uuid.uuid4())
-    asyncio.create_task(generate_expression_set(task_id, base_prompt, character_id, size))
+    create_tracked_task(
+        generate_expression_set(task_id, base_prompt, character_id, size),
+        name="image-expression-set",
+    )
     return task_id
 
 

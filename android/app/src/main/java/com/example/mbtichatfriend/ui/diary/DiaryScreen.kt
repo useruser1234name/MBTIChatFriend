@@ -129,7 +129,7 @@ fun DiaryScreen(
                             CharacterFace(
                                 avatarId = ch.avatarId,
                                 modifier = Modifier
-                                    .size(52.dp)
+                                    .size(72.dp)
                                     .clip(CircleShape)
                             )
                             Spacer(Modifier.width(12.dp))
@@ -293,7 +293,7 @@ private fun TodayDiarySection(
                     ) {
                         Icon(
                             Icons.Default.Refresh,
-                            contentDescription = null,
+                            contentDescription = "다시 생성",
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(Modifier.width(6.dp))
@@ -311,7 +311,7 @@ private fun TodayDiarySection(
                     ) {
                         Icon(
                             Icons.Default.AutoAwesome,
-                            contentDescription = null,
+                            contentDescription = "일기 생성",
                             modifier = Modifier.size(48.dp),
                             tint = MaterialTheme.colorScheme.primary
                         )

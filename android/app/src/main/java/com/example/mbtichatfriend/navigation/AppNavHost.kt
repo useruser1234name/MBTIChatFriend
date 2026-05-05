@@ -158,8 +158,8 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
                 ) {
                     CreateCharacterSheet(
                         onDismiss = { showCreateSheet = false },
-                        onCreate = { name, mbti, speechStyle, relationship, avatarId ->
-                            homeViewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId) { characterId ->
+                        onCreate = { name, mbti, speechStyle, relationship, avatarId, personaRaw ->
+                            homeViewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId, personaRaw) { characterId ->
                                 showCreateSheet = false
                                 navController.navigate(Route.Chat.createRoute(characterId))
                             }
