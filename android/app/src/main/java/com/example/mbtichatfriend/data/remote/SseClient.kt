@@ -1,6 +1,5 @@
 package com.example.mbtichatfriend.data.remote
 
-import com.example.mbtichatfriend.BuildConfig
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -11,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import com.example.mbtichatfriend.BuildConfig
 import org.json.JSONObject
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -29,11 +29,7 @@ sealed class SseEvent {
         val nextGoal: String = "",
         val roomId: String = ""
     ) : SseEvent()
-
-    data class Error(
-        val message: String,
-        val statusCode: Int? = null
-    ) : SseEvent()
+    data class Error(val message: String) : SseEvent()
 }
 
 @Singleton
@@ -50,7 +46,6 @@ class SseClient @Inject constructor(
             put("relationship", request.relationship)
             put("nickname", request.nickname)
             put("affinity_level", request.affinityLevel)
-
             val historyArray = org.json.JSONArray()
             request.conversationHistory.forEach { map ->
                 val obj = JSONObject()
@@ -58,25 +53,12 @@ class SseClient @Inject constructor(
                 historyArray.put(obj)
             }
             put("conversation_history", historyArray)
-
             request.userMbti?.let { put("user_mbti", it) }
             if (request.characterName.isNotEmpty()) {
                 put("character_name", request.characterName)
             }
             if (request.characterId.isNotEmpty()) {
                 put("character_id", request.characterId)
-            }
-            if (request.personaRaw.isNotEmpty()) {
-                put("persona_raw", request.personaRaw)
-            }
-            if (request.personaSummary.isNotEmpty()) {
-                put("persona_summary", request.personaSummary)
-            }
-            if (request.dialoguePrompt.isNotEmpty()) {
-                put("dialogue_prompt", request.dialoguePrompt)
-            }
-            if (request.visualPrompt.isNotEmpty()) {
-                put("visual_prompt", request.visualPrompt)
             }
             if (request.memories.isNotEmpty()) {
                 val memoriesArray = org.json.JSONArray()
@@ -88,12 +70,6 @@ class SseClient @Inject constructor(
                 }
                 put("memories", memoriesArray)
             }
-            if (request.roomId.isNotEmpty()) {
-                put("room_id", request.roomId)
-            }
-            put("end_of_session", request.endOfSession)
-            request.clientLocalHour?.let { put("client_local_hour", it) }
-            request.mood?.let { put("mood", it) }
         }
 
         val body = json.toString().toRequestBody("application/json".toMediaType())
@@ -124,20 +100,18 @@ class SseClient @Inject constructor(
                         }
                         "done" -> {
                             val obj = JSONObject(data)
-                            trySend(
-                                SseEvent.Done(
-                                    affinityDelta = obj.optInt("affinity_delta", 0),
-                                    nightDiaryGenerated = obj.optBoolean("night_diary_generated", false),
-                                    nextHook = obj.optString("next_hook", ""),
-                                    nextGoal = obj.optString("next_goal", ""),
-                                    roomId = obj.optString("room_id", "")
-                                )
-                            )
+                            trySend(SseEvent.Done(
+                                affinityDelta = obj.optInt("affinity_delta", 0),
+                                nightDiaryGenerated = obj.optBoolean("night_diary_generated", false),
+                                nextHook = obj.optString("next_hook", ""),
+                                nextGoal = obj.optString("next_goal", ""),
+                                roomId = obj.optString("room_id", "")
+                            ))
                             close()
                         }
                     }
-                } catch (error: Exception) {
-                    trySend(SseEvent.Error(error.message ?: "응답 파싱 오류"))
+                } catch (e: Exception) {
+                    trySend(SseEvent.Error(e.message ?: "파싱 오류"))
                 }
             }
 
@@ -146,16 +120,7 @@ class SseClient @Inject constructor(
                 t: Throwable?,
                 response: okhttp3.Response?
             ) {
-                val fallbackMessage = t?.message ?: "연결에 실패했습니다."
-                val statusCode = response?.code
-                val rawBody = runCatching { response?.body?.string() }.getOrNull()
-                val apiError = toApiErrorException(statusCode, rawBody, fallbackMessage)
-                trySend(
-                    SseEvent.Error(
-                        message = apiError.message ?: fallbackMessage,
-                        statusCode = apiError.statusCode
-                    )
-                )
+                trySend(SseEvent.Error(t?.message ?: "연결 실패"))
                 close()
             }
 

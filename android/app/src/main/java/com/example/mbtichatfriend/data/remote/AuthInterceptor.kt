@@ -1,10 +1,8 @@
 package com.example.mbtichatfriend.data.remote
 
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.Response
-import java.util.concurrent.Executors
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -19,11 +17,6 @@ class AuthInterceptor @Inject constructor(
 
     @Volatile
     private var tokenExpiry: Long = 0L
-
-    // OkHttp 스레드풀과 격리된 전용 디스패처 (데드락 방지)
-    private val tokenDispatcher = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "auth-token-refresh").apply { isDaemon = true }
-    }.asCoroutineDispatcher()
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val original = chain.request()
@@ -42,7 +35,7 @@ class AuthInterceptor @Inject constructor(
     }
 
     private fun getCachedOrFreshToken(): String? {
-        // 캐시된 토큰이 아직 유효하면 재사용 (runBlocking 불필요)
+        // 캐시된 토큰이 아직 유효하면 재사용 (만료 5분 전 갱신)
         val now = System.currentTimeMillis()
         cachedToken?.let { token ->
             if (now < tokenExpiry - REFRESH_MARGIN_MS) {
@@ -50,11 +43,13 @@ class AuthInterceptor @Inject constructor(
             }
         }
 
-        // 토큰 갱신: OkHttp 스레드풀과 격리된 전용 디스패처 사용
+        // 동기적으로 토큰 갱신 (OkHttp interceptor는 동기만 지원)
+        // runBlocking이지만 캐싱으로 호출 빈도를 최소화
         return try {
-            val token = runBlocking(tokenDispatcher) { authManager.getIdToken() }
+            val token = runBlocking { authManager.getIdToken() }
             if (token != null) {
                 cachedToken = token
+                // Firebase ID 토큰은 1시간 유효
                 tokenExpiry = now + TOKEN_LIFETIME_MS
             }
             token

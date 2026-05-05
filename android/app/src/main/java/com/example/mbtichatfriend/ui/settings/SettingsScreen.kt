@@ -1,7 +1,7 @@
 package com.example.mbtichatfriend.ui.settings
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,29 +19,30 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Link
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Snackbar
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -54,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -66,33 +68,27 @@ import androidx.hilt.navigation.compose.hiltViewModel
 fun SettingsScreen(
     onBack: () -> Unit,
     onLogout: () -> Unit,
+    onYearReport: () -> Unit = {},
+    onLanguageSetting: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val nickname by viewModel.nickname.collectAsState()
     val darkMode by viewModel.darkMode.collectAsState()
     val authProvider by viewModel.authProvider.collectAsState()
     val linkError by viewModel.linkError.collectAsState()
+    val referralCode by viewModel.referralCode.collectAsState()
+    val referralStats by viewModel.referralStats.collectAsState()
+    val referralDeepLink by viewModel.referralDeepLink.collectAsState()
+    val referralCtaText = viewModel.referralCtaText
     val context = LocalContext.current
     var showNicknameDialog by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
-    var showDeleteDataDialog by remember { mutableStateOf(false) }
-    val characters by viewModel.characters.collectAsState(initial = emptyList())
-    val deleteResult by viewModel.deleteResult.collectAsState(initial = null)
-    val snackbarHostState = remember { SnackbarHostState() }
 
-    LaunchedEffect(deleteResult) {
-        deleteResult?.let { message ->
-            snackbarHostState.showSnackbar(message)
-            viewModel.clearDeleteResult()
-        }
-    }
-
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .systemBarsPadding()
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text("설정") },
             navigationIcon = {
@@ -236,30 +232,147 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(8.dp))
 
+            // 레퍼럴 섹션 (27차 스프린트 / 30차 A/B)
+            SectionTitle(referralCtaText)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // 레퍼럴 통계
+                    referralStats?.let { stats ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "${stats.invitedCount}명",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "내가 초대한 친구",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "+${stats.rewardDays}일",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.tertiary
+                                )
+                                Text(
+                                    text = "리워드",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                    }
+                    // 초대 코드 표시
+                    if (referralCode.isNotEmpty()) {
+                        Text(
+                            text = "내 초대 코드: $referralCode",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    // 공유 버튼들 (V3: 딥링크 URL 우선, 폴백 코드 텍스트)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 일반 공유 버튼 — 딥링크 URL 우선 공유 (A/B CTA 텍스트 적용, 30차 스프린트)
+                        FilledTonalButton(
+                            onClick = {
+                                viewModel.generateReferralLink { shareContent ->
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, shareContent)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, referralCtaText))
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Share,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(referralCtaText)
+                        }
+                        // 카카오톡 공유 버튼 — 딥링크 URL 우선, 미설치 시 일반 공유 폴백
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.generateReferralLink { shareContent ->
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, shareContent)
+                                        setPackage("com.kakao.talk")
+                                    }
+                                    runCatching {
+                                        context.startActivity(intent)
+                                    }.onFailure {
+                                        val fallback = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(Intent.EXTRA_TEXT, shareContent)
+                                        }
+                                        context.startActivity(Intent.createChooser(fallback, "친구 초대"))
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("카카오톡", color = Color(0xFFFFE812))
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // 언어 설정 섹션 (36차 스프린트)
+            SectionTitle("언어")
+            SettingsItem(
+                icon = Icons.Default.Language,
+                title = "언어 설정",
+                subtitle = "한국어 / English",
+                onClick = onLanguageSetting
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            // 리포트 섹션 (22차 스프린트)
+            SectionTitle("리포트")
+            SettingsItem(
+                icon = Icons.Default.EmojiEvents,
+                title = "2026 나의 대화 리포트",
+                subtitle = "올해 나의 대화를 돌아봐요",
+                onClick = onYearReport
+            )
+
+            Spacer(Modifier.height(8.dp))
+
             // 앱 정보
             SectionTitle("정보")
             SettingsItem(
                 icon = Icons.Default.Info,
                 title = "앱 버전",
                 subtitle = BuildConfig.VERSION_NAME
-            )
-
-            Spacer(Modifier.height(16.dp))
-
-            // 데이터 관리 섹션
-            Text(
-                "데이터 관리",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
-            )
-
-            SettingsItem(
-                icon = Icons.Default.Delete,
-                title = "대화 데이터 삭제",
-                subtitle = "캐릭터별 서버 대화 기록 초기화",
-                onClick = { showDeleteDataDialog = true },
-                isDestructive = true
             )
 
             Spacer(Modifier.height(8.dp))
@@ -275,15 +388,6 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(32.dp))
         }
-        }
-
-        // 삭제 결과 Snackbar
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(16.dp)
-        )
     }
 
     // 계정 연동 에러 Snackbar
@@ -335,42 +439,6 @@ fun SettingsScreen(
             }
         )
     }
-
-    // 대화 데이터 삭제 다이얼로그
-    if (showDeleteDataDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDataDialog = false },
-            title = { Text("대화 데이터 삭제") },
-            text = {
-                Column {
-                    Text("삭제할 캐릭터를 선택하세요:")
-                    Spacer(Modifier.height(12.dp))
-                    if (characters.isEmpty()) {
-                        Text("캐릭터가 없습니다", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    } else {
-                        characters.forEach { ch ->
-                            TextButton(
-                                onClick = {
-                                    showDeleteDataDialog = false
-                                    viewModel.deleteConversationData(ch.id.toString(), ch.name)
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("${ch.name} (${ch.mbti})", modifier = Modifier.fillMaxWidth())
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showDeleteDataDialog = false }) {
-                    Text("닫기")
-                }
-            }
-        )
-    }
-
 }
 
 @Composable

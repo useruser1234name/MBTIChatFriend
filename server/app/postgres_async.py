@@ -1,0 +1,400 @@
+"""비동기 PostgreSQL 연결 풀 — psycopg3 async 기반.
+
+FastAPI async 이벤트 루프 블로킹 문제 해소 (2차 회의 W1-2 합의).
+CTO-C 이서연 설계, ARCH-A 조성현 검증.
+
+사용법:
+    from .postgres_async import get_async_db
+
+    async def some_handler():
+        db = get_async_db()
+        row = await db.fetchone("SELECT * FROM story_state WHERE room_id = $1", room_id)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import asynccontextmanager
+from typing import Any, Optional
+
+from .config import DATABASE_URL
+from .circuit_breaker import CircuitOpenError, get_db_circuit
+
+logger = logging.getLogger(__name__)
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
+
+    _PSYCOPG_ASYNC_AVAILABLE = True
+except ImportError:
+    psycopg = None
+    dict_row = None
+    AsyncConnectionPool = None
+    _PSYCOPG_ASYNC_AVAILABLE = False
+
+
+# pgBouncer 앞단 운영: 앱 레벨 풀은 소규모로 유지
+class AsyncDatabase:
+    """비동기 PostgreSQL 커넥션 풀 래퍼.
+
+    FastAPI lifespan에서 initialize() 호출 후 사용.
+    풀 크기: min=2, max=10 (pgBouncer 앞단 운영 기준 — DATA-A 오재원 권고).
+    """
+
+    def __init__(self) -> None:
+        self._pool: Optional[Any] = None
+
+    @property
+    def available(self) -> bool:
+        return self._pool is not None
+
+    async def initialize(
+        self,
+        dsn: str = "",
+        min_size: int = 2,
+        max_size: int = 10,
+    ) -> None:
+        """애플리케이션 시작 시 1회 호출."""
+        if not _PSYCOPG_ASYNC_AVAILABLE:
+            logger.warning(
+                "psycopg / psycopg_pool 미설치 — 비동기 DB 풀 비활성화. "
+                "`pip install psycopg[binary] psycopg-pool` 설치 필요."
+            )
+            return
+
+        target_dsn = dsn or DATABASE_URL
+        if not target_dsn:
+            logger.info("DATABASE_URL 미설정 — 비동기 DB 풀 비활성화.")
+            return
+
+        try:
+            self._pool = AsyncConnectionPool(
+                conninfo=target_dsn,
+                min_size=min_size,
+                max_size=max_size,
+                kwargs={"row_factory": dict_row},
+                open=False,
+            )
+            await self._pool.open()
+            logger.info(f"비동기 PostgreSQL 풀 초기화 완료 (min={min_size}, max={max_size})")
+        except Exception as e:
+            logger.error(f"비동기 PostgreSQL 풀 초기화 실패: {e}")
+            self._pool = None
+
+    async def close(self) -> None:
+        """애플리케이션 종료 시 호출."""
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
+            logger.info("비동기 PostgreSQL 풀 종료")
+
+    async def execute(self, query: str, *args: Any) -> None:
+        """INSERT / UPDATE / DELETE 등 결과 없는 쿼리 실행."""
+        if not self._pool:
+            return
+        cb = get_db_circuit()
+        try:
+            async def _do() -> None:
+                async with self._pool.connection() as conn:
+                    await conn.execute(query, args)
+            await cb.call(_do())
+        except CircuitOpenError:
+            logger.warning("[CB] postgres circuit OPEN — DB 호출 스킵")
+        except Exception:
+            raise
+
+    async def fetchone(self, query: str, *args: Any) -> Optional[dict]:
+        """단일 행 조회."""
+        if not self._pool:
+            return None
+        cb = get_db_circuit()
+        try:
+            async def _do() -> Optional[dict]:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(query, args)
+                        return await cur.fetchone()
+            return await cb.call(_do())
+        except CircuitOpenError:
+            logger.warning("[CB] postgres circuit OPEN — DB 호출 스킵")
+            return None
+        except Exception:
+            raise
+
+    async def fetchall(self, query: str, *args: Any) -> list[dict]:
+        """다중 행 조회."""
+        if not self._pool:
+            return []
+        cb = get_db_circuit()
+        try:
+            async def _do() -> list[dict]:
+                async with self._pool.connection() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(query, args)
+                        return await cur.fetchall()
+            return await cb.call(_do())
+        except CircuitOpenError:
+            logger.warning("[CB] postgres circuit OPEN — DB 호출 스킵")
+            return []
+        except Exception:
+            raise
+
+    async def record_api_usage(
+        self,
+        room_id: str,
+        character_id: str,
+        model_id: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        endpoint: str = "chat",
+    ) -> None:
+        """OpenAI API 사용량 기록 — H-3 비용 메트릭 수집."""
+        await self.execute(
+            """
+            INSERT INTO api_usage
+                (room_id, character_id, model_id, prompt_tokens,
+                 completion_tokens, total_tokens, endpoint)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            room_id,
+            character_id,
+            model_id,
+            prompt_tokens,
+            completion_tokens,
+            prompt_tokens + completion_tokens,
+            endpoint,
+        )
+
+    async def check_daily_budget(
+        self,
+        user_id: str,
+        daily_limit: int = 50_000,
+    ) -> tuple[bool, int]:
+        """사용자의 오늘 토큰 사용량 확인.
+
+        W2-6: PM-B 손민준 + ARCH-B 황인호 설계.
+        room_id는 '{uid}:...' 형식으로 저장되므로 LIKE 매칭.
+        집계(SUM) 쿼리이므로 읽기 복제본으로 라우팅.
+
+        Returns:
+            (is_within_budget, current_usage)
+        """
+        row = None
+        try:
+            async with get_async_db_read() as conn:
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(
+                        """
+                        SELECT COALESCE(SUM(total_tokens), 0) AS used
+                        FROM api_usage
+                        WHERE room_id LIKE $1
+                          AND created_at >= CURRENT_DATE
+                        """,
+                        (f"{user_id}:%",),
+                    )
+                    row = await cur.fetchone()
+        except Exception as exc:
+            logger.warning("[check_daily_budget] 읽기 복제본 조회 실패, primary로 폴백: %s", exc)
+            row = await self.fetchone(
+                """
+                SELECT COALESCE(SUM(total_tokens), 0) AS used
+                FROM api_usage
+                WHERE room_id LIKE $1
+                  AND created_at >= CURRENT_DATE
+                """,
+                f"{user_id}:%",
+            )
+        used = int(row["used"]) if row else 0
+        return used < daily_limit, used
+
+    async def delete_conversation(self, room_id: str, character_id: str = "") -> int:
+        """대화 기록 삭제 — GDPR/개인정보 보호 대응.
+
+        Returns: 삭제된 메시지 수
+        """
+        if not self._pool:
+            return 0
+
+        async with self._pool.connection() as conn:
+            # conversation_memory 삭제
+            mem_key = f"{character_id}:{room_id}" if character_id else room_id
+            await conn.execute(
+                "DELETE FROM conversation_memory WHERE memory_key LIKE $1",
+                f"%{mem_key}%",
+            )
+
+            # metric_events 삭제
+            await conn.execute(
+                "DELETE FROM metric_events WHERE room_id = $1",
+                room_id,
+            )
+
+            # story_state 삭제
+            await conn.execute(
+                "DELETE FROM story_state WHERE room_id = $1",
+                room_id,
+            )
+
+            # diary_entries 삭제
+            if character_id:
+                await conn.execute(
+                    "DELETE FROM diary_entries WHERE room_id = $1 AND character_id = $2",
+                    room_id,
+                    character_id,
+                )
+            else:
+                await conn.execute(
+                    "DELETE FROM diary_entries WHERE room_id = $1",
+                    room_id,
+                )
+
+            # api_usage 삭제
+            await conn.execute(
+                "DELETE FROM api_usage WHERE room_id = $1",
+                room_id,
+            )
+
+            # 삭제 이력 기록
+            await conn.execute(
+                "INSERT INTO deletion_log (room_id, character_id) VALUES ($1, $2)",
+                room_id,
+                character_id or "",
+            )
+
+        return 1  # 삭제 완료
+
+    async def record_investment_event(
+        self,
+        room_id: str,
+        event_type: str,
+        character_id: str = "",
+        payload: dict | None = None,
+    ) -> None:
+        """30일 리텐션 코호트 투자 이벤트 기록 (6차 회의 — DATA-B 신예린 설계).
+
+        투자 이벤트 유형:
+            'memory_saved'        — 기억 앨범에 저장
+            'character_customized'— 캐릭터 커스터마이징 1회 이상
+            'affinity_level_3'    — 호감도 레벨 3 이상 달성
+
+        metric_events 테이블에 기록. 30일 코호트 쿼리에서 활용.
+        """
+        import json as _json
+        await self.execute(
+            """
+            INSERT INTO metric_events (event_type, room_id, character_id, payload)
+            VALUES ($1, $2, $3, $4::jsonb)
+            """,
+            event_type,
+            room_id,
+            character_id,
+            _json.dumps(payload or {}),
+        )
+
+    async def get_cohort_retention(
+        self,
+        days: int = 30,
+    ) -> dict:
+        """30일 리텐션 — 투자 사용자 vs 비투자 사용자 비교 쿼리.
+
+        무거운 집계 쿼리(CTE 3개 + GROUP BY + JOIN)이므로 읽기 복제본으로 라우팅.
+
+        Returns:
+            {
+                'invested_users': int,
+                'invested_retained': int,
+                'non_invested_users': int,
+                'non_invested_retained': int,
+                'invested_retention_rate': float,
+                'non_invested_retention_rate': float,
+            }
+        """
+        query = f"""
+            WITH first_sessions AS (
+                SELECT room_id, MIN(created_at) AS first_at
+                FROM metric_events
+                GROUP BY room_id
+            ),
+            invested AS (
+                SELECT DISTINCT room_id
+                FROM metric_events
+                WHERE event_type IN ('memory_saved', 'character_customized', 'affinity_level_3')
+            ),
+            returned AS (
+                SELECT DISTINCT room_id
+                FROM metric_events me
+                JOIN first_sessions fs ON me.room_id = fs.room_id
+                WHERE me.created_at >= fs.first_at + INTERVAL '{days} days'
+            )
+            SELECT
+                COUNT(DISTINCT fs.room_id) FILTER (WHERE i.room_id IS NOT NULL)     AS invested_users,
+                COUNT(DISTINCT r.room_id) FILTER (WHERE i.room_id IS NOT NULL)      AS invested_retained,
+                COUNT(DISTINCT fs.room_id) FILTER (WHERE i.room_id IS NULL)         AS non_invested_users,
+                COUNT(DISTINCT r.room_id) FILTER (WHERE i.room_id IS NULL)          AS non_invested_retained
+            FROM first_sessions fs
+            LEFT JOIN invested i ON fs.room_id = i.room_id
+            LEFT JOIN returned r ON fs.room_id = r.room_id
+            WHERE fs.first_at <= NOW() - INTERVAL '{days} days'
+            """
+        row = None
+        try:
+            async with get_async_db_read() as conn:
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(query)
+                    row = await cur.fetchone()
+        except Exception as exc:
+            logger.warning("[get_cohort_retention] 읽기 복제본 조회 실패, 폴백 없음: %s", exc)
+            return {}
+        if not row:
+            return {}
+        inv = int(row["invested_users"] or 0)
+        inv_ret = int(row["invested_retained"] or 0)
+        non = int(row["non_invested_users"] or 0)
+        non_ret = int(row["non_invested_retained"] or 0)
+        return {
+            "invested_users": inv,
+            "invested_retained": inv_ret,
+            "non_invested_users": non,
+            "non_invested_retained": non_ret,
+            "invested_retention_rate": round(inv_ret / inv, 3) if inv else 0.0,
+            "non_invested_retention_rate": round(non_ret / non, 3) if non else 0.0,
+        }
+
+
+# 전역 싱글톤 인스턴스
+_async_db = AsyncDatabase()
+
+
+def get_async_db() -> AsyncDatabase:
+    """애플리케이션 전역 비동기 DB 인스턴스 반환."""
+    return _async_db
+
+
+# 읽기 전용 풀 (SELECT 쿼리용, replica endpoint)
+_read_pool: Optional[AsyncConnectionPool] = None
+
+
+async def initialize_read_pool(dsn: str = None) -> None:
+    """읽기 복제본 연결 풀 초기화. DATABASE_REPLICA_URL 없으면 스킵."""
+    global _read_pool
+    read_dsn = dsn or os.getenv("DATABASE_REPLICA_URL", "")
+    if not read_dsn:
+        return
+    _read_pool = AsyncConnectionPool(
+        conninfo=read_dsn,
+        min_size=1,
+        max_size=5,
+        open=False,
+    )
+    await _read_pool.open()
+
+
+@asynccontextmanager
+async def get_async_db_read():
+    """읽기 전용 DB. replica 없으면 primary로 폴백."""
+    pool = _read_pool if _read_pool else _async_db._pool
+    async with pool.connection() as conn:
+        yield conn

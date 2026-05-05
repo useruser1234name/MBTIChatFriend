@@ -6,19 +6,24 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.mbtichatfriend.data.local.UserPreferences
+import com.example.mbtichatfriend.data.remote.ChatApi
+import com.example.mbtichatfriend.data.remote.ReferralRedeemRequest
 import com.example.mbtichatfriend.model.AgeGroup
 import com.example.mbtichatfriend.model.Gender
 import com.example.mbtichatfriend.model.MbtiType
+import com.example.mbtichatfriend.model.PresetCharacter
 import com.example.mbtichatfriend.model.Relationship
 import com.example.mbtichatfriend.model.SpeechStyle
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
-    private val prefs: UserPreferences
+    private val prefs: UserPreferences,
+    private val chatApi: ChatApi
 ) : ViewModel() {
 
     val isOnboardingCompleted: Flow<Boolean> = prefs.isOnboardingCompleted
@@ -34,6 +39,10 @@ class OnboardingViewModel @Inject constructor(
     var speechStyle by mutableStateOf(SpeechStyle.CASUAL)
         private set
     var relationship by mutableStateOf(Relationship.FRIEND)
+        private set
+
+    // 3단계 온보딩 통합 — 캐릭터 추천 단계에서 선택된 캐릭터
+    var selectedCharacter by mutableStateOf<PresetCharacter?>(null)
         private set
 
     val nicknameError: String?
@@ -71,6 +80,15 @@ class OnboardingViewModel @Inject constructor(
         relationship = value
     }
 
+    fun updateSelectedCharacter(value: PresetCharacter) {
+        selectedCharacter = value
+        // 선택된 캐릭터의 말투와 관계를 자동으로 반영
+        runCatching { SpeechStyle.valueOf(value.speechStyle) }.getOrNull()
+            ?.let { speechStyle = it }
+        runCatching { Relationship.valueOf(value.relationship) }.getOrNull()
+            ?.let { relationship = it }
+    }
+
     fun saveOnboarding(onComplete: () -> Unit) {
         viewModelScope.launch {
             prefs.saveOnboardingData(
@@ -82,6 +100,27 @@ class OnboardingViewModel @Inject constructor(
                 relationship = relationship.name
             )
             onComplete()
+        }
+    }
+
+    // ── 레퍼럴 코드 적용 (17차 스프린트) ──────────────────────────────────────
+    fun redeemReferralCode(code: String, callback: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val userId = prefs.firebaseUid.first()
+                val response = chatApi.redeemReferralCode(
+                    ReferralRedeemRequest(code = code, userId = userId)
+                )
+                if (response.isSuccessful && response.body()?.success == true) {
+                    callback(true, null)
+                } else {
+                    val errorMsg = response.body()?.message?.takeIf { it.isNotEmpty() }
+                        ?: "코드를 확인해 주세요."
+                    callback(false, errorMsg)
+                }
+            } catch (e: Exception) {
+                callback(false, e.message ?: "코드 적용 실패")
+            }
         }
     }
 }

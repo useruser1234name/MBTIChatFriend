@@ -93,7 +93,7 @@ fun ImageGeneratorSheet(
     sheetState: SheetState,
     chatApi: ChatApi,
     onDismiss: () -> Unit,
-    onCharacterCreated: (name: String, mbti: String, speechStyle: String, relationship: String, avatarId: String, personaRaw: String, revisedPrompt: String?) -> Unit
+    onCharacterCreated: (name: String, mbti: String, speechStyle: String, relationship: String, avatarId: String, revisedPrompt: String?) -> Unit
 ) {
     val scope = rememberCoroutineScope()
 
@@ -135,7 +135,7 @@ fun ImageGeneratorSheet(
                     selectedEthnicity = selectedEthnicity,
                     onEthnicitySelect = { selectedEthnicity = it },
                     customPrompt = customPrompt,
-                    onCustomPromptChange = { if (it.length <= 500) customPrompt = it },
+                    onCustomPromptChange = { customPrompt = it },
                     isLoading = isLoading,
                     generatedImageUrl = generatedImageUrl,
                     errorMessage = errorMessage,
@@ -180,7 +180,7 @@ fun ImageGeneratorSheet(
                         val avatarId = "img:$generatedImageUrl"
                         onCharacterCreated(
                             charName, selectedMbti.name, selectedStyle.name,
-                            selectedRelationship.name, avatarId, customPrompt.trim(), revisedPrompt
+                            selectedRelationship.name, avatarId, revisedPrompt
                         )
                     }
                 )
@@ -210,7 +210,7 @@ private fun Step1ImageGeneration(
             .verticalScroll(rememberScrollState())
     ) {
         Text(
-            "상상한 친구 만들기",
+            "이상형 만들기",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold
         )
@@ -233,15 +233,14 @@ private fun Step1ImageGeneration(
         SectionTitle("인종")
         ChipGroup(ethnicityOptions, selectedEthnicity, onEthnicitySelect)
 
-        SectionTitle("페르소나/외형 설명 (선택)")
+        SectionTitle("추가 설명 (선택)")
         OutlinedTextField(
             value = customPrompt,
             onValueChange = onCustomPromptChange,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("예: 밖에서는 차분하고 강해 보이지만 나에게는 조곤조곤 다정한 친구") },
+            placeholder = { Text("예: 파란 눈, 흰 드레스, 꽃밭 배경") },
             singleLine = false,
-            minLines = 3,
-            maxLines = 5,
+            maxLines = 2,
             shape = RoundedCornerShape(12.dp)
         )
 
@@ -332,7 +331,7 @@ private fun Step2CharacterInfo(
             .verticalScroll(rememberScrollState())
     ) {
         Text(
-            "상상한 친구 만들기",
+            "이상형 만들기",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold
         )
@@ -481,10 +480,9 @@ private fun buildPrompt(
     ethnicity: StyleOption,
     custom: String
 ): String {
-    val base = "An adult ${ethnicity.promptEn} character portrait, " +
+    val base = "A beautiful ${ethnicity.promptEn} character portrait, " +
             "upper body and face visible, ${hair.promptEn}, " +
             "${vibe.promptEn} expression, ${art.promptEn}, " +
-            "high quality, detailed face, soft lighting, clean background, " +
-            "fully clothed, non-sexual, respectful companion character design"
-    return if (custom.isNotBlank()) "$base, persona notes: $custom" else base
+            "high quality, detailed face, soft lighting, clean background"
+    return if (custom.isNotBlank()) "$base, $custom" else base
 }

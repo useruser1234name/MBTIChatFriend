@@ -7,18 +7,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.data.local.UserPreferences
-import com.example.mbtichatfriend.data.remote.ChatApi
-import com.example.mbtichatfriend.data.remote.CompatibilityApiRequest
-import com.example.mbtichatfriend.data.remote.CompatibilityApiResponse
-import com.example.mbtichatfriend.data.remote.MemoryListApiResponse
 import com.example.mbtichatfriend.data.repository.CharacterRepository
 import com.example.mbtichatfriend.data.repository.FinetuneRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -35,37 +28,11 @@ sealed class FinetuneUiState {
 class CharacterProfileViewModel @Inject constructor(
     private val characterRepo: CharacterRepository,
     private val finetuneRepo: FinetuneRepository,
-    private val prefs: UserPreferences,
-    private val chatApi: ChatApi
+    private val prefs: UserPreferences
 ) : ViewModel() {
 
     var finetuneState by mutableStateOf<FinetuneUiState>(FinetuneUiState.Idle)
         private set
-
-    var compatibility by mutableStateOf<CompatibilityApiResponse?>(null)
-        private set
-
-    var memories by mutableStateOf<MemoryListApiResponse?>(null)
-        private set
-
-    val userMbti: StateFlow<String> = prefs.userMbti.stateIn(viewModelScope, SharingStarted.Eagerly, "")
-    val nickname: StateFlow<String> = prefs.nickname.stateIn(viewModelScope, SharingStarted.Eagerly, "")
-
-    fun loadCompatibility(userMbti: String, characterMbti: String) {
-        viewModelScope.launch {
-            runCatching {
-                chatApi.checkCompatibility(CompatibilityApiRequest(userMbti, characterMbti))
-            }.onSuccess { compatibility = it }
-        }
-    }
-
-    fun loadMemories(characterId: Long, characterName: String, nickname: String) {
-        viewModelScope.launch {
-            runCatching {
-                chatApi.getMemories(characterName, nickname, characterId.toString())
-            }.onSuccess { memories = it }
-        }
-    }
 
     fun getCharacter(id: Long): Flow<CharacterEntity?> = characterRepo.observeById(id)
 

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.android.billingclient.api.BillingClient
 import com.example.mbtichatfriend.data.local.AppDatabase
 import com.example.mbtichatfriend.data.local.CharacterDao
 import com.example.mbtichatfriend.data.local.DiaryDao
@@ -42,15 +43,7 @@ object AppModule {
             AppDatabase::class.java,
             "mbti_chat_db"
         )
-            .addMigrations(
-                AppDatabase.MIGRATION_1_2,
-                AppDatabase.MIGRATION_2_3,
-                AppDatabase.MIGRATION_3_4,
-                AppDatabase.MIGRATION_4_5,
-                AppDatabase.MIGRATION_5_6,
-                AppDatabase.MIGRATION_6_7,
-                AppDatabase.MIGRATION_7_8
-            )
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6, AppDatabase.MIGRATION_6_7)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     super.onCreate(db)
@@ -78,23 +71,18 @@ object AppModule {
     }
 
     @Provides
-    @Singleton
     fun provideMessageDao(db: AppDatabase): MessageDao = db.messageDao()
 
     @Provides
-    @Singleton
     fun provideCharacterDao(db: AppDatabase): CharacterDao = db.characterDao()
 
     @Provides
-    @Singleton
     fun provideDiaryDao(db: AppDatabase): DiaryDao = db.diaryDao()
 
     @Provides
-    @Singleton
     fun provideMemoryDao(db: AppDatabase): MemoryDao = db.memoryDao()
 
     @Provides
-    @Singleton
     fun provideFeedbackDao(db: AppDatabase): FeedbackDao = db.feedbackDao()
 
     @Provides
@@ -148,5 +136,14 @@ object AppModule {
     @Singleton
     fun provideSpeechRecognizerManager(@ApplicationContext context: Context): SpeechRecognizerManager {
         return SpeechRecognizerManager(context)
+    }
+
+    @Provides
+    @Singleton
+    fun provideBillingClient(@ApplicationContext context: Context): BillingClient {
+        return BillingClient.newBuilder(context)
+            .setListener { _, _ -> }
+            .enablePendingPurchases()
+            .build()
     }
 }

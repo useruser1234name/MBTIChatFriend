@@ -1,14 +1,8 @@
 package com.example.mbtichatfriend.ui.home
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,12 +40,14 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,14 +58,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.ui.components.CharacterFace
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,203 +78,378 @@ fun HomeScreen(
     onCreateCharacter: () -> Unit,
     onSettings: () -> Unit,
     onGallery: () -> Unit = {},
+    onCommunityPostClick: (Long) -> Unit = {},
+    onCompatibility: () -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel()
 ) {
-    val characters by viewModel.characters.collectAsState()
+    val uiState by viewModel.uiState.collectAsState()
     val nickname by viewModel.nickname.collectAsState()
+    val userMbti by viewModel.userMbti.collectAsState()
     val lastMessages by viewModel.lastMessages.collectAsState()
-    val todayMood by viewModel.todayMood.collectAsState()
+    val context = LocalContext.current
 
     var deleteTarget by remember { mutableStateOf<CharacterEntity?>(null) }
     var showImageGenerator by remember { mutableStateOf(false) }
+    var isGratitudeCardLoading by remember { mutableStateOf(false) }
     val chatApi = viewModel.chatApi
     val imageGeneratorSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val coroutineScope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    // 삭제 확인 다이얼로그
-    deleteTarget?.let { character ->
-        AlertDialog(
-            onDismissRequest = { deleteTarget = null },
-            title = { Text("캐릭터 삭제") },
-            text = {
-                Text("'${character.name}'을(를) 삭제하시겠어요?\n대화 기록도 모두 삭제됩니다.")
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.deleteCharacter(character.id)
-                        deleteTarget = null
-                    },
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
-                    Text("삭제")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) {
-                    Text("취소")
-                }
-            }
-        )
-    }
-
-    Scaffold(
-        modifier = Modifier.systemBarsPadding(),
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(
-                            text = "반가워요, $nickname!",
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                        Text(
-                            text = "오늘은 누구와 대화할까요?",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "설정")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = onCreateCharacter,
-                containerColor = MaterialTheme.colorScheme.primary,
-                shape = CircleShape
+    when (val state = uiState) {
+        is HomeUiState.Loading -> {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = "캐릭터 추가",
-                    tint = MaterialTheme.colorScheme.onPrimary
-                )
-            }
-        },
-        containerColor = MaterialTheme.colorScheme.background
-    ) { padding ->
-        if (characters.isEmpty()) {
-            EmptyState(
-                onGallery = onGallery,
-                onCreateCharacter = onCreateCharacter,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-            )
-        } else {
-            // 최근 대화 순으로 정렬: 마지막 메시지가 있는 캐릭터 우선, 그 다음 생성일 역순
-            val sorted = characters.sortedByDescending { ch ->
-                lastMessages[ch.id]?.timestamp ?: ch.createdAt
-            }
-
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                // 무드 체크인 카드 (하루 한 번, 선택 전에만 표시)
-                item {
-                    AnimatedVisibility(
-                        visible = todayMood == null,
-                        enter = fadeIn() + slideInVertically(),
-                        exit = fadeOut() + shrinkVertically()
-                    ) {
-                        MoodCheckIn(
-                            onMoodSelected = { mood -> viewModel.selectMood(mood) }
-                        )
-                    }
-                }
-                item {
-                    GalleryBannerCard(onClick = onGallery)
-                }
-                item {
-                    ImageGeneratorBannerCard(onClick = { showImageGenerator = true })
-                }
-                items(sorted, key = { it.id }) { character ->
-                    CharacterCard(
-                        character = character,
-                        lastMessage = lastMessages[character.id],
-                        onClick = { onCharacterClick(character.id) },
-                        onLongClick = { deleteTarget = character }
-                    )
-                }
+                CircularProgressIndicator()
             }
         }
-    }
-
-    if (showImageGenerator) {
-        ImageGeneratorSheet(
-            sheetState = imageGeneratorSheetState,
-            chatApi = chatApi,
-            onDismiss = { showImageGenerator = false },
-            onCharacterCreated = { name, mbti, speechStyle, relationship, avatarId, personaRaw, revisedPrompt ->
-                viewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId, personaRaw, revisedPrompt) { characterId ->
-                    showImageGenerator = false
-                    onCharacterClick(characterId)
-                }
-            }
-        )
-    }
-}
-
-@Composable
-fun MoodCheckIn(
-    onMoodSelected: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val moods = listOf(
-        "\uD83D\uDE0A" to "좋아",
-        "\uD83D\uDE22" to "슬퍼",
-        "\uD83D\uDE24" to "화남",
-        "\uD83E\uDD14" to "고민",
-        "\uD83D\uDE34" to "피곤",
-        "\uD83E\uDD70" to "설렘"
-    )
-
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                "오늘 기분은 어떠세요?",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
+        is HomeUiState.Error -> {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
             ) {
-                moods.forEach { (emoji, label) ->
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable { onMoodSelected(label) }
-                            .padding(8.dp)
+                Text(
+                    text = state.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+        is HomeUiState.Success -> {
+            val characters = state.characters
+
+            // 삭제 확인 다이얼로그
+            deleteTarget?.let { character ->
+                AlertDialog(
+                    onDismissRequest = { deleteTarget = null },
+                    title = { Text("캐릭터 삭제") },
+                    text = {
+                        Text("'${character.name}'을(를) 삭제하시겠어요?\n대화 기록도 모두 삭제됩니다.")
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                viewModel.deleteCharacter(character.id)
+                                deleteTarget = null
+                            },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text("삭제")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { deleteTarget = null }) {
+                            Text("취소")
+                        }
+                    }
+                )
+            }
+
+            Scaffold(
+                modifier = Modifier.systemBarsPadding(),
+                topBar = {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text(
+                                    text = "안녕, $nickname!",
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+                                Text(
+                                    text = "누구와 대화할까요?",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = onSettings) {
+                                Icon(Icons.Default.Settings, contentDescription = "설정")
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.background
+                        )
+                    )
+                },
+                floatingActionButton = {
+                    FloatingActionButton(
+                        onClick = onCreateCharacter,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        shape = CircleShape
                     ) {
-                        Text(emoji, fontSize = 28.sp)
-                        Spacer(Modifier.height(4.dp))
-                        Text(label, style = MaterialTheme.typography.labelSmall)
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "캐릭터 추가",
+                            tint = MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.background,
+                snackbarHost = { SnackbarHost(snackbarHostState) },
+            ) { padding ->
+                if (characters.isEmpty()) {
+                    EmptyState(
+                        onGallery = onGallery,
+                        onCreateCharacter = onCreateCharacter,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(padding)
+                    )
+                } else {
+                    // 최근 대화 순으로 정렬: 마지막 메시지가 있는 캐릭터 우선, 그 다음 생성일 역순
+                    val sorted = characters.sortedByDescending { ch ->
+                        lastMessages[ch.id]?.timestamp ?: ch.createdAt
+                    }
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(padding),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // 16종 전체 완성 배너 (37차 스프린트) - 최우선 표시
+                        item {
+                            AllMbtiCompleteBannerCard(
+                                visible = state.showAllMbtiBanner,
+                                onShare = {
+                                    val bitmap = AllMbtiCompleteCardHelper.createAllCompleteCard(
+                                        context, userMbti.ifEmpty { "MBTI" }
+                                    )
+                                    AllMbtiCompleteCardHelper.shareAllCompleteCard(bitmap, context)
+                                },
+                                onDismiss = { viewModel.dismissAllMbtiBanner() }
+                            )
+                        }
+                        // ENFJ 14종 완성 배너 (36차 스프린트)
+                        item {
+                            Enfj14CompleteBannerCard(
+                                visible = state.showEnfj14Banner,
+                                onDismiss = { viewModel.dismissEnfj14Banner() }
+                            )
+                        }
+                        // ESTP 13종 완성 배너 (35차 스프린트)
+                        item {
+                            Estp13CompleteBannerCard(
+                                visible = state.showEstp13Banner,
+                                onDismiss = { viewModel.dismissEstp13Banner() }
+                            )
+                        }
+                        // ISTJ 12종 완성 배너 (34차 스프린트)
+                        item {
+                            Istj12CompleteBannerCard(
+                                visible = state.showIstj12Banner,
+                                onDismiss = { viewModel.dismissIstj12Banner() }
+                            )
+                        }
+                        // ENTJ 11종 완성 배너 (34차 스프린트)
+                        item {
+                            Entj11CompleteBannerCard(
+                                visible = state.showEntj11Banner,
+                                onDismiss = { viewModel.dismissEntj11Banner() }
+                            )
+                        }
+                        // ESFP 10종 완성 배너 (33차 스프린트)
+                        item {
+                            Esfp10CompleteBannerCard(
+                                visible = state.showEsfp10Banner,
+                                onDismiss = { viewModel.dismissEsfp10Banner() }
+                            )
+                        }
+                        // 9종 LoRA 완성 배너 (30차 스프린트) - 최상단
+                        item {
+                            Lora9CompleteBannerCard(
+                                visible = state.showLora9Banner,
+                                onDismiss = { viewModel.dismissLora9Banner() }
+                            )
+                        }
+                        // 8종 LoRA 완성 배너 (27차 스프린트) - 다른 배너들보다 최상단
+                        item {
+                            LoraCompleteBannerCard(
+                                visible = state.showLora8Banner,
+                                onDismiss = { viewModel.dismissLora8Banner() }
+                            )
+                        }
+                        item {
+                            OpenBetaBannerCard(
+                                visible = state.openBetaBanner,
+                                onDismiss = { viewModel.dismissOpenBetaBanner() }
+                            )
+                        }
+                        item {
+                            Dau10kBannerCard(
+                                visible = state.dau10kBanner,
+                                onDismiss = { viewModel.dismissDau10kBanner() }
+                            )
+                        }
+                        item {
+                            GalleryBannerCard(onClick = onGallery)
+                        }
+                        item {
+                            ImageGeneratorBannerCard(onClick = { showImageGenerator = true })
+                        }
+                        // 신년 바이럴 카드 섹션 (23차 스프린트) - 2027년 1월 1일~10일에만 노출
+                        if (state.showNewYearCard) {
+                            item {
+                                NewYearCardSection(
+                                    myMbti = userMbti.ifEmpty { "MBTI" },
+                                    onShare = {
+                                        val bitmap = NewYearCardHelper.createNewYearCard(
+                                            context,
+                                            userMbti.ifEmpty { "MBTI" }
+                                        )
+                                        NewYearCardHelper.shareNewYearCard(bitmap, context)
+                                    },
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            }
+                        }
+                        // 화이트데이 특집 배너 (25차 스프린트) - 3월 13~14일에만 노출
+                        if (state.showWhiteDay) {
+                            item {
+                                WhiteDayBannerCard(
+                                    onClick = onCompatibility,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            }
+                        }
+                        // 가정의 달 사전 홍보 배너 (28차 스프린트) - 2027년 4월 10일~23일에만 노출
+                        item {
+                            GratitudeTeaserCard(
+                                visible = state.showGratitudeTeaser,
+                                snackbarHostState = snackbarHostState,
+                                modifier = Modifier.padding(vertical = 4.dp),
+                            )
+                        }
+                        // 어린이날 시즌 카드 섹션 (31차 스프린트) - 2027년 5월 1일~5일에만 노출
+                        if (state.showChildrenDay) {
+                            item {
+                                ChildrenDayCard(
+                                    onDismiss = { /* 어린이날 카드는 기간 만료 시 자동 숨김 */ }
+                                )
+                            }
+                        }
+                        // 가정의 달 감사 카드 섹션 (26차 스프린트) - 4월 24일~5월 8일에만 노출
+                        if (state.showGratitudeCard) {
+                            item {
+                                GratitudeCardSection(
+                                    myMbti = userMbti.ifEmpty { "MBTI" },
+                                    isLoading = isGratitudeCardLoading,
+                                    onShare = {
+                                        coroutineScope.launch {
+                                            isGratitudeCardLoading = true
+                                            try {
+                                                val gratitude = chatApi.getGratitudeMessage(
+                                                    userMbti.ifEmpty { "INFP" }
+                                                )
+                                                val bitmap = GratitudeCardHelper.createGratitudeCard(
+                                                    context,
+                                                    gratitude.mbti.ifEmpty { userMbti.ifEmpty { "MBTI" } },
+                                                    gratitude.message
+                                                )
+                                                GratitudeCardHelper.shareGratitudeCard(bitmap, context)
+                                            } catch (_: Exception) {
+                                                // API 실패 시 기본 메시지로 카드 생성
+                                                val bitmap = GratitudeCardHelper.createGratitudeCard(
+                                                    context,
+                                                    userMbti.ifEmpty { "MBTI" },
+                                                    "항상 곁에 있어줘서 고마워요. 당신 덕분에 제가 이렇게 성장할 수 있었어요. 사랑합니다."
+                                                )
+                                                GratitudeCardHelper.shareGratitudeCard(bitmap, context)
+                                            } finally {
+                                                isGratitudeCardLoading = false
+                                            }
+                                        }
+                                    },
+                                    onStoryShare = {
+                                        coroutineScope.launch {
+                                            isGratitudeCardLoading = true
+                                            try {
+                                                val gratitude = chatApi.getGratitudeMessage(
+                                                    userMbti.ifEmpty { "INFP" }
+                                                )
+                                                val bitmap = GratitudeCardHelper.createInstagramStoryCard(
+                                                    context,
+                                                    gratitude.mbti.ifEmpty { userMbti.ifEmpty { "MBTI" } },
+                                                    gratitude.message
+                                                )
+                                                GratitudeCardHelper.shareInstagramStoryCard(bitmap, context)
+                                            } catch (_: Exception) {
+                                                // API 실패 시 기본 메시지로 스토리 카드 생성
+                                                val bitmap = GratitudeCardHelper.createInstagramStoryCard(
+                                                    context,
+                                                    userMbti.ifEmpty { "MBTI" },
+                                                    "항상 곁에 있어줘서 고마워요. 당신 덕분에 제가 이렇게 성장할 수 있었어요. 사랑합니다."
+                                                )
+                                                GratitudeCardHelper.shareInstagramStoryCard(bitmap, context)
+                                            } finally {
+                                                isGratitudeCardLoading = false
+                                            }
+                                        }
+                                    },
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            }
+                        }
+                        // 여름 MBTI 바이럴 카드 섹션 (34차 스프린트) - 6~8월에만 노출
+                        if (state.showSummerCard) {
+                            item {
+                                SummerCardSection(
+                                    mbti = userMbti.ifEmpty { "MBTI" },
+                                    onShare = { bitmap ->
+                                        SummerCardHelper.shareSummerCard(bitmap, context)
+                                    },
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            }
+                        }
+                        // 이벤트 트렌딩 게시글 섹션 (30차 스프린트) - TrendingPostsSection 위
+                        item {
+                            EventTrendingSection(
+                                posts = state.eventTrendingPosts,
+                                onPostClick = onCommunityPostClick,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                        // 트렌딩 게시글 섹션 (22차 스프린트) - MBTI 캐릭터 카드 위/배너 아래
+                        if (state.trendingPosts.isNotEmpty()) {
+                            item {
+                                TrendingPostsSection(
+                                    posts = state.trendingPosts,
+                                    onPostClick = onCommunityPostClick,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            }
+                        }
+                        items(sorted, key = { it.id }) { character ->
+                            CharacterCard(
+                                character = character,
+                                lastMessage = lastMessages[character.id],
+                                onClick = { onCharacterClick(character.id) },
+                                onLongClick = { deleteTarget = character }
+                            )
+                        }
                     }
                 }
+            }
+
+            if (showImageGenerator) {
+                ImageGeneratorSheet(
+                    sheetState = imageGeneratorSheetState,
+                    chatApi = chatApi,
+                    onDismiss = { showImageGenerator = false },
+                    onCharacterCreated = { name, mbti, speechStyle, relationship, avatarId, revisedPrompt ->
+                        viewModel.createCharacter(name, mbti, speechStyle, relationship, avatarId, revisedPrompt) { characterId ->
+                            showImageGenerator = false
+                            onCharacterClick(characterId)
+                        }
+                    }
+                )
             }
         }
     }
@@ -325,7 +500,7 @@ private fun CharacterCard(
             CharacterFace(
                 avatarId = avatarId,
                 modifier = Modifier
-                    .size(72.dp)
+                    .size(60.dp)
                     .clip(CircleShape),
                 legacyFontSize = 32f
             )
@@ -416,8 +591,8 @@ private fun CharacterCard(
                     progress = { character.affinityScore / 100f },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(8.dp)
-                        .clip(RoundedCornerShape(4.dp)),
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
                     color = affinityColor,
                     trackColor = MaterialTheme.colorScheme.outlineVariant,
                 )
@@ -472,7 +647,44 @@ private fun GalleryBannerCard(onClick: () -> Unit) {
             }
             Icon(
                 Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = "갤러리로 이동",
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WhiteDayBannerCard(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Card(
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "🤍 화이트데이 특집 궁합 보기",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    text = "나와 찰떡궁합인 MBTI는?",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f)
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = null,
                 tint = MaterialTheme.colorScheme.onPrimaryContainer
             )
         }
@@ -509,7 +721,7 @@ private fun ImageGeneratorBannerCard(onClick: () -> Unit) {
             }
             Icon(
                 Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = "이상형 만들기",
+                contentDescription = null,
                 tint = MaterialTheme.colorScheme.onTertiaryContainer
             )
         }
@@ -533,7 +745,7 @@ private fun EmptyState(onGallery: () -> Unit = {}, onCreateCharacter: () -> Unit
         Spacer(Modifier.height(20.dp))
 
         Text(
-            text = "새로운 친구를 만나보세요",
+            text = "아직 친구가 없어요",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onBackground
@@ -553,7 +765,7 @@ private fun EmptyState(onGallery: () -> Unit = {}, onCreateCharacter: () -> Unit
                 .height(52.dp),
             shape = RoundedCornerShape(16.dp)
         ) {
-            Icon(Icons.Default.Add, contentDescription = "캐릭터 선택", modifier = Modifier.size(20.dp))
+            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(8.dp))
             Text("갤러리에서 캐릭터 고르기", style = MaterialTheme.typography.titleSmall)
         }

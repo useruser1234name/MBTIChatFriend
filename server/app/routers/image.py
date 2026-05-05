@@ -1,14 +1,19 @@
-"""이미지 라우터: generate, expression_set"""
+"""이미지 생성 엔드포인트"""
 
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from ..auth_middleware import verify_firebase_token
-from ..config import ENVIRONMENT, OPENAI_API_KEY
-from ..content_filter import check_content
-from ..image_service import generate_and_upload_base, get_task_status, start_expression_set_task
+from ..config import OPENAI_API_KEY
+from ..image_service import (
+    generate_and_upload_base,
+    start_expression_set_task,
+    get_task_status,
+)
 from ..models import (
     ImageGenerateRequest,
     ImageGenerateResponse,
@@ -16,10 +21,11 @@ from ..models import (
     ImageSetResponse,
     ImageSetStatusResponse,
 )
-from ..shared import limiter
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
+
+router = APIRouter(prefix="/api/v1", tags=["image"])
 
 
 @router.post("/image/generate", response_model=ImageGenerateResponse)
@@ -33,10 +39,6 @@ async def generate_image(
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured")
 
-    is_safe, reason = check_content(req.prompt)
-    if not is_safe:
-        raise HTTPException(status_code=400, detail="부적절한 표현이 포함된 프롬프트입니다.")
-
     try:
         import uuid
         character_id = str(uuid.uuid4())
@@ -49,8 +51,7 @@ async def generate_image(
         return ImageGenerateResponse(url=url, revised_prompt=revised)
     except Exception as e:
         logger.error(f"Image generation failed: {e}")
-        detail = str(e) if ENVIRONMENT != "production" else "서버 내부 오류가 발생했습니다"
-        raise HTTPException(status_code=500, detail=detail)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/image/generate-set", response_model=ImageSetResponse)
@@ -64,10 +65,6 @@ async def generate_image_set(
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured")
 
-    is_safe, reason = check_content(req.base_prompt)
-    if not is_safe:
-        raise HTTPException(status_code=400, detail="부적절한 표현이 포함된 프롬프트입니다.")
-
     try:
         task_id = start_expression_set_task(
             base_prompt=req.base_prompt,
@@ -77,8 +74,7 @@ async def generate_image_set(
         return ImageSetResponse(status="processing", task_id=task_id)
     except Exception as e:
         logger.error(f"Expression set generation failed: {e}")
-        detail = str(e) if ENVIRONMENT != "production" else "서버 내부 오류가 발생했습니다"
-        raise HTTPException(status_code=500, detail=detail)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/image/set-status/{task_id}", response_model=ImageSetStatusResponse)

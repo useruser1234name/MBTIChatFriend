@@ -31,7 +31,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -129,21 +128,13 @@ fun GalleryScreen(
             FilterChip(
                 selected = selectedGroup == null,
                 onClick = { selectedGroup = null },
-                label = { Text("전체") },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                )
+                label = { Text("전체") }
             )
-            MbtiGroup.entries.forEach { group ->
+            MbtiGroup.values().forEach { group ->
                 FilterChip(
                     selected = selectedGroup == group,
                     onClick = { selectedGroup = if (selectedGroup == group) null else group },
-                    label = { Text("${group.tag} ${group.label}") },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = MaterialTheme.colorScheme.primary,
-                        selectedLabelColor = MaterialTheme.colorScheme.onPrimary
-                    )
+                    label = { Text("${group.tag} ${group.label}") }
                 )
             }
         }
@@ -151,8 +142,8 @@ fun GalleryScreen(
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxSize()
         ) {
             items(displayed, key = { it.mbti }) { preset ->

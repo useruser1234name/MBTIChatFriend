@@ -8,16 +8,17 @@ import com.example.mbtichatfriend.data.remote.ChatApi
 import com.example.mbtichatfriend.data.remote.ChatRequest
 import com.example.mbtichatfriend.data.remote.FeedbackRequest
 import com.example.mbtichatfriend.data.remote.MemoryItem
+import com.example.mbtichatfriend.data.remote.ReplyPart
+import com.example.mbtichatfriend.data.remote.SessionCheckRequest
+import com.example.mbtichatfriend.data.remote.SessionCheckResponse
 import com.example.mbtichatfriend.data.remote.SseClient
 import com.example.mbtichatfriend.data.remote.SseEvent
-import com.example.mbtichatfriend.data.remote.toApiErrorException
 import kotlinx.coroutines.flow.Flow
-import retrofit2.HttpException
 import javax.inject.Inject
 import javax.inject.Singleton
 
 data class ChatResult(
-    val replies: List<com.example.mbtichatfriend.data.remote.ReplyPart>,
+    val replies: List<ReplyPart>,
     val affinityDelta: Int
 )
 
@@ -37,8 +38,8 @@ class ChatRepository @Inject constructor(
         isFromUser: Boolean,
         emotion: String? = null,
         sendStatus: String = "SENT"
-    ): Long {
-        return dao.insert(
+    ) {
+        dao.insert(
             MessageEntity(
                 characterId = characterId,
                 text = text,
@@ -49,6 +50,10 @@ class ChatRepository @Inject constructor(
         )
     }
 
+    /**
+     * SSE 스트리밍으로 메시지 수신
+     * 각 메시지 파트가 실시간으로 Flow를 통해 전달됨
+     */
     fun streamMessage(
         message: String,
         mbti: String,
@@ -60,15 +65,7 @@ class ChatRepository @Inject constructor(
         userMbti: String? = null,
         characterName: String = "",
         characterId: String = "",
-        personaRaw: String = "",
-        personaSummary: String = "",
-        dialoguePrompt: String = "",
-        visualPrompt: String = "",
-        memories: List<MemoryItem> = emptyList(),
-        roomId: String = "",
-        endOfSession: Boolean = false,
-        clientLocalHour: Int? = null,
-        mood: String? = null
+        memories: List<MemoryItem> = emptyList()
     ): Flow<SseEvent> {
         return sseClient.streamChat(
             ChatRequest(
@@ -82,19 +79,14 @@ class ChatRepository @Inject constructor(
                 userMbti = userMbti,
                 characterName = characterName,
                 characterId = characterId,
-                personaRaw = personaRaw,
-                personaSummary = personaSummary,
-                dialoguePrompt = dialoguePrompt,
-                visualPrompt = visualPrompt,
-                memories = memories,
-                roomId = roomId,
-                endOfSession = endOfSession,
-                clientLocalHour = clientLocalHour,
-                mood = mood
+                memories = memories
             )
         )
     }
 
+    /**
+     * REST 방식 (폴백용)
+     */
     suspend fun sendMessage(
         message: String,
         mbti: String,
@@ -106,15 +98,7 @@ class ChatRepository @Inject constructor(
         userMbti: String? = null,
         characterName: String = "",
         characterId: String = "",
-        personaRaw: String = "",
-        personaSummary: String = "",
-        dialoguePrompt: String = "",
-        visualPrompt: String = "",
-        memories: List<MemoryItem> = emptyList(),
-        roomId: String = "",
-        endOfSession: Boolean = false,
-        clientLocalHour: Int? = null,
-        mood: String? = null
+        memories: List<MemoryItem> = emptyList()
     ): ChatResult {
         return try {
             val response = api.chat(
@@ -129,20 +113,21 @@ class ChatRepository @Inject constructor(
                     userMbti = userMbti,
                     characterName = characterName,
                     characterId = characterId,
-                    personaRaw = personaRaw,
-                    personaSummary = personaSummary,
-                    dialoguePrompt = dialoguePrompt,
-                    visualPrompt = visualPrompt,
-                    memories = memories,
-                    roomId = roomId,
-                    endOfSession = endOfSession,
-                    clientLocalHour = clientLocalHour,
-                    mood = mood
+                    memories = memories
                 )
             )
             ChatResult(replies = response.replies, affinityDelta = response.affinityDelta)
-        } catch (error: HttpException) {
-            throw toApiErrorException(error, "메시지 전송에 실패했습니다.")
+        } catch (e: Exception) {
+            ChatResult(
+                replies = listOf(
+                    ReplyPart(
+                        text = "음... 잠깐 생각할게요! 다시 말해줄래요?",
+                        emotion = "NEUTRAL",
+                        delay = 500
+                    )
+                ),
+                affinityDelta = 0
+            )
         }
     }
 
@@ -150,14 +135,11 @@ class ChatRepository @Inject constructor(
         dao.updateSendStatus(messageId, status)
     }
 
-    suspend fun deleteMessage(messageId: Long) {
-        dao.deleteById(messageId)
-    }
-
     suspend fun clearMessages(characterId: Long) {
         dao.deleteByCharacter(characterId)
     }
 
+    /** 피드백 제출: 로컬 저장 → 서버 동기화 (오프라인 우선) */
     suspend fun submitFeedback(messageId: Long, characterId: Long, feedbackType: String) {
         feedbackDao.insert(
             FeedbackEntity(
@@ -175,17 +157,25 @@ class ChatRepository @Inject constructor(
                 )
             )
             val entity = feedbackDao.getByMessageId(messageId)
-            if (entity != null) {
-                feedbackDao.markSynced(entity.id)
-            }
+            if (entity != null) feedbackDao.markSynced(entity.id)
         } catch (_: Exception) {
+            // 서버 실패 시 로컬만 저장, 나중에 재시도
         }
     }
 
+    /** 특정 메시지의 로컬 피드백 조회 */
     suspend fun getFeedbackForMessage(messageId: Long): String? {
         return feedbackDao.getByMessageId(messageId)?.feedbackType
     }
 
+    /**
+     * Self-Regulation: 세션 사용 시간 및 연속 접속 점검.
+     * PSY-B 최은혜 + PM-B 손민준 설계 (4차 회의 합의).
+     */
+    suspend fun checkSession(req: SessionCheckRequest): SessionCheckResponse =
+        api.checkSession(req)
+
+    /** 미동기화 피드백 서버 전송 재시도 */
     suspend fun syncPendingFeedback() {
         val unsynced = feedbackDao.getUnsynced()
         for (fb in unsynced) {
@@ -199,6 +189,7 @@ class ChatRepository @Inject constructor(
                 )
                 feedbackDao.markSynced(fb.id)
             } catch (_: Exception) {
+                // 다음 시도에서 재시도
             }
         }
     }

@@ -10,8 +10,8 @@ import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.SseEvent
 import com.example.mbtichatfriend.data.repository.CharacterRepository
 import com.example.mbtichatfriend.data.repository.ChatRepository
-import com.example.mbtichatfriend.data.repository.MemoryRepository
 import com.example.mbtichatfriend.data.voice.SpeechRecognizerManager
+import com.example.mbtichatfriend.data.voice.SttState
 import com.example.mbtichatfriend.data.voice.TtsEngine
 import com.example.mbtichatfriend.model.CharacterEmotion
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -20,17 +20,18 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
+/** 음성 대화 상태 머신 */
 enum class VoiceCallState {
-    IDLE,
-    LISTENING,
-    PROCESSING,
-    SPEAKING
+    IDLE,           // 대기 중 (마이크 버튼 활성)
+    LISTENING,      // 사용자 음성 듣는 중
+    PROCESSING,     // 서버 응답 대기 중
+    SPEAKING        // TTS 재생 중
 }
 
 @HiltViewModel
@@ -38,7 +39,6 @@ class VoiceCallViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val chatRepo: ChatRepository,
     private val characterRepo: CharacterRepository,
-    private val memoryRepo: MemoryRepository,
     private val prefs: UserPreferences,
     private val ttsEngine: TtsEngine,
     private val sttManager: SpeechRecognizerManager
@@ -52,15 +52,18 @@ class VoiceCallViewModel @Inject constructor(
     val messages = chatRepo.observeMessages(characterId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    // ── UI 상태 ──────────────────────────────────────────────
     var callState by mutableStateOf(VoiceCallState.IDLE)
         private set
 
     var currentEmotion by mutableStateOf(CharacterEmotion.NEUTRAL)
         private set
 
+    /** 캐릭터가 말하는 자막 (현재 ReplyPart 텍스트) */
     var characterSubtitle by mutableStateOf("")
         private set
 
+    /** 사용자 STT 결과 (partial 포함) */
     val userSpeechText = sttManager.partialResult
 
     var errorMessage by mutableStateOf<String?>(null)
@@ -79,11 +82,10 @@ class VoiceCallViewModel @Inject constructor(
         )
         sttManager.initialize()
 
+        // 캐릭터가 로드되면 음성 파라미터 적용
         viewModelScope.launch {
             character.collect { ch ->
-                if (ch != null) {
-                    applyVoiceParams()
-                }
+                if (ch != null) applyVoiceParams()
             }
         }
     }
@@ -91,12 +93,14 @@ class VoiceCallViewModel @Inject constructor(
     private fun applyVoiceParams() {
         val ch = character.value ?: return
         when (ch.speechStyle) {
-            "SWEET" -> ttsEngine.setVoiceParams(pitch = 1.25f, speed = 0.9f)
-            "TSUNDERE" -> ttsEngine.setVoiceParams(pitch = 1.1f, speed = 1.05f)
-            "FORMAL" -> ttsEngine.setVoiceParams(pitch = 0.95f, speed = 0.95f)
-            else -> ttsEngine.setVoiceParams(pitch = 1.0f, speed = 1.0f)
+            "SWEET"     -> ttsEngine.setVoiceParams(pitch = 1.25f, speed = 0.9f)
+            "TSUNDERE"  -> ttsEngine.setVoiceParams(pitch = 1.1f,  speed = 1.05f)
+            "FORMAL"    -> ttsEngine.setVoiceParams(pitch = 0.95f, speed = 0.95f)
+            else        -> ttsEngine.setVoiceParams(pitch = 1.0f,  speed = 1.0f)
         }
     }
+
+    // ── STT ──────────────────────────────────────────────────
 
     fun startListening() {
         if (callState != VoiceCallState.IDLE) return
@@ -122,23 +126,19 @@ class VoiceCallViewModel @Inject constructor(
         sttManager.stopListening()
     }
 
+    // ── 메시지 송수신 ─────────────────────────────────────────
+
     private fun sendVoiceMessage(text: String) {
         viewModelScope.launch {
             callState = VoiceCallState.PROCESSING
 
-            val userMessageId = chatRepo.saveMessage(
-                characterId = characterId,
-                text = text,
-                isFromUser = true,
-                sendStatus = "PENDING"
-            )
+            // 사용자 메시지 저장
+            chatRepo.saveMessage(characterId, text, isFromUser = true)
 
             val ch = characterRepo.getById(characterId) ?: run {
-                chatRepo.deleteMessage(userMessageId)
                 callState = VoiceCallState.IDLE
                 return@launch
             }
-
             val nickname = prefs.nickname.first()
             val userMbti = prefs.userMbti.first().ifEmpty { null }
             val history = messages.value.takeLast(20).map { msg ->
@@ -147,9 +147,8 @@ class VoiceCallViewModel @Inject constructor(
                     "content" to msg.text
                 )
             }
-            val memories = runCatching { memoryRepo.loadMemories(characterId) }.getOrDefault(emptyList())
-            var replyReceived = false
 
+            // SSE 스트리밍으로 응답 수신
             chatRepo.streamMessage(
                 message = text,
                 mbti = ch.mbti,
@@ -159,33 +158,21 @@ class VoiceCallViewModel @Inject constructor(
                 affinityLevel = ch.affinityLevel,
                 conversationHistory = history,
                 userMbti = userMbti,
-                characterName = ch.name,
-                characterId = ch.id.toString(),
-                personaRaw = ch.personaRaw,
-                personaSummary = ch.personaSummary,
-                dialoguePrompt = ch.dialoguePrompt,
-                visualPrompt = ch.visualPrompt,
-                memories = memories
-            ).catch { error ->
-                chatRepo.updateSendStatus(userMessageId, "FAILED")
-                errorMessage = error.message ?: "연결 오류"
+                characterName = ch.name
+            ).catch { e ->
+                errorMessage = "연결 오류: ${e.message}"
                 callState = VoiceCallState.IDLE
             }.collect { event ->
                 when (event) {
                     is SseEvent.Message -> {
-                        if (!replyReceived) {
-                            chatRepo.updateSendStatus(userMessageId, "SENT")
-                            replyReceived = true
-                        }
-
                         val emotion = try {
                             CharacterEmotion.valueOf(event.emotion)
-                        } catch (_: Exception) {
-                            CharacterEmotion.NEUTRAL
-                        }
+                        } catch (_: Exception) { CharacterEmotion.NEUTRAL }
+
                         currentEmotion = emotion
                         characterSubtitle = event.text
 
+                        // DB 저장
                         chatRepo.saveMessage(
                             characterId = characterId,
                             text = event.text,
@@ -193,35 +180,22 @@ class VoiceCallViewModel @Inject constructor(
                             emotion = event.emotion
                         )
 
+                        // TTS 재생 (메인 스레드에서 호출 필요)
                         callState = VoiceCallState.SPEAKING
                         withContext(Dispatchers.Main) {
                             speakAndWait(event.text)
                         }
                     }
-
                     is SseEvent.Done -> {
-                        if (!replyReceived) {
-                            chatRepo.updateSendStatus(userMessageId, "SENT")
-                            replyReceived = true
-                        }
-
                         if (event.affinityDelta != 0) {
                             val before = characterRepo.getById(characterId)?.affinityLevel ?: 1
                             characterRepo.updateAffinity(characterId, event.affinityDelta)
                             val after = characterRepo.getById(characterId)?.affinityLevel ?: 1
-                            if (after > before) {
-                                levelUpEvent = after
-                            }
+                            if (after > before) levelUpEvent = after
                         }
+                        // TTS가 끝날 때까지 기다린 후 IDLE로 전환은 speakAndWait에서 처리
                     }
-
                     is SseEvent.Error -> {
-                        if (event.statusCode in 400..499) {
-                            chatRepo.deleteMessage(userMessageId)
-                        } else {
-                            chatRepo.updateSendStatus(userMessageId, "FAILED")
-                        }
-                        errorMessage = event.message
                         if (callState == VoiceCallState.PROCESSING) {
                             callState = VoiceCallState.IDLE
                         }
@@ -229,26 +203,31 @@ class VoiceCallViewModel @Inject constructor(
                 }
             }
 
+            // Flow 완료 후 TTS가 이미 끝났으면 IDLE
             if (callState == VoiceCallState.PROCESSING) {
                 callState = VoiceCallState.IDLE
             }
         }
     }
 
+    /**
+     * TTS 재생 후 완료될 때까지 suspend.
+     * speak()의 onDone 콜백을 코루틴으로 변환.
+     */
     private suspend fun speakAndWait(text: String) {
         suspendCancellableCoroutine<Unit> { cont ->
             ttsEngine.speak(text) {
-                if (cont.isActive) {
-                    cont.resume(Unit)
-                }
+                if (cont.isActive) cont.resume(Unit)
             }
             cont.invokeOnCancellation { ttsEngine.stop() }
         }
-
+        // 이 ReplyPart TTS 완료 → 다음 이벤트 대기 or IDLE
         if (callState == VoiceCallState.SPEAKING) {
             callState = VoiceCallState.IDLE
         }
     }
+
+    // ── 종료 ─────────────────────────────────────────────────
 
     fun endCall() {
         ttsEngine.stop()

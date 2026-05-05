@@ -6,14 +6,15 @@ import logging
 import math
 import random
 import re
+import time
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from openai import AsyncOpenAI
 
-from .config import OPENAI_API_KEY, LLM_MODEL_COMPLEX, LLM_MODEL_SIMPLE, LLM_MODEL_BASE
-from .background_tasks import create_tracked_task
-from .content_filter import check_content, get_safety_system_prompt
+from .circuit_breaker import CircuitOpenError, get_openai_circuit
+from .config import OPENAI_API_KEY, TOGETHER_API_KEY, MAX_TOKENS
+from .content_filter import check_content, detect_crisis, get_safety_system_prompt
 from .models import HistoryMessage, MemoryItem, ReplyPart
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
 from .vector_store import get_store
@@ -479,48 +480,36 @@ async def extract_memories(
     return []
 
 
-async def _background_memory_extraction(
-    character_name: str,
-    nickname: str,
-    conversation_history: List[HistoryMessage],
-    character_id: str,
-    room_id: str,
-) -> None:
-    """백그라운드 메모리 추출 (사용자 응답 블로킹 방지)"""
-    try:
-        scope_id = _storage_scope_id(room_id, character_id)
-        await summarize_conversation(
-            character_name,
-            nickname,
-            conversation_history,
-            room_id=room_id,
-            character_id=character_id,
-        )
-        await extract_facts(
-            character_name,
-            nickname,
-            conversation_history,
-            room_id=room_id,
-            character_id=character_id,
-        )
-        if scope_id:
-            await extract_memories(
-                character_name,
-                nickname,
-                conversation_history,
-                character_id,
-                room_id,
-            )
-            await extract_episodes(
-                character_name,
-                nickname,
-                conversation_history,
-                character_id,
-                room_id,
-            )
-        logger.info(f"백그라운드 메모리 추출 완료: {character_name}")
-    except Exception as e:
-        logger.warning(f"백그라운드 메모리 추출 실패: {e}")
+def _jaccard_similarity(text_a: str, text_b: str) -> float:
+    """두 텍스트 간 Jaccard 유사도 계산 (단어 집합 기준)"""
+    if not text_a or not text_b:
+        return 0.0
+    set_a = set(text_a.lower().split())
+    set_b = set(text_b.lower().split())
+    if not set_a or not set_b:
+        return 0.0
+    intersection = set_a & set_b
+    union = set_a | set_b
+    return len(intersection) / len(union)
+
+
+def _filter_relevant_memories(
+    message: str, memories: List[MemoryItem], top_k: int = 3
+) -> List[MemoryItem]:
+    """현재 메시지와 Jaccard 유사도가 높은 상위 top_k 개 메모리만 반환"""
+    if not memories:
+        return []
+    if len(memories) <= top_k:
+        return memories
+
+    scored = []
+    for mem in memories:
+        combined = f"{mem.key} {mem.value}"
+        score = _jaccard_similarity(message, combined)
+        scored.append((score, mem))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [mem for _, mem in scored[:top_k]]
 
 
 async def generate_reply(
@@ -548,7 +537,20 @@ async def generate_reply(
     if conversation_history is None:
         conversation_history = []
 
-    # 1. 사용자 입력 필터링
+    # ── Dynamic Context Injection (W2-1) ──────────────────────────────
+    # 1. 대화 히스토리 서버사이드 제한: 최근 10개 메시지(user+assistant 쌍 유지)
+    _orig_history_len = len(conversation_history)
+    _MAX_HISTORY = 10  # 최대 10개 = 5턴(user+assistant)
+    if len(conversation_history) > _MAX_HISTORY:
+        # 짝수 단위로 자르기: 항상 user+assistant 쌍 유지
+        _trim_to = _MAX_HISTORY if _MAX_HISTORY % 2 == 0 else _MAX_HISTORY - 1
+        conversation_history = conversation_history[-_trim_to:]
+
+    # 2. 메모리 관련성 필터링은 RAG 병합 후 적용 (LLM 호출 직전)
+    _orig_memories_len = len(memories) if memories else 0
+    # ──────────────────────────────────────────────────────────────────
+
+    # 1. 사용자 입력 필터링 (H-1 활성화)
     is_safe, reason = check_content(message)
     if not is_safe:
         return [ReplyPart(
@@ -644,6 +646,11 @@ async def generate_reply(
                         ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
                     episode_context = "\n".join(ep_lines)
 
+        # ── DCI: 메모리 관련성 필터링 (RAG 병합 완료 후) ───────────────
+        _orig_all_memories_len = len(all_memories)
+        all_memories = _filter_relevant_memories(message, all_memories, top_k=3)
+        # ──────────────────────────────────────────────────────────────
+
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
         system_prompt = build_system_prompt(
             mbti=mbti,
@@ -672,8 +679,8 @@ async def generate_reply(
         if mood:
             messages.append({"role": "system", "content": f"[사용자 오늘 기분: {mood}]"})
 
-        # 대화 히스토리 추가 (최근 20개로 확대)
-        for hist in conversation_history[-20:]:
+        # 대화 히스토리 추가 (DCI에서 이미 최근 10개로 제한됨)
+        for hist in conversation_history:
             role = hist.role if hist.role in ("user", "assistant") else "user"
             if hist.content.strip():
                 messages.append({"role": role, "content": hist.content})
@@ -681,21 +688,65 @@ async def generate_reply(
         # 현재 메시지 (prompt injection 방어를 위한 명시적 경계)
         messages.append({"role": "user", "content": f"[사용자 메시지]\n{message}\n[/사용자 메시지]"})
 
-        # 모델 선택 (Phase 5: 복잡도 기반 라우팅)
-        complexity = _classify_message_complexity(message, len(conversation_history))
-        finetuned_model = get_model_for_character(character_id, owner_uid=owner_uid) if character_id else None
-        if finetuned_model and finetuned_model not in ("gpt-4o", "gpt-4.1", LLM_MODEL_BASE):
+        # 모델 선택 (Phase 5: 복잡도 기반 라우팅 + A/B 테스트 overlay)
+        finetuned_model = get_model_for_character(character_id) if character_id else None
+        _ab_variant: Optional[str] = None  # 기록용
+        if finetuned_model and finetuned_model != "gpt-4o":
             model_id = finetuned_model  # 파인튜닝 모델 우선
         else:
-            model_id = LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE
+            try:
+                # A/B 테스트: character_id 기반으로 variant 배정
+                # character_id 없으면 기존 복잡도 라우팅 유지
+                if character_id:
+                    from .ab_test import get_ab_manager, EXPERIMENTS
+                    _ab_manager = get_ab_manager()
+                    _ab_variant = _ab_manager.assign_variant(
+                        user_id=character_id,
+                        experiment_id="model_routing",
+                    )
+                    model_id = _ab_variant
+                    logger.info(
+                        "[AB] model_routing: character_id=%s → variant=%s",
+                        character_id, model_id,
+                    )
+                else:
+                    # character_id 없으면 기존 복잡도 기반 라우팅 유지
+                    complexity = _classify_message_complexity(message, len(conversation_history))
+                    model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
+            except Exception as _ab_err:
+                # A/B 배정 실패 → graceful fallback
+                logger.warning("[AB] variant 배정 실패, 복잡도 라우팅으로 fallback: %s", _ab_err)
+                complexity = _classify_message_complexity(message, len(conversation_history))
+                model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
 
-        response = await client.chat.completions.create(
-            model=model_id,
-            messages=messages,
-            temperature=0.85,
-            max_tokens=1200,
-            timeout=60,
-        )
+        # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
+        from .routers.chat import _resolve_model as _resolve_lora
+        _resolved_model_id, _lora_base_url = _resolve_lora(model_id, _ab_variant or "")
+        if _lora_base_url and TOGETHER_API_KEY:
+            _active_client = AsyncOpenAI(
+                api_key=TOGETHER_API_KEY,
+                base_url=_lora_base_url,
+            )
+            model_id = _resolved_model_id
+            logger.info("[LoRA] Together AI 라우팅: model=%s base_url=%s", model_id, _lora_base_url)
+        else:
+            _active_client = client
+
+        _t_start = time.monotonic()
+        _openai_cb = get_openai_circuit()
+        try:
+            response = await _openai_cb.call(
+                _active_client.chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    temperature=0.85,
+                    max_tokens=1200,
+                )
+            )
+        except CircuitOpenError as _cb_err:
+            logger.warning(f"[CB] openai circuit OPEN — 목업 응답 반환: {_cb_err}")
+            return _mock_reply(message, mbti, nickname, affinity_level), affinity_delta
+        _elapsed_ms = (time.monotonic() - _t_start) * 1000
 
         content = response.choices[0].message.content or ""
         replies = _parse_reply(content)
@@ -722,27 +773,24 @@ async def generate_reply(
             score = quick_score(message, content, mbti)
             if score < QUALITY_GATE_THRESHOLD:
                 logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
-                retry_response = await client.chat.completions.create(
-                    model=model_id,
-                    messages=messages,
-                    temperature=0.7,
-                    max_tokens=1200,
-                )
-                retry_content = retry_response.choices[0].message.content or ""
-                retry_replies = _parse_reply(retry_content)
-                if retry_replies:
-                    retry_score = quick_score(message, retry_content, mbti)
-                    if retry_score > score:
+                try:
+                    retry_response = await _openai_cb.call(
+                        _active_client.chat.completions.create(
+                            model=model_id,
+                            messages=messages,
+                            temperature=0.9,
+                            max_tokens=1200,
+                        )
+                    )
+                except CircuitOpenError:
+                    logger.warning("[CB] openai circuit OPEN — 품질 게이트 재시도 스킵")
+                    retry_response = None
+                if retry_response:
+                    retry_content = retry_response.choices[0].message.content or ""
+                    retry_replies = _parse_reply(retry_content)
+                    if retry_replies:
                         replies = retry_replies
                         content = retry_content
-                        logger.info(f"재생성 채택 (원본={score}, 재생성={retry_score})")
-                    else:
-                        logger.info(f"재생성 기각 (원본={score}, 재생성={retry_score})")
-                # 재시도 토큰 누적
-                if retry_response.usage:
-                    total_prompt_tokens += retry_response.usage.prompt_tokens
-                    total_completion_tokens += retry_response.usage.completion_tokens
-                    llm_call_count += 1
 
         # AI 응답 안전성 필터
         filtered_replies = []
@@ -754,23 +802,50 @@ async def generate_reply(
             ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
         ]
 
-        # 비용 메트릭 기록
-        estimated_cost = _estimate_cost(model_id, total_prompt_tokens, total_completion_tokens)
-        record_event(
-            "llm_usage",
-            room_id=room_id or "",
-            character_id=character_id or "",
-            payload={
-                "model": model_id,
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": total_completion_tokens,
-                "total_tokens": total_prompt_tokens + total_completion_tokens,
-                "estimated_cost_usd": round(estimated_cost, 6),
-                "llm_calls": llm_call_count,
-                "complexity": complexity,
-                "finetuned": bool(finetuned_model and finetuned_model not in ("gpt-4o", "gpt-4.1", LLM_MODEL_BASE)),
-            },
+        # AI 응답 필터링 복원 (H-1)
+        filtered = []
+        for reply in result:
+            safe, _ = check_content(reply.text)
+            if safe:
+                filtered.append(reply)
+        result = filtered if filtered else [
+            ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
+        ]
+
+        # ── DCI 토큰 절감 로깅 ────────────────────────────────────────
+        _trimmed_history_len = len(conversation_history)
+        _removed_history = _orig_history_len - _trimmed_history_len
+        _removed_memories = _orig_all_memories_len - len(all_memories)
+        _est_tokens_saved = (_removed_history * 50) + (_removed_memories * 30)
+        logger.info(
+            f"[DCI] history={_orig_history_len}→{_trimmed_history_len}, "
+            f"memories={_orig_all_memories_len}→{len(all_memories)}, "
+            f"est_tokens_saved≈{_est_tokens_saved}"
         )
+        # ─────────────────────────────────────────────────────────────
+
+        # H-3: 비용 메트릭 백그라운드 기록
+        usage = getattr(response, "usage", None)
+        if usage:
+            asyncio.create_task(_record_usage(
+                room_id="",  # main.py에서 room_id 주입 불가, chat_service 레벨에서는 빈값
+                character_id=character_id,
+                model_id=model_id,
+                prompt_tokens=getattr(usage, "prompt_tokens", 0),
+                completion_tokens=getattr(usage, "completion_tokens", 0),
+            ))
+
+        # A/B 테스트 결과 기록 (백그라운드)
+        if _ab_variant and character_id:
+            _total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+            asyncio.create_task(_record_ab_result(
+                experiment_id="model_routing",
+                variant=_ab_variant,
+                user_id=character_id,
+                character_id=character_id,
+                tokens=float(_total_tokens),
+                response_time_ms=_elapsed_ms,
+            ))
 
         # 백그라운드 품질 평가 (사용자 지연 0)
         full_response = " ".join(r.text for r in result)
@@ -798,6 +873,78 @@ async def generate_reply(
             emotion="SURPRISED",
             delay=2000
         )], 0
+
+
+async def stream_lora_response(messages: list, model_id: str, base_url: str):
+    """Together AI LoRA 모델 스트리밍 응답 제너레이터"""
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=TOGETHER_API_KEY, base_url=base_url)
+    response = await client.chat.completions.create(
+        model=model_id,
+        messages=messages,
+        stream=True,
+        max_tokens=MAX_TOKENS,
+        temperature=0.85,
+    )
+    async for chunk in response:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
+async def _record_usage(
+    room_id: str,
+    character_id: str,
+    model_id: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    """OpenAI API 사용량 비동기 기록 (H-3)."""
+    try:
+        from .postgres_async import get_async_db
+        db = get_async_db()
+        if db.available:
+            await db.record_api_usage(
+                room_id=room_id,
+                character_id=character_id,
+                model_id=model_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+    except Exception as e:
+        logger.warning(f"API 사용량 기록 실패: {e}")
+
+
+async def _record_ab_result(
+    experiment_id: str,
+    variant: str,
+    user_id: str,
+    character_id: str,
+    tokens: float,
+    response_time_ms: float,
+) -> None:
+    """A/B 테스트 메트릭(토큰 수·응답시간)을 백그라운드에서 기록 (DATA-B 신예린)."""
+    try:
+        from .ab_test import get_ab_manager
+        ab = get_ab_manager()
+        ab.record_result(
+            experiment_id=experiment_id,
+            variant=variant,
+            metric_name="total_tokens",
+            value=tokens,
+            user_id=user_id,
+            character_id=character_id,
+        )
+        ab.record_result(
+            experiment_id=experiment_id,
+            variant=variant,
+            metric_name="response_time_ms",
+            value=response_time_ms,
+            user_id=user_id,
+            character_id=character_id,
+        )
+    except Exception as e:
+        logger.warning(f"[AB] 결과 기록 실패: {e}")
 
 
 async def _post_response_quality_check(

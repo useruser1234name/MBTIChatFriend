@@ -1,40 +1,33 @@
-"""FCM 라우터: register, send"""
+"""FCM 푸시 알림 엔드포인트"""
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import Optional
 
-from ..auth_middleware import require_auth_always
-from ..firebase_service import get_token, register_token, send_push_notification
-from ..models import FcmSendRequest, FcmTokenRequest
-from ..shared import limiter
+from fastapi import APIRouter, Depends, HTTPException
 
-router = APIRouter()
+from ..auth_middleware import verify_firebase_token
+from ..firebase_service import register_token, get_token, send_push_notification
+from ..models import FcmTokenRequest, FcmSendRequest
+
+router = APIRouter(prefix="/api/v1", tags=["fcm"])
 
 
 @router.post("/fcm/register")
-@limiter.limit("10/minute")
 async def register_fcm_token(
-    request: Request,
     req: FcmTokenRequest,
-    user: dict = Depends(require_auth_always),
+    user: Optional[dict] = Depends(verify_firebase_token),
 ):
-    """FCM 토큰 등록 (인증된 사용자 본인 토큰만 등록 가능)"""
-    uid = user["uid"]
-    register_token(uid, req.token)
+    """FCM 토큰 등록"""
+    user_id = req.user_id or "anonymous"
+    register_token(user_id, req.token)
     return {"status": "ok"}
 
 
 @router.post("/fcm/send")
-@limiter.limit("10/minute")
 async def send_fcm_notification(
-    request: Request,
     req: FcmSendRequest,
-    user: dict = Depends(require_auth_always),
+    user: Optional[dict] = Depends(verify_firebase_token),
 ):
-    """FCM 푸시 알림 발송 (본인 user_id에만 발송 가능)"""
-    uid = user["uid"]
-    if req.user_id != uid:
-        raise HTTPException(status_code=403, detail="다른 사용자에게 푸시 알림을 발송할 수 없습니다.")
-
+    """FCM 푸시 알림 발송"""
     token = get_token(req.user_id)
     if not token:
         raise HTTPException(status_code=404, detail="FCM token not found for user")

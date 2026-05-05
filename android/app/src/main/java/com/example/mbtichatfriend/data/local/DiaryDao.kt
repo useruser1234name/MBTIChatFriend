@@ -20,7 +20,4 @@ interface DiaryDao {
 
     @Query("DELETE FROM diaries WHERE characterId = :characterId")
     suspend fun deleteByCharacter(characterId: Long)
-
-    @Query("DELETE FROM diaries")
-    suspend fun deleteAll()
 }

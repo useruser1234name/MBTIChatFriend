@@ -1,218 +1,121 @@
-"""데이터 관리 라우터: delete_conversation, session_start"""
+"""데이터 삭제 및 비용 대시보드 엔드포인트"""
 
-import asyncio
 import logging
-from datetime import datetime
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
-from ..auth_middleware import require_auth_always
-from ..chat_service import calculate_affinity_decay, calculate_return_bonus
-from ..metrics_service import record_event
-from ..models import (
-    DeleteConversationRequest,
-    DeleteConversationResponse,
-    SessionStartRequest,
-    SessionStartResponse,
-)
-from ..postgres import _async_pool_ready, get_conn
-from ..scopes import build_legacy_cleanup_warnings, build_memory_key, build_room_id
-from ..vector_store import get_store
-from ..shared import limiter
+from ..auth_middleware import verify_firebase_token
+from ..postgres_async import get_async_db
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+
+router = APIRouter(prefix="/api/v1", tags=["data"])
 
 
-@router.post("/session/start", response_model=SessionStartResponse)
-@limiter.limit("30/minute")
-async def session_start(
-    request: Request,
-    req: SessionStartRequest,
-    user: dict = Depends(require_auth_always),
-):
-    """세션 시작 시 호감도 감쇠 계산 및 복귀 보너스 적용"""
-    from datetime import timezone as tz
+class DataConsentRequest(BaseModel):
+    user_id: str
+    consented: bool  # True = 동의, False = 철회
 
-    last_chat_time = None
-    days_inactive = 0
 
-    if req.last_chat_iso:
-        try:
-            last_chat_time = datetime.fromisoformat(req.last_chat_iso)
-            if last_chat_time.tzinfo is None:
-                last_chat_time = last_chat_time.replace(tzinfo=tz.utc)
-            days_inactive = (datetime.now(tz.utc) - last_chat_time).days
-        except ValueError:
-            pass
+class DataConsentResponse(BaseModel):
+    user_id: str
+    consented: bool
+    message: str
 
-    adjusted_score = calculate_affinity_decay(
-        current_score=req.current_affinity_score,
-        current_level=req.current_affinity_level,
-        last_chat_time=last_chat_time,
+
+@router.post("/data/consent")
+async def update_data_consent(req: DataConsentRequest):
+    """
+    사용자 학습 데이터 활용 opt-in 동의 저장/철회.
+
+    법무 요건 (10차 회의 — 법무 전문가 김지은):
+    - 명시적 opt-in (기본값 False)
+    - 철회 시 기존 학습 데이터 삭제 플래그 설정
+    - 목적: AI 캐릭터 품질 개선
+    """
+    db = get_async_db()
+    await db.execute(
+        """
+        INSERT INTO user_data_consent (user_id, consented, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (user_id) DO UPDATE
+        SET consented = $2, updated_at = NOW()
+        """,
+        req.user_id,
+        req.consented,
     )
+    msg = "학습 데이터 활용에 동의하셨습니다." if req.consented else "동의가 철회됐습니다. 기존 데이터는 익명화 처리됩니다."
+    return DataConsentResponse(user_id=req.user_id, consented=req.consented, message=msg)
 
-    return_bonus = 0
-    if adjusted_score < req.current_affinity_score and days_inactive > 7:
-        return_bonus = calculate_return_bonus(req.current_affinity_score, adjusted_score)
-        adjusted_score = min(adjusted_score + return_bonus, req.current_affinity_score)
 
-    await asyncio.to_thread(
-        record_event,
-        event_type="session_start",
-        character_id=req.character_id,
-        user_id=user["uid"],
-        payload={
-            "original_score": req.current_affinity_score,
-            "adjusted_score": adjusted_score,
-            "return_bonus": return_bonus,
-            "days_inactive": days_inactive,
-        },
+@router.get("/data/consent/{user_id}")
+async def get_data_consent(user_id: str):
+    """사용자 동의 상태 조회."""
+    db = get_async_db()
+    row = await db.fetchone(
+        "SELECT consented FROM user_data_consent WHERE user_id = $1",
+        user_id,
     )
-
-    return SessionStartResponse(
-        adjusted_score=adjusted_score,
-        return_bonus=return_bonus,
-        original_score=req.current_affinity_score,
-        days_inactive=days_inactive,
-    )
+    consented = bool(row["consented"]) if row else False
+    return {"user_id": user_id, "consented": consented}
 
 
-@router.post("/data/delete-conversation", response_model=DeleteConversationResponse)
-@limiter.limit("5/minute")
+@router.delete("/data/conversations/{room_id}")
 async def delete_conversation(
-    request: Request,
-    req: DeleteConversationRequest,
-    user: dict = Depends(require_auth_always),
+    room_id: str,
+    character_id: str = "",
+    user: Optional[dict] = Depends(verify_firebase_token),
 ):
-    """대화 기록 삭제 (사용자 데이터 삭제 요청, 본인 데이터만 삭제 가능)"""
-    if not req.room_id and not req.character_id:
-        raise HTTPException(status_code=400, detail="room_id 또는 character_id가 필요합니다.")
+    """대화 기록 삭제 — 사용자가 특정 캐릭터 또는 전체 대화를 삭제할 수 있음.
 
-    uid = user["uid"]
-    try:
-        scoped_room_id = build_room_id(
-            user=user,
-            room_id=req.room_id,
-            character_id=req.character_id,
-            character_name=req.character_name,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    삭제 범위: conversation_memory, story_state, diary_entries,
+               metric_events, api_usage (PostgreSQL)
+    ChromaDB 벡터 삭제는 Phase 2에서 구현 예정.
+    """
+    if not room_id.strip():
+        raise HTTPException(status_code=400, detail="room_id가 필요합니다.")
 
-    if req.room_id:
-        segments = req.room_id.split(":", maxsplit=1)
-        if len(segments) < 2 or segments[0] != uid:
-            raise HTTPException(status_code=403, detail="본인의 대화 기록만 삭제할 수 있습니다.")
-
-    memory_keys = list(dict.fromkeys(filter(None, [
-        build_memory_key(
-            user=user,
-            room_id=scoped_room_id,
-            character_id=req.character_id,
-            character_name=req.character_name,
-            nickname=req.nickname,
-        ),
-        build_memory_key(
-            user=user,
-            character_id=req.character_id,
-            character_name=req.character_name,
-            nickname=req.nickname,
-        ),
-        build_memory_key(
-            user=user,
-            character_name=req.character_name,
-            nickname=req.nickname,
-        ),
-    ])))
-    cleanup_warnings = build_legacy_cleanup_warnings(
-        character_id=req.character_id,
-        character_name=req.character_name,
-        nickname=req.nickname,
-    )
-
-    async def _do_delete_async() -> list[str]:
-        """asyncpg 트랜잭션으로 사용자 스코프 데이터 삭제."""
-        from ..postgres import _pool
-        tables: list[str] = []
-
-        async with _pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("DELETE FROM story_state WHERE room_id = $1", scoped_room_id)
-                tables.append("story_state")
-                await conn.execute("DELETE FROM diary_entries WHERE room_id = $1", scoped_room_id)
-                tables.append("diary_entries")
-                await conn.execute("DELETE FROM metric_events WHERE room_id = $1", scoped_room_id)
-                tables.append("metric_events")
-                await conn.execute("DELETE FROM response_feedback WHERE room_id = $1", scoped_room_id)
-                tables.append("response_feedback")
-                for memory_key in memory_keys:
-                    await conn.execute("DELETE FROM conversation_memory WHERE memory_key = $1", memory_key)
-                if memory_keys:
-                    tables.append("conversation_memory")
-
-        return tables
-
-    def _do_delete_sync() -> list[str]:
-        """psycopg 수동 트랜잭션으로 사용자 스코프 데이터 삭제."""
-        tables: list[str] = []
-
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM story_state WHERE room_id = %s", (scoped_room_id,))
-                tables.append("story_state")
-                cur.execute("DELETE FROM diary_entries WHERE room_id = %s", (scoped_room_id,))
-                tables.append("diary_entries")
-                cur.execute("DELETE FROM metric_events WHERE room_id = %s", (scoped_room_id,))
-                tables.append("metric_events")
-                cur.execute("DELETE FROM response_feedback WHERE room_id = %s", (scoped_room_id,))
-                tables.append("response_feedback")
-                for memory_key in memory_keys:
-                    cur.execute("DELETE FROM conversation_memory WHERE memory_key = %s", (memory_key,))
-                if memory_keys:
-                    tables.append("conversation_memory")
-
-        return tables
+    # 인증된 사용자 본인의 room만 삭제 허용
+    if user:
+        uid = user.get("uid", "")
+        if uid and not room_id.startswith(uid):
+            raise HTTPException(status_code=403, detail="본인의 대화만 삭제할 수 있습니다.")
 
     try:
-        if _async_pool_ready():
-            deleted_tables = await _do_delete_async()
-        else:
-            deleted_tables = await asyncio.to_thread(_do_delete_sync)
-
-        await asyncio.to_thread(
-            record_event,
-            event_type="data_deletion",
-            room_id=scoped_room_id,
-            character_id=req.character_id or "",
-            user_id=uid,
-            payload={
-                "deletion_type": "conversation",
-                "tables": deleted_tables,
-                "cleanup_warnings": cleanup_warnings,
-            },
-        )
-
-        # 벡터 스토어(ChromaDB) 데이터도 함께 삭제
-        store = get_store()
-        if store and scoped_room_id:
-            store.delete_character(scoped_room_id)
-            deleted_tables.append("vector_store")
-
-        logger.info(
-            "Conversation data deleted: room_id=%s, character_id=%s, tables=%s, cleanup_warnings=%s",
-            scoped_room_id,
-            req.character_id,
-            deleted_tables,
-            cleanup_warnings,
-        )
+        db = get_async_db()
+        await db.delete_conversation(room_id=room_id, character_id=character_id)
+        logger.info(f"대화 기록 삭제 완료: room_id={room_id}, character_id={character_id}")
+        return {"status": "deleted", "room_id": room_id}
     except Exception as e:
-        logger.error(f"대화 삭제 실패: {e}")
-        raise HTTPException(status_code=500, detail="데이터 삭제에 실패했습니다.")
+        logger.error(f"대화 기록 삭제 실패: {e}")
+        raise HTTPException(status_code=500, detail="삭제 중 오류가 발생했습니다.")
 
-    return DeleteConversationResponse(
-        deleted_count=len(deleted_tables),
-        status="ok",
-        deleted_targets=deleted_tables,
-        cleanup_warnings=cleanup_warnings,
+
+@router.get("/cost/summary")
+async def cost_summary(
+    days: int = 7,
+    user: Optional[dict] = Depends(verify_firebase_token),
+):
+    """API 비용 요약 — 모델별 토큰 사용량 집계.
+
+    DATA-A 오재원 제안: 실측 데이터 기반 비용 최적화 의사결정 지원.
+    """
+    from ..postgres import fetchall
+    rows = fetchall(
+        """
+        SELECT
+            model_id,
+            COUNT(*) AS call_count,
+            SUM(prompt_tokens) AS total_prompt,
+            SUM(completion_tokens) AS total_completion,
+            SUM(total_tokens) AS total_tokens
+        FROM api_usage
+        WHERE created_at >= NOW() - INTERVAL '%s days'
+        GROUP BY model_id
+        ORDER BY total_tokens DESC
+        """,
+        (days,),
     )
+    return {"period_days": days, "models": rows}

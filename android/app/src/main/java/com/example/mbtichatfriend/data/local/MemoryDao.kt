@@ -15,7 +15,4 @@ interface MemoryDao {
 
     @Query("DELETE FROM memories WHERE characterId = :characterId")
     suspend fun deleteByCharacter(characterId: Long)
-
-    @Query("DELETE FROM memories")
-    suspend fun deleteAll()
 }

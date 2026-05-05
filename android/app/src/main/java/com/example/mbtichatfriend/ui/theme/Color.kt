@@ -2,18 +2,18 @@ package com.example.mbtichatfriend.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Primary - 파스텔 핑크/퍼플 (대비 강화)
-val PastelPink = Color(0xFFFF9DAE)
+// Primary - 파스텔 핑크/퍼플
+val PastelPink = Color(0xFFFFB5C2)
 val PastelPinkLight = Color(0xFFFFD6DE)
-val PastelPurple = Color(0xFFB399D4)
+val PastelPurple = Color(0xFFC9B1FF)
 val PastelPurpleLight = Color(0xFFE0D4FF)
 
 // Secondary - 소프트 민트/옐로우
-val SoftMint = Color(0xFFA0DCC5)
+val SoftMint = Color(0xFFB5E8D5)
 val SoftYellow = Color(0xFFFFF3B0)
 
 // Background
-val CreamWhite = Color(0xFFFFF5ED)
+val CreamWhite = Color(0xFFFFF8F0)
 val PureWhite = Color(0xFFFFFFFF)
 
 // Dark mode
@@ -21,16 +21,16 @@ val DarkNavy = Color(0xFF1A1B2E)
 val DarkSurface = Color(0xFF252640)
 val DarkCard = Color(0xFF2E2F4A)
 
-// Text (대비 강화)
-val TextDark = Color(0xFF1A1A24)
-val TextMedium = Color(0xFF55556B)
-val TextLight = Color(0xFF8E8E9E)
+// Text
+val TextDark = Color(0xFF2D2D3A)
+val TextMedium = Color(0xFF6B6B7B)
+val TextLight = Color(0xFF9E9EAE)
 
 // Bubble colors - Light
-val UserBubble = Color(0xFFB399D4)
-val UserBubbleText = Color(0xFF1A1A24)
+val UserBubble = Color(0xFFC9B1FF)
+val UserBubbleText = Color(0xFF2D2D3A)
 val AiBubble = Color(0xFFFFFFFF)
-val AiBubbleText = Color(0xFF1A1A24)
+val AiBubbleText = Color(0xFF2D2D3A)
 
 // Bubble colors - Dark
 val UserBubbleDark = Color(0xFF5A4B8A)

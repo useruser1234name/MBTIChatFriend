@@ -1,5 +1,20 @@
-"""도메인별 APIRouter 모음"""
-
-from . import chat, data, fcm, finetune, image, memory, misc, quality
-
-__all__ = ["chat", "data", "fcm", "finetune", "image", "memory", "misc", "quality"]
+from . import (
+    ab_test,
+    billing,
+    chat,
+    compatibility,
+    data,
+    diary,
+    fcm,
+    finetune,
+    health,
+    image,
+    letter,
+    notifications,
+    quality,
+    referral,
+    relationship,
+    session,
+    subscription,
+    users,
+)

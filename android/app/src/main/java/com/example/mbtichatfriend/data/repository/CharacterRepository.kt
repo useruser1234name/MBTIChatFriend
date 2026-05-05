@@ -21,29 +21,20 @@ class CharacterRepository @Inject constructor(
 
     suspend fun getById(id: Long): CharacterEntity? = dao.getById(id)
 
-    suspend fun getLastMessageAt(id: Long): Long? = messageDao.getLastMessage(id)?.createdAt
-
     suspend fun create(
         name: String,
         mbti: String,
         speechStyle: String,
         relationship: String,
-        avatarId: String,
-        personaRaw: String = "",
-        visualPrompt: String = ""
+        avatarId: String
     ): Long {
-        val cleanedPersona = personaRaw.trim()
         return dao.insert(
             CharacterEntity(
                 name = name,
                 mbti = mbti,
                 speechStyle = speechStyle,
                 relationship = relationship,
-                avatarId = avatarId,
-                personaRaw = cleanedPersona,
-                personaSummary = cleanedPersona,
-                dialoguePrompt = cleanedPersona,
-                visualPrompt = visualPrompt.ifBlank { cleanedPersona }
+                avatarId = avatarId
             )
         )
     }

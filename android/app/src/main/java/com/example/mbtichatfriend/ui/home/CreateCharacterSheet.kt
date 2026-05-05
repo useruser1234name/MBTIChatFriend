@@ -52,10 +52,9 @@ import com.example.mbtichatfriend.ui.components.CharacterFace
 @Composable
 fun CreateCharacterSheet(
     onDismiss: () -> Unit,
-    onCreate: (name: String, mbti: String, speechStyle: String, relationship: String, avatarId: String, personaRaw: String) -> Unit
+    onCreate: (name: String, mbti: String, speechStyle: String, relationship: String, avatarId: String) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
-    var personaRaw by remember { mutableStateOf("") }
     var selectedMbti by remember { mutableStateOf(MbtiType.ENFP) }
     var selectedStyle by remember { mutableStateOf(SpeechStyle.CASUAL) }
     var selectedRelationship by remember { mutableStateOf(Relationship.FRIEND) }
@@ -141,24 +140,6 @@ fun CreateCharacterSheet(
 
         Spacer(Modifier.height(16.dp))
 
-        Text("어떤 친구인가요?", style = MaterialTheme.typography.titleSmall)
-        Spacer(Modifier.height(4.dp))
-        OutlinedTextField(
-            value = personaRaw,
-            onValueChange = { if (it.length <= 300) personaRaw = it },
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("예: 겉으론 무심하지만 나에게는 조곤조곤 다정한 친구") },
-            minLines = 3,
-            maxLines = 5,
-            shape = RoundedCornerShape(12.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = MaterialTheme.colorScheme.primary,
-                unfocusedBorderColor = MaterialTheme.colorScheme.outline
-            )
-        )
-
-        Spacer(Modifier.height(16.dp))
-
         // MBTI 선택
         Text("MBTI", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(4.dp))
@@ -220,7 +201,7 @@ fun CreateCharacterSheet(
         Button(
             onClick = {
                 if (name.length >= 2) {
-                    onCreate(name, selectedMbti.name, selectedStyle.name, selectedRelationship.name, avatarConfig.toId(), personaRaw)
+                    onCreate(name, selectedMbti.name, selectedStyle.name, selectedRelationship.name, avatarConfig.toId())
                 }
             },
             enabled = name.length >= 2,

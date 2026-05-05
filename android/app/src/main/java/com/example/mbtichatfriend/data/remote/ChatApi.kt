@@ -40,24 +40,13 @@ data class ChatRequest(
     @Json(name = "user_mbti") val userMbti: String? = null,
     @Json(name = "character_name") val characterName: String = "",
     @Json(name = "character_id") val characterId: String = "",
-    @Json(name = "persona_raw") val personaRaw: String = "",
-    @Json(name = "persona_summary") val personaSummary: String = "",
-    @Json(name = "dialogue_prompt") val dialoguePrompt: String = "",
-    @Json(name = "visual_prompt") val visualPrompt: String = "",
-    val memories: List<MemoryItem> = emptyList(),
-    @Json(name = "room_id") val roomId: String = "",
-    @Json(name = "end_of_session") val endOfSession: Boolean = false,
-    @Json(name = "client_local_hour") val clientLocalHour: Int? = null,
-    val mood: String? = null
+    val memories: List<MemoryItem> = emptyList()
 )
 
 @JsonClass(generateAdapter = false)
 data class ChatResponse(
     val replies: List<ReplyPart>,
-    @Json(name = "affinity_delta") val affinityDelta: Int = 0,
-    @Json(name = "night_diary_generated") val nightDiaryGenerated: Boolean = false,
-    @Json(name = "next_hook") val nextHook: String? = null,
-    @Json(name = "next_goal") val nextGoal: String? = null
+    @Json(name = "affinity_delta") val affinityDelta: Int = 0
 )
 
 @JsonClass(generateAdapter = false)
@@ -167,77 +156,86 @@ data class FeedbackRequest(
     @Json(name = "feedback_detail") val feedbackDetail: String = ""
 )
 
+// ── 관계 히스토리 & 기억 앨범 모델 (UX-B 안현우 + UI-C 정수아, 5차 회의 합의) ──
+
 @JsonClass(generateAdapter = false)
-data class SessionStartRequest(
+data class MemoryMomentRequest(
     @Json(name = "character_id") val characterId: String,
-    @Json(name = "current_affinity_score") val currentAffinityScore: Int,
-    @Json(name = "current_affinity_level") val currentAffinityLevel: Int,
-    @Json(name = "last_chat_iso") val lastChatIso: String? = null
+    @Json(name = "message_text") val messageText: String,
+    @Json(name = "moment_type") val momentType: String = "special",
+    @Json(name = "user_note") val userNote: String = ""
 )
 
 @JsonClass(generateAdapter = false)
-data class SessionStartResponse(
-    @Json(name = "adjusted_score") val adjustedScore: Int = 0,
-    @Json(name = "return_bonus") val returnBonus: Int = 0,
-    @Json(name = "original_score") val originalScore: Int = 0,
-    @Json(name = "days_inactive") val daysInactive: Int = 0
-)
-
-@JsonClass(generateAdapter = false)
-data class MoodCheckinApiRequest(
-    val mood: String,
+data class MemoryMomentItem(
+    val id: Long? = null,
+    @Json(name = "room_id") val roomId: String = "",
     @Json(name = "character_id") val characterId: String = "",
-    @Json(name = "character_name") val characterName: String = "",
-    val mbti: String = "",
-    val nickname: String = ""
+    @Json(name = "user_id") val userId: String = "",
+    @Json(name = "message_text") val messageText: String = "",
+    @Json(name = "moment_type") val momentType: String = "special",
+    @Json(name = "user_note") val userNote: String = "",
+    @Json(name = "created_at") val createdAt: String = ""
 )
 
 @JsonClass(generateAdapter = false)
-data class MoodCheckinApiResponse(
-    val message: String,
-    val emotion: String = "NEUTRAL"
+data class MemoryAlbumResponse(
+    val album: List<MemoryMomentItem> = emptyList()
 )
 
 @JsonClass(generateAdapter = false)
-data class CompatibilityApiRequest(
-    @Json(name = "user_mbti") val userMbti: String,
-    @Json(name = "character_mbti") val characterMbti: String
+data class RelationshipSummaryResponse(
+    @Json(name = "total_messages") val totalMessages: Int = 0,
+    @Json(name = "total_sessions") val totalSessions: Int = 0,
+    @Json(name = "days_together") val daysTogether: Int = 0,
+    @Json(name = "affinity_journey") val affinityJourney: List<List<Any>> = emptyList(),
+    @Json(name = "top_topics") val topTopics: List<String> = emptyList(),
+    @Json(name = "first_chat_date") val firstChatDate: String = ""
+)
+
+// ── Play Billing 결제 검증 모델 ──────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class PurchaseVerifyRequest(
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "purchase_token") val purchaseToken: String,
+    @Json(name = "order_id") val orderId: String,
+    @Json(name = "product_id") val productId: String,
 )
 
 @JsonClass(generateAdapter = false)
-data class CompatibilityApiResponse(
-    val score: Int,
-    val description: String,
-    val strengths: List<String> = emptyList(),
-    val challenges: List<String> = emptyList()
+data class PurchaseVerifyResponse(
+    val success: Boolean,
+    val plan: String,
+    @Json(name = "user_id") val userId: String,
+)
+
+// ── 편지 모델 ────────────────────────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class LetterResponse(
+    @Json(name = "has_letter") val has_letter: Boolean,
+    @Json(name = "content") val content: String,
+    @Json(name = "generated_date") val generated_date: String,
+)
+
+// ── Self-Regulation 모델 (PSY-B 최은혜 + PM-B 손민준, 4차 회의 합의) ────────
+
+@JsonClass(generateAdapter = false)
+data class SessionCheckRequest(
+    @Json(name = "room_id") val roomId: String,
+    @Json(name = "user_birth_year") val userBirthYear: Int? = null
 )
 
 @JsonClass(generateAdapter = false)
-data class MemoryListApiResponse(
-    val summary: String = "",
-    val facts: List<Map<String, String>> = emptyList(),
-    @Json(name = "total_conversations") val totalConversations: Int = 0
-)
-
-@JsonClass(generateAdapter = false)
-data class ClientConfigApiResponse(
-    @Json(name = "max_message_length") val maxMessageLength: Int = 0,
-    @Json(name = "max_conversation_history") val maxConversationHistory: Int = 0
-)
-
-@JsonClass(generateAdapter = false)
-data class DeleteConversationRequest(
-    @Json(name = "character_id") val characterId: String,
-    @Json(name = "character_name") val characterName: String = "",
-    val nickname: String = ""
-)
-
-@JsonClass(generateAdapter = false)
-data class DeleteConversationApiResponse(
-    @Json(name = "deleted_count") val deletedCount: Int = 0,
-    val status: String = "ok",
-    @Json(name = "deleted_targets") val deletedTargets: List<String> = emptyList(),
-    @Json(name = "cleanup_warnings") val cleanupWarnings: List<String> = emptyList()
+data class SessionCheckResponse(
+    @Json(name = "should_warn") val shouldWarn: Boolean = false,
+    @Json(name = "elapsed_minutes") val elapsedMinutes: Int = 0,
+    @Json(name = "limit_minutes") val limitMinutes: Int = 90,
+    val message: String = "",
+    @Json(name = "consecutive_days") val consecutiveDays: Int = 0,
+    @Json(name = "should_show_reality_nudge") val shouldShowRealityNudge: Boolean = false,
+    @Json(name = "nudge_message") val nudgeMessage: String = ""
 )
 
 interface ChatApi {
@@ -274,25 +272,358 @@ interface ChatApi {
     @POST("api/v1/feedback/submit")
     suspend fun submitFeedback(@Body req: FeedbackRequest): Response<Unit>
 
-    @POST("api/v1/session/start")
-    suspend fun startSession(@Body req: SessionStartRequest): SessionStartResponse
+    @POST("api/v1/session/check")
+    suspend fun checkSession(@Body req: SessionCheckRequest): SessionCheckResponse
 
-    @POST("api/v1/mood/checkin")
-    suspend fun moodCheckin(@Body req: MoodCheckinApiRequest): MoodCheckinApiResponse
+    // ── 관계 히스토리 & 기억 앨범 (UX-B 안현우 + UI-C 정수아, 5차 회의 합의) ──
 
-    @POST("api/v1/compatibility/check")
-    suspend fun checkCompatibility(@Body req: CompatibilityApiRequest): CompatibilityApiResponse
+    @GET("api/v1/relationship/{roomId}/summary")
+    suspend fun getRelationshipSummary(
+        @Path("roomId") roomId: String,
+        @retrofit2.http.Query("character_id") characterId: String = ""
+    ): RelationshipSummaryResponse
 
-    @GET("api/v1/config/client")
-    suspend fun getClientConfig(): ClientConfigApiResponse
+    @POST("api/v1/relationship/{roomId}/memory")
+    suspend fun saveMemoryMoment(
+        @Path("roomId") roomId: String,
+        @Body request: MemoryMomentRequest
+    ): Response<Unit>
 
-    @GET("api/v1/memory/{characterName}/{nickname}")
-    suspend fun getMemories(
-        @Path("characterName") characterName: String,
-        @Path("nickname") nickname: String,
-        @Query("character_id") characterId: String = ""
-    ): MemoryListApiResponse
+    @GET("api/v1/relationship/{roomId}/album")
+    suspend fun getMemoryAlbum(
+        @Path("roomId") roomId: String,
+        @retrofit2.http.Query("character_id") characterId: String = ""
+    ): MemoryAlbumResponse
 
-    @POST("api/v1/data/delete-conversation")
-    suspend fun deleteConversation(@Body req: DeleteConversationRequest): DeleteConversationApiResponse
+    @POST("api/v1/billing/verify-purchase")
+    suspend fun verifyPurchase(@Body req: PurchaseVerifyRequest): PurchaseVerifyResponse
+
+    // ── 편지 ─────────────────────────────────────────────────────────────────
+
+    @GET("api/v1/letter/latest")
+    suspend fun getLatestLetter(
+        @Query("room_id") roomId: String,
+        @Query("character_id") characterId: String,
+    ): LetterResponse
+
+    // ── 레퍼럴 (17차 스프린트) ───────────────────────────────────────────────
+
+    @POST("api/v1/referral/redeem")
+    suspend fun redeemReferralCode(@Body req: ReferralRedeemRequest): Response<ReferralRedeemResponse>
+
+    // ── 커뮤니티 (19차 스프린트) ─────────────────────────────────────────────
+
+    @GET("api/v1/community/posts")
+    suspend fun getCommunityPosts(@Query("mbti") mbti: String? = null): Response<List<CommunityPost>>
+
+    @POST("api/v1/community/posts")
+    suspend fun createPost(@Body body: CreatePostRequest): Response<CommunityPost>
+
+    @POST("api/v1/community/posts/{postId}/empathy")
+    suspend fun toggleEmpathy(
+        @Path("postId") postId: Long,
+        @Body body: EmpathyToggleRequest,
+    ): Response<EmpathyToggleResponse>
+
+    @GET("api/v1/community/posts/{postId}/comments")
+    suspend fun getComments(@Path("postId") postId: Long): Response<List<CommunityComment>>
+
+    @POST("api/v1/community/posts/{postId}/comments")
+    suspend fun createComment(
+        @Path("postId") postId: Long,
+        @Body body: CreateCommentRequest,
+    ): Response<CommunityComment>
+
+    // ── 궁합 (21차 스프린트) ──────────────────────────────────────────────────
+
+    @GET("api/v1/compatibility/{mbtiA}/{mbtiB}")
+    suspend fun getCompatibility(
+        @Path("mbtiA") mbtiA: String,
+        @Path("mbtiB") mbtiB: String,
+    ): Response<CompatibilityResult>
+
+    // ── 알림 (21차 스프린트) ──────────────────────────────────────────────────
+
+    @GET("api/v1/notifications/{userId}")
+    suspend fun getNotifications(@Path("userId") userId: String): Response<List<AppNotification>>
+
+    @GET("api/v1/notifications/{userId}/unread-count")
+    suspend fun getUnreadCount(@Path("userId") userId: String): Response<UnreadCountResponse>
+
+    @POST("api/v1/notifications/{userId}/mark-read")
+    suspend fun markAllRead(@Path("userId") userId: String): Response<Unit>
+
+    // ── 트렌딩 게시글 (22차 스프린트) ────────────────────────────────────────
+
+    @GET("api/v1/community/posts/trending")
+    suspend fun getTrendingPosts(@Query("limit") limit: Int = 3): List<TrendingPostUi>
+
+    // ── 연말 대화 리포트 (22차 스프린트) ─────────────────────────────────────
+
+    @GET("api/v1/report/year/{userId}")
+    suspend fun getYearReport(@Path("userId") userId: String): YearReportResponse
+
+    // ── 발렌타인 궁합 특집 (24차 스프린트) ───────────────────────────────────
+
+    @GET("api/v1/compatibility/valentine/{mbti}")
+    suspend fun getValentineMessage(@Path("mbti") mbti: String): ValentineMessage
+
+    // ── 커뮤니티 신고 (25차 스프린트) ────────────────────────────────────────
+
+    @POST("api/v1/community/posts/{postId}/report")
+    suspend fun reportPost(
+        @Path("postId") postId: Long,
+        @Body request: ReportRequest,
+    ): ReportResponse
+
+    // ── 온보딩 첫 인사 (26차 스프린트) ───────────────────────────────────────
+
+    @POST("api/v1/chat/greeting")
+    suspend fun sendGreeting(@Body body: Map<String, String>): GreetingResponse
+
+    // ── 가정의 달 감사 카드 (26차 스프린트) ──────────────────────────────────
+
+    @GET("api/v1/compatibility/gratitude/{mbti}")
+    suspend fun getGratitudeMessage(@Path("mbti") mbti: String): GratitudeMessage
+
+    // ── 레퍼럴 V2 통계 (27차 스프린트) ───────────────────────────────────────
+    @GET("api/v1/referral/stats")
+    suspend fun getReferralStats(): ReferralStatsResponse
+
+    // ── 레퍼럴 V3 딥링크 (29차 스프린트) ─────────────────────────────────────
+    @POST("api/v1/referral/link")
+    suspend fun generateReferralLink(): ReferralLinkResponse
+
+    @POST("api/v1/referral/redeem-v3")
+    suspend fun redeemReferral(@Body req: RedeemRequest): Response<ReferralRedeemResponse>
+
+    // ── 커뮤니티 고정 공지 (29차 스프린트) ───────────────────────────────────
+    @GET("api/v1/community/posts/pinned")
+    suspend fun getPinnedPosts(): List<CommunityPost>
+
+    // ── 커뮤니티 이벤트 트렌딩 TOP5 (30차 스프린트) ───────────────────────────
+    @GET("api/v1/community/posts/event-trending")
+    suspend fun getEventTrendingPosts(): List<CommunityPost>
+
+    // ── 다이어리 직접 입력 API (32차 스프린트) ────────────────────────────────
+    @POST("api/v1/diary/entries")
+    suspend fun createDiaryEntry(@Body request: DiaryEntryRequest): DiaryEntry
+
+    @GET("api/v1/diary/entries")
+    suspend fun getDiaryEntries(): List<DiaryEntry>
+
+    @GET("api/v1/diary/weekly-report")
+    suspend fun getDiaryWeeklyReport(): DiaryWeeklyReport
+
+    // ── 여름 궁합 메시지 (35차 스프린트) ─────────────────────────────────────
+    @GET("api/v1/compatibility/summer/{mbti}")
+    suspend fun getSummerMessage(@Path("mbti") mbti: String): SummerMessageResponse
+
+    // ── 16종 전체 완성 메시지 (37차 스프린트) ─────────────────────────────────
+    @GET("api/v1/compatibility/all-complete/{mbti}")
+    suspend fun getAllCompleteMessage(@Path("mbti") mbti: String): AllCompleteResponse
 }
+
+// ── 레퍼럴 모델 ──────────────────────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class ReferralRedeemRequest(
+    @Json(name = "code") val code: String,
+    @Json(name = "user_id") val userId: String
+)
+
+@JsonClass(generateAdapter = false)
+data class ReferralRedeemResponse(
+    val success: Boolean,
+    val message: String = "",
+    @Json(name = "bonus_days") val bonusDays: Int = 0
+)
+
+// ── 레퍼럴 V2 통계 모델 (27차 스프린트) ──────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class ReferralStatsResponse(
+    @Json(name = "invited_count") val invitedCount: Int = 0,
+    @Json(name = "reward_days") val rewardDays: Int = 0
+)
+
+// ── 커뮤니티 모델 (19차 스프린트) ────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class CommunityPost(
+    val id: Long,
+    val mbti: String,
+    val content: String,
+    @Json(name = "anonymous_name") val anonymousName: String,
+    @Json(name = "empathy_count") val empathyCount: Int,
+    @Json(name = "created_at") val createdAt: String,
+    @Json(name = "comment_count") val commentCount: Int = 0,
+)
+
+@JsonClass(generateAdapter = false)
+data class CreatePostRequest(
+    @Json(name = "user_id") val userId: String,
+    val mbti: String,
+    val content: String,
+)
+
+@JsonClass(generateAdapter = false)
+data class EmpathyToggleRequest(
+    @Json(name = "user_id") val userId: String,
+    @Json(name = "anonymous_name") val anonymousName: String = "익명",
+)
+
+@JsonClass(generateAdapter = false)
+data class EmpathyToggleResponse(
+    val empathized: Boolean,
+)
+
+// ── 커뮤니티 댓글 모델 (20차 스프린트) ──────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class CommunityComment(
+    val id: Long,
+    val mbti: String,
+    val content: String,
+    @Json(name = "anonymous_name") val anonymousName: String,
+    @Json(name = "created_at") val createdAt: String,
+)
+
+@JsonClass(generateAdapter = false)
+data class CreateCommentRequest(
+    @Json(name = "user_id") val userId: String,
+    val mbti: String,
+    val content: String,
+)
+
+// ── 궁합 모델 (21차 스프린트) ────────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class CompatibilityResult(
+    @Json(name = "mbti_a") val mbtiA: String,
+    @Json(name = "mbti_b") val mbtiB: String,
+    val type: String,
+    val title: String,
+    val description: String,
+    val tips: List<String>,
+)
+
+// ── 알림 모델 (21차 스프린트) ────────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class AppNotification(
+    val id: Long,
+    val type: String,
+    val title: String,
+    val body: String,
+    @Json(name = "is_read") val isRead: Boolean,
+    @Json(name = "created_at") val createdAt: String,
+    @Json(name = "deep_link") val deepLink: String? = null,
+)
+
+@JsonClass(generateAdapter = false)
+data class UnreadCountResponse(val count: Int)
+
+// ── 트렌딩 게시글 모델 (22차 스프린트) ───────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class TrendingPostUi(
+    val id: Long,
+    @Json(name = "mbti_type") val mbtiType: String,
+    val content: String,
+    @Json(name = "empathy_count") val empathyCount: Int,
+    @Json(name = "comment_count") val commentCount: Int,
+)
+
+// ── 연말 대화 리포트 모델 (22차 스프린트) ─────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class YearReportResponse(
+    @Json(name = "total_messages") val totalMessages: Int,
+    @Json(name = "top_character") val topCharacter: String?,
+    @Json(name = "top_post_summary") val topPostSummary: String?,
+    @Json(name = "top_post_empathy") val topPostEmpathy: Int,
+)
+
+// ── 발렌타인 궁합 특집 모델 (24차 스프린트) ───────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class ValentineMessage(
+    val mbti: String,
+    val message: String,
+)
+
+// ── 커뮤니티 신고 모델 (25차 스프린트) ───────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class ReportRequest(val reason: String)
+
+@JsonClass(generateAdapter = false)
+data class ReportResponse(val ok: Boolean)
+
+// ── 온보딩 첫 인사 모델 (26차 스프린트) ──────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class GreetingResponse(
+    val greeting: String,
+    @Json(name = "character_mbti") val characterMbti: String
+)
+
+// ── 가정의 달 감사 카드 모델 (26차 스프린트) ──────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class GratitudeMessage(
+    val mbti: String,
+    val message: String
+)
+
+// ── 레퍼럴 V3 딥링크 모델 (29차 스프린트) ────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class ReferralLinkResponse(
+    @Json(name = "referral_link") val referralLink: String,
+    @Json(name = "referral_code") val referralCode: String,
+)
+
+@JsonClass(generateAdapter = false)
+data class RedeemRequest(
+    @Json(name = "code") val code: String,
+)
+
+// ── 다이어리 직접 입력 모델 (32차 스프린트) ───────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class DiaryEntryRequest(
+    val content: String,
+    val tags: List<String> = emptyList()
+)
+
+@JsonClass(generateAdapter = false)
+data class DiaryEntry(
+    val id: Long = 0,
+    val content: String,
+    val tags: List<String> = emptyList(),
+    @Json(name = "created_at") val createdAt: String = ""
+)
+
+@JsonClass(generateAdapter = false)
+data class DiaryWeeklyReport(
+    @Json(name = "emotion_counts") val emotionCounts: Map<String, Int> = emptyMap(),
+    val summary: String = ""
+)
+
+// ── 여름 궁합 메시지 모델 (35차 스프린트) ─────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class SummerMessageResponse(
+    val mbti: String,
+    val message: String
+)
+
+// ── 16종 전체 완성 메시지 모델 (37차 스프린트) ────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class AllCompleteResponse(
+    val mbti: String,
+    val message: String
+)

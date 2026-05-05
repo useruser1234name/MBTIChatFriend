@@ -1,34 +1,37 @@
 package com.example.mbtichatfriend.ui.chat
 
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.data.local.ContentFilter
 import com.example.mbtichatfriend.data.local.NetworkObserver
 import com.example.mbtichatfriend.data.local.NotificationHelper
 import com.example.mbtichatfriend.data.local.OfflineMessageQueue
 import com.example.mbtichatfriend.data.local.UserPreferences
-import com.example.mbtichatfriend.data.remote.ApiErrorException
 import com.example.mbtichatfriend.data.remote.ChatApi
-import com.example.mbtichatfriend.data.remote.ImageSetRequest
-import com.example.mbtichatfriend.data.remote.MemoryItem
 import com.example.mbtichatfriend.data.remote.RemoteConfigManager
-import com.example.mbtichatfriend.data.remote.SessionStartRequest
+import com.example.mbtichatfriend.data.remote.SessionCheckRequest
 import com.example.mbtichatfriend.data.remote.SseEvent
+import com.example.mbtichatfriend.data.remote.MemoryItem
 import com.example.mbtichatfriend.data.repository.CharacterRepository
 import com.example.mbtichatfriend.data.repository.ChatRepository
 import com.example.mbtichatfriend.data.repository.MemoryRepository
+import com.example.mbtichatfriend.domain.AffinityManager
+import com.example.mbtichatfriend.domain.ExpressionManager
+import com.example.mbtichatfriend.domain.FeedbackUseCase
+import com.example.mbtichatfriend.domain.SendMessageUseCase
 import com.example.mbtichatfriend.model.CharacterEmotion
 import com.example.mbtichatfriend.model.ChatMessage
-import com.squareup.moshi.Moshi
-import com.squareup.moshi.Types
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -36,14 +39,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.time.Instant
-import java.time.ZoneOffset
 import javax.inject.Inject
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val chatRepo: ChatRepository,
+    private val sendMessageUseCase: SendMessageUseCase,
     private val characterRepo: CharacterRepository,
     private val memoryRepo: MemoryRepository,
     private val prefs: UserPreferences,
@@ -51,16 +53,18 @@ class ChatViewModel @Inject constructor(
     private val notificationHelper: NotificationHelper,
     private val remoteConfig: RemoteConfigManager,
     private val offlineMessageQueue: OfflineMessageQueue,
+    private val expressionManager: ExpressionManager,
+    private val affinityManager: AffinityManager,
+    private val feedbackUseCase: FeedbackUseCase,
     private val chatApi: ChatApi,
-    private val moshi: Moshi
 ) : ViewModel() {
 
     val characterId: Long = savedStateHandle.get<String>("characterId")?.toLongOrNull() ?: 0L
 
-    val character = characterRepo.observeById(characterId)
+    private val character = characterRepo.observeById(characterId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val messages = chatRepo.observeMessages(characterId)
+    private val messages = chatRepo.observeMessages(characterId)
         .map { entities ->
             entities.map { entity ->
                 ChatMessage(
@@ -77,7 +81,7 @@ class ChatViewModel @Inject constructor(
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val isOnline = networkObserver.isOnline
+    private val isOnline = networkObserver.isOnline
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
 
     var isTyping by mutableStateOf(false)
@@ -95,108 +99,134 @@ class ChatViewModel @Inject constructor(
     var levelDownEvent by mutableStateOf<Int?>(null)
         private set
 
-    var expressionUrls by mutableStateOf<Map<String, String>?>(null)
-        private set
+    val expressionUrls: Map<String, String>?
+        get() = expressionManager.expressionUrls.value
 
     var isTalking by mutableStateOf(false)
         private set
 
-    /** messageId → feedbackType ("thumbs_up" | "thumbs_down") */
-    val feedbackMap = mutableStateMapOf<Long, String>()
+    /** messageId → feedbackType ("thumbs_up" | "thumbs_down") — FeedbackUseCase에 위임 */
+    val feedbackMap = feedbackUseCase.feedbackMap
 
-    /** 세션 시작 시 복귀 보너스 등 알림 메시지 */
-    var sessionMessage by mutableStateOf<String?>(null)
+    private val _isLottieAnimating = MutableStateFlow(false)
+    val isLottieAnimating: StateFlow<Boolean> = _isLottieAnimating.asStateFlow()
+
+    // 세션 피드백 시트 표시 여부 — QS 조건(10분 이상 OR 3턴 이상) 충족 시 세션 종료 때 true
+    private val _showFeedbackSheet = MutableStateFlow(false)
+    val showFeedbackSheet: StateFlow<Boolean> = _showFeedbackSheet.asStateFlow()
+
+    // 세션 시작 시각 (ms) — 피드백 QS 시간 조건 판정용
+    private val sessionStartMs = System.currentTimeMillis()
+
+    // 유저 MBTI — 궁합 화면 진입 시 AppNavHost에서 접근
+    val myMbti: StateFlow<String> = prefs.userMbti
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
+
+    // MVI 통합 UiState — 9차 스프린트 (1단계: 추가만, 기존 StateFlow 유지)
+    private val _uiState = MutableStateFlow<ChatUiState>(ChatUiState.Loading)
+    val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    /**
+     * messages, character, isTyping, isLottieAnimating 등이 변경될 때
+     * _uiState를 ChatUiState.Success로 동기화.
+     * 기존 개별 StateFlow/mutableStateOf는 ChatScreen 점진적 마이그레이션 완료 전까지 유지.
+     */
+    private fun syncUiState() {
+        val currentMessages = messages.value
+        val currentCharacter = character.value
+        _uiState.value = ChatUiState.Success(
+            messages = currentMessages,
+            character = currentCharacter,
+            isStreaming = isTyping,
+            isLottieAnimating = isLottieAnimating.value,
+            sessionWarning = sessionWarnMessage,
+            affinityLevel = currentCharacter?.affinityLevel ?: 1,
+            error = errorMessage,
+            isOnline = isOnline.value,
+        )
+    }
+
+    /**
+     * Self-Regulation: 세션 경고 메시지.
+     * - null: 경고 없음
+     * - non-null: 사용 시간 초과 또는 7일 연속 접속 유도 메시지
+     * UI 팀에서 이 값을 관찰해 인앱 배너/다이얼로그로 표시.
+     * PSY-B 최은혜 + PM-B 손민준 설계 (4차 회의 합의).
+     */
+    var sessionWarnMessage by mutableStateOf<String?>(null)
         private set
 
-    fun dismissSessionMessage() {
-        sessionMessage = null
+    fun dismissSessionWarn() {
+        sessionWarnMessage = null
     }
 
-    private suspend fun handleAffinityDelta(charId: Long, delta: Int) {
-        if (delta == 0) return
-        val before = characterRepo.getById(charId)?.affinityLevel ?: 1
-        characterRepo.updateAffinity(charId, delta)
-        val after = characterRepo.getById(charId)?.affinityLevel ?: 1
-        if (after > before) levelUpEvent = after
-        else if (after < before) levelDownEvent = after
-    }
+    private suspend fun handleAffinityDelta(charId: Long, delta: Int) =
+        affinityManager.handleAffinityDelta(charId, delta)
 
-    private fun toIsoUtc(timestampMs: Long?): String? {
-        if (timestampMs == null) return null
-        return Instant.ofEpochMilli(timestampMs).atOffset(ZoneOffset.UTC).toString()
+    /**
+     * Self-Regulation: 서버에 세션 사용 시간 및 연속 접속 점검 요청.
+     * - 90분(미성년자 60분) 초과 시 sessionWarnMessage 설정
+     * - 7일 연속 접속 시 현실 관계 유도 메시지 설정 (nudge_message 우선)
+     * - FOMO 기반 알림 전면 금지: 이 함수는 푸시를 발송하지 않음
+     * PSY-B 최은혜 + PM-B 손민준 설계 (4차 회의 합의).
+     */
+    private suspend fun checkSessionLimit(roomId: String) {
+        val ch = characterRepo.getById(characterId) ?: return
+        try {
+            val response = chatRepo.checkSession(
+                SessionCheckRequest(roomId = roomId)
+            )
+            val warn = buildString {
+                if (response.shouldShowRealityNudge && response.nudgeMessage.isNotBlank()) {
+                    append(response.nudgeMessage)
+                } else if (response.shouldWarn && response.message.isNotBlank()) {
+                    append(response.message)
+                }
+            }.ifBlank { null }
+            sessionWarnMessage = warn
+        } catch (_: Exception) {
+            // 세션 점검 실패 시 사용자 경험을 방해하지 않고 조용히 무시
+        }
     }
-
-    private var expressionSetTaskId: String? = null
 
     private var userMessageCount = 0
 
-    /** 메시지 전송에 필요한 공통 파라미터를 준비한다 */
-    private data class ChatParams(
-        val nickname: String,
-        val userMbti: String?,
-        val history: List<Map<String, String>>,
-        val memories: List<MemoryItem>,
-    )
-
-    private suspend fun buildChatParams(charId: Long): ChatParams {
-        val nickname = prefs.nickname.first()
-        val userMbti = prefs.userMbti.first().ifEmpty { null }
-        val historyCount = remoteConfig.getLong(RemoteConfigManager.KEY_MAX_CONVERSATION_HISTORY).toInt()
-        val recentMessages = messages.value.takeLast(historyCount).map { msg ->
-            mapOf(
-                "role" to if (msg.isFromUser) "user" else "assistant",
-                "content" to msg.text
-            )
-        }
-        val memories: List<MemoryItem> = runCatching {
-            memoryRepo.loadMemories(charId)
-        }.getOrDefault(emptyList())
-        return ChatParams(nickname, userMbti, recentMessages, memories)
-    }
-
     init {
-        // 기존 expressionSet 로드 또는 진행 중인 생성 작업 폴링
+        // 기존 expressionSet 로드 또는 진행 중인 생성 작업 폴링 → ExpressionManager에 위임
+        expressionManager.loadExistingExpressionSet(characterId, viewModelScope)
+
+        // AffinityManager StateFlow → Compose mutableState 동기화
         viewModelScope.launch {
-            val ch = characterRepo.getById(characterId)
-            if (ch == null) {
-                return@launch
-            }
-            if (ch.expressionSetReady && ch.expressionSet != null) {
-                expressionUrls = parseExpressionSet(ch.expressionSet)
-            } else if (ch.avatarId.startsWith("img:")) {
-                // 진행 중인 표정 세트 생성 작업이 있는지 확인
-                val taskId = waitForExpressionSetTaskId()
-                if (taskId != null) {
-                    expressionSetTaskId = taskId
-                    pollExpressionSetStatus(taskId)
+            affinityManager.levelUpEvent.collect { levelUpEvent = it }
+        }
+        viewModelScope.launch {
+            affinityManager.levelDownEvent.collect { levelDownEvent = it }
+        }
+
+        // 레벨업 이벤트 발생 시 Lottie 애니메이션 트리거
+        viewModelScope.launch {
+            affinityManager.levelUpEvent.collect { level ->
+                if (level != null) {
+                    _isLottieAnimating.value = true
+                    delay(2000) // 애니메이션 재생 시간
+                    _isLottieAnimating.value = false
+                    affinityManager.dismissLevelUp()
                 }
             }
         }
 
-        // 세션 시작: 호감도 감쇠/복귀 보너스 처리
+        // messages / character / isOnline → uiState 동기화
+        viewModelScope.launch { messages.collect { syncUiState() } }
+        viewModelScope.launch { character.collect { syncUiState() } }
+        viewModelScope.launch { isOnline.collect { syncUiState() } }
+        viewModelScope.launch { _isLottieAnimating.collect { syncUiState() } }
+
+        // 신규 채팅방 진입 시 온보딩 첫 인사 (메시지 목록이 비어있을 때만, 중복 방지)
         viewModelScope.launch {
-            try {
-                val currentCharacter = characterRepo.getById(characterId) ?: return@launch
-                val lastChatIso = toIsoUtc(characterRepo.getLastMessageAt(characterId))
-                val response = chatApi.startSession(
-                    SessionStartRequest(
-                        characterId = characterId.toString(),
-                        currentAffinityScore = currentCharacter.affinityScore,
-                        currentAffinityLevel = currentCharacter.affinityLevel,
-                        lastChatIso = lastChatIso
-                    )
-                )
-                val delta = response.adjustedScore - response.originalScore
-                if (delta != 0) {
-                    handleAffinityDelta(characterId, delta)
-                }
-                if (response.returnBonus > 0 && response.daysInactive > 0) {
-                    sessionMessage = "${response.daysInactive}일 만에 돌아왔네요! 복귀 보너스 +${response.returnBonus} 💕"
-                } else if (response.adjustedScore < response.originalScore) {
-                    sessionMessage = "오랫동안 연락이 없어서 호감도가 ${response.originalScore - response.adjustedScore} 감소했어요..."
-                }
-            } catch (_: Exception) {
-                // 세션 시작 실패는 치명적이지 않으므로 무시
+            // messages StateFlow가 초기값(emptyList)을 방출할 때까지 대기
+            val initialMessages = messages.first()
+            if (initialMessages.isEmpty()) {
+                sendInitialGreeting()
             }
         }
 
@@ -208,34 +238,34 @@ class ChatViewModel @Inject constructor(
                 .collect {
                     offlineMessageQueue.flushPendingMessages { pendingMessage ->
                         try {
-                            val ch = characterRepo.getById(pendingMessage.characterId)
-                                ?: return@flushPendingMessages OfflineMessageQueue.FlushResult.FAILED
-                            val params = buildChatParams(pendingMessage.characterId)
+                            val ch = characterRepo.getById(pendingMessage.characterId) ?: return@flushPendingMessages false
+                            val nickname = prefs.nickname.first()
+                            val userMbti = prefs.userMbti.first().ifEmpty { null }
+                            val historyCount = remoteConfig.getLong(RemoteConfigManager.KEY_MAX_CONVERSATION_HISTORY).toInt()
+                            val recentMessages = messages.value.takeLast(historyCount).map { msg ->
+                                mapOf(
+                                    "role" to if (msg.isFromUser) "user" else "assistant",
+                                    "content" to msg.text
+                                )
+                            }
+                            val memories: List<MemoryItem> = runCatching {
+                                memoryRepo.loadMemories(pendingMessage.characterId)
+                            }.getOrDefault(emptyList())
 
-                            val result = chatRepo.sendMessage(
-                                message = pendingMessage.text,
-                                mbti = ch.mbti,
-                                speechStyle = ch.speechStyle,
-                                relationship = ch.relationship,
-                                nickname = params.nickname,
-                                affinityLevel = ch.affinityLevel,
-                                conversationHistory = params.history,
-                                userMbti = params.userMbti,
-                                characterName = ch.name,
-                                characterId = pendingMessage.characterId.toString(),
-                                personaRaw = ch.personaRaw,
-                                personaSummary = ch.personaSummary,
-                                dialoguePrompt = ch.dialoguePrompt,
-                                visualPrompt = ch.visualPrompt,
-                                memories = params.memories
+                            val result = sendMessageUseCase.sendMessageRest(
+                                text = pendingMessage.text,
+                                character = ch,
+                                nickname = nickname,
+                                userMbti = userMbti,
+                                conversationHistory = recentMessages,
+                                memories = memories,
                             )
 
                             for (reply in result.replies) {
-                                chatRepo.saveMessage(
+                                sendMessageUseCase.saveReplyMessage(
                                     characterId = pendingMessage.characterId,
                                     text = reply.text,
-                                    isFromUser = false,
-                                    emotion = reply.emotion
+                                    emotion = reply.emotion,
                                 )
                             }
 
@@ -243,31 +273,18 @@ class ChatViewModel @Inject constructor(
                                 characterRepo.updateAffinity(pendingMessage.characterId, result.affinityDelta)
                             }
 
-                            OfflineMessageQueue.FlushResult.SENT
-                        } catch (e: ApiErrorException) {
-                            if (e.statusCode in 400..499) {
-                                OfflineMessageQueue.FlushResult.FAILED
-                            } else {
-                                OfflineMessageQueue.FlushResult.RETRY
-                            }
+                            true
                         } catch (_: Exception) {
-                            OfflineMessageQueue.FlushResult.RETRY
+                            false
                         }
                     }
-
-                    // 미동기화 피드백 서버 전송
-                    chatRepo.syncPendingFeedback()
                 }
         }
     }
 
-    fun dismissLevelUp() {
-        levelUpEvent = null
-    }
+    fun dismissLevelUp() = affinityManager.dismissLevelUp()
 
-    fun dismissLevelDown() {
-        levelDownEvent = null
-    }
+    fun dismissLevelDown() = affinityManager.dismissLevelDown()
 
     // 화면이 보이는지 추적 (ChatScreen에서 설정)
     var isScreenVisible by mutableStateOf(true)
@@ -278,144 +295,111 @@ class ChatViewModel @Inject constructor(
 
     fun send(text: String) {
         val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
 
         val maxLength = remoteConfig.getLong(RemoteConfigManager.KEY_MAX_MESSAGE_LENGTH).toInt()
-        val validation = ContentFilter.check(trimmed, maxLength)
-        if (!validation.isSafe) {
-            errorMessage = validation.reason
+        if (trimmed.length > maxLength) {
+            errorMessage = "메시지는 ${maxLength}자 이내로 입력해주세요!"
             return
+        }
+
+        val contentFilterEnabled = remoteConfig.getBoolean(RemoteConfigManager.KEY_CONTENT_FILTER_ENABLED)
+        if (contentFilterEnabled) {
+            val filterResult = ContentFilter.check(trimmed)
+            if (!filterResult.isSafe) {
+                errorMessage = filterResult.reason
+                return
+            }
         }
 
         viewModelScope.launch {
             if (!isOnline.value) {
-                chatRepo.saveMessage(
-                    characterId = characterId,
-                    text = trimmed,
-                    isFromUser = true,
-                    sendStatus = "PENDING"
-                )
+                sendMessageUseCase.savePendingMessage(characterId, trimmed)
                 return@launch
             }
 
-            val userMessageId = chatRepo.saveMessage(
-                characterId = characterId,
-                text = trimmed,
-                isFromUser = true,
-                sendStatus = "PENDING"
-            )
+            // Self-Regulation: 메시지 전송 직전 세션 사용 시간 점검
+            // room_id는 "uid:character:nickname" 형식으로 서버와 동일하게 구성
+            val ch0 = characterRepo.getById(characterId)
+            if (ch0 != null) {
+                val nickname0 = prefs.nickname.first()
+                val uid0 = "user" // Firebase UID는 AuthInterceptor에서 토큰으로 인증됨
+                val roomId0 = "${uid0}:${characterId}:${nickname0}"
+                checkSessionLimit(roomId0)
+            }
+
+            sendMessageUseCase.saveUserMessage(characterId, trimmed)
             userMessageCount++
+
+            // QS 조건 확인: 세션 10분 이상 OR 3턴 이상 → 세션 종료 시 피드백 시트 표시 예약
+            val elapsedMinutes = (System.currentTimeMillis() - sessionStartMs) / 60_000
+            if (elapsedMinutes >= 10 || userMessageCount >= 3) {
+                _showFeedbackSheet.value = true
+            }
 
             isTyping = true
             isTalking = true
             errorMessage = null
 
-            val ch = characterRepo.getById(characterId)
-            if (ch == null) {
-                chatRepo.deleteMessage(userMessageId)
-                isTyping = false
-                isTalking = false
-                return@launch
+            val ch = characterRepo.getById(characterId) ?: return@launch
+            val nickname = prefs.nickname.first()
+            val userMbti = prefs.userMbti.first().ifEmpty { null }
+
+            val historyCount = remoteConfig.getLong(RemoteConfigManager.KEY_MAX_CONVERSATION_HISTORY).toInt()
+            val recentMessages = messages.value.takeLast(historyCount).map { msg ->
+                mapOf(
+                    "role" to if (msg.isFromUser) "user" else "assistant",
+                    "content" to msg.text
+                )
             }
-            val params = buildChatParams(characterId)
 
             // 5번마다 또는 이전 실패 시 장기 기억 추출 (백그라운드)
-            val shouldExtract = userMessageCount % 10 == 0 || memoryRepo.hasPendingExtraction(characterId)
+            val shouldExtract = userMessageCount % 5 == 0 || memoryRepo.hasPendingExtraction(characterId)
             if (shouldExtract) {
                 launch {
                     memoryRepo.extractAndSave(
                         characterId = characterId,
                         characterName = ch.name,
-                        nickname = params.nickname,
-                        conversationHistory = params.history
+                        nickname = nickname,
+                        conversationHistory = recentMessages
                     )
                 }
             }
 
+            // 현재 저장된 기억 로드
+            val memories: List<MemoryItem> = runCatching {
+                memoryRepo.loadMemories(characterId)
+            }.getOrDefault(emptyList())
+
             // SSE 스트리밍 시도
-            sendWithSse(
-                message = trimmed,
-                mbti = ch.mbti,
-                speechStyle = ch.speechStyle,
-                relationship = ch.relationship,
-                nickname = params.nickname,
-                affinityLevel = ch.affinityLevel,
-                conversationHistory = params.history,
-                pendingMessageId = userMessageId,
-                userMbti = params.userMbti,
-                characterName = ch.name,
-                charId = characterId.toString(),
-                personaRaw = ch.personaRaw,
-                personaSummary = ch.personaSummary,
-                dialoguePrompt = ch.dialoguePrompt,
-                visualPrompt = ch.visualPrompt,
-                memories = params.memories
-            )
+            sendWithSse(trimmed, ch, nickname, userMbti, recentMessages, memories)
         }
     }
 
     private suspend fun sendWithSse(
         message: String,
-        mbti: String,
-        speechStyle: String,
-        relationship: String,
+        character: CharacterEntity,
         nickname: String,
-        affinityLevel: Int,
+        userMbti: String?,
         conversationHistory: List<Map<String, String>>,
-        pendingMessageId: Long,
-        userMbti: String? = null,
-        characterName: String = "",
-        charId: String = "",
-        personaRaw: String = "",
-        personaSummary: String = "",
-        dialoguePrompt: String = "",
-        visualPrompt: String = "",
-        memories: List<MemoryItem> = emptyList()
+        memories: List<MemoryItem>,
     ) {
         var sseSucceeded = false
 
-        chatRepo.streamMessage(
-            message = message,
-            mbti = mbti,
-            speechStyle = speechStyle,
-            relationship = relationship,
+        sendMessageUseCase.streamMessage(
+            text = message,
+            character = character,
             nickname = nickname,
-            affinityLevel = affinityLevel,
-            conversationHistory = conversationHistory,
             userMbti = userMbti,
-            characterName = characterName,
-            characterId = charId,
-            personaRaw = personaRaw,
-            personaSummary = personaSummary,
-            dialoguePrompt = dialoguePrompt,
-            visualPrompt = visualPrompt,
-            memories = memories
-        ).catch { e ->
+            conversationHistory = conversationHistory,
+            memories = memories,
+        ).catch { _ ->
             // SSE 실패 시 REST 폴백
-            fallbackToRest(
-                message = message,
-                mbti = mbti,
-                speechStyle = speechStyle,
-                relationship = relationship,
-                nickname = nickname,
-                affinityLevel = affinityLevel,
-                conversationHistory = conversationHistory,
-                pendingMessageId = pendingMessageId,
-                userMbti = userMbti,
-                characterName = characterName,
-                charId = charId,
-                personaRaw = personaRaw,
-                personaSummary = personaSummary,
-                dialoguePrompt = dialoguePrompt,
-                visualPrompt = visualPrompt,
-                memories = memories
-            )
+            fallbackToRest(message, character, nickname, userMbti, conversationHistory, memories)
             sseSucceeded = true // 폴백이 처리했으므로 중복 방지
         }.collect { event ->
             when (event) {
                 is SseEvent.Message -> {
-                    if (!sseSucceeded) {
-                        chatRepo.updateSendStatus(pendingMessageId, "SENT")
-                    }
                     sseSucceeded = true
                     // 서버 딜레이와 별도로, 클라이언트에서도 버블 간 텀 적용
                     delay(event.delay)
@@ -425,54 +409,20 @@ class ChatViewModel @Inject constructor(
                         CharacterEmotion.NEUTRAL
                     }
                     currentEmotion = emotion
-                    chatRepo.saveMessage(
-                        characterId = characterId,
-                        text = event.text,
-                        isFromUser = false,
-                        emotion = event.emotion
-                    )
+                    sendMessageUseCase.saveReplyMessage(characterId, event.text, event.emotion)
                     // 화면이 안 보일 때 알림
                     if (!isScreenVisible) {
-                        val name = character.value?.name ?: "캐릭터"
-                        notificationHelper.showChatNotification(name, event.text, characterId)
+                        notificationHelper.showChatNotification(character.name, event.text, characterId)
                     }
                 }
                 is SseEvent.Done -> {
-                    if (!sseSucceeded) {
-                        chatRepo.updateSendStatus(pendingMessageId, "SENT")
-                        sseSucceeded = true
-                    }
                     handleAffinityDelta(characterId, event.affinityDelta)
                     isTyping = false
                     isTalking = false
                 }
                 is SseEvent.Error -> {
                     if (!sseSucceeded) {
-                        if (event.statusCode in 400..499) {
-                            chatRepo.deleteMessage(pendingMessageId)
-                            errorMessage = event.message
-                            isTyping = false
-                            isTalking = false
-                        } else {
-                            fallbackToRest(
-                                message = message,
-                                mbti = mbti,
-                                speechStyle = speechStyle,
-                                relationship = relationship,
-                                nickname = nickname,
-                                affinityLevel = affinityLevel,
-                                conversationHistory = conversationHistory,
-                                pendingMessageId = pendingMessageId,
-                                userMbti = userMbti,
-                                characterName = characterName,
-                                charId = charId,
-                                personaRaw = personaRaw,
-                                personaSummary = personaSummary,
-                                dialoguePrompt = dialoguePrompt,
-                                visualPrompt = visualPrompt,
-                                memories = memories
-                            )
-                        }
+                        fallbackToRest(message, character, nickname, userMbti, conversationHistory, memories)
                     } else {
                         isTyping = false
                         isTalking = false
@@ -488,73 +438,36 @@ class ChatViewModel @Inject constructor(
 
     private suspend fun fallbackToRest(
         message: String,
-        mbti: String,
-        speechStyle: String,
-        relationship: String,
+        character: CharacterEntity,
         nickname: String,
-        affinityLevel: Int,
+        userMbti: String?,
         conversationHistory: List<Map<String, String>>,
-        pendingMessageId: Long,
-        userMbti: String? = null,
-        characterName: String = "",
-        charId: String = "",
-        personaRaw: String = "",
-        personaSummary: String = "",
-        dialoguePrompt: String = "",
-        visualPrompt: String = "",
-        memories: List<MemoryItem> = emptyList()
+        memories: List<MemoryItem>,
     ) {
-        try {
-            val result = chatRepo.sendMessage(
-                message = message,
-                mbti = mbti,
-                speechStyle = speechStyle,
-                relationship = relationship,
-                nickname = nickname,
-                affinityLevel = affinityLevel,
-                conversationHistory = conversationHistory,
-                userMbti = userMbti,
-                characterName = characterName,
-                characterId = charId,
-                personaRaw = personaRaw,
-                personaSummary = personaSummary,
-                dialoguePrompt = dialoguePrompt,
-                visualPrompt = visualPrompt,
-                memories = memories
-            )
-            chatRepo.updateSendStatus(pendingMessageId, "SENT")
+        val result = sendMessageUseCase.sendMessageRest(
+            text = message,
+            character = character,
+            nickname = nickname,
+            userMbti = userMbti,
+            conversationHistory = conversationHistory,
+            memories = memories,
+        )
 
-            for (reply in result.replies) {
-                delay(reply.delay)
-                val emotion = try {
-                    CharacterEmotion.valueOf(reply.emotion)
-                } catch (_: Exception) {
-                    CharacterEmotion.NEUTRAL
-                }
-                currentEmotion = emotion
-                chatRepo.saveMessage(
-                    characterId = characterId,
-                    text = reply.text,
-                    isFromUser = false,
-                    emotion = reply.emotion
-                )
+        for (reply in result.replies) {
+            delay(reply.delay)
+            val emotion = try {
+                CharacterEmotion.valueOf(reply.emotion)
+            } catch (_: Exception) {
+                CharacterEmotion.NEUTRAL
             }
-
-            handleAffinityDelta(characterId, result.affinityDelta)
-        } catch (e: ApiErrorException) {
-            if (e.statusCode in 400..499) {
-                chatRepo.deleteMessage(pendingMessageId)
-            } else {
-                chatRepo.updateSendStatus(pendingMessageId, "FAILED")
-            }
-            errorMessage = e.message
-        } catch (e: Exception) {
-            chatRepo.updateSendStatus(pendingMessageId, "FAILED")
-            errorMessage = e.message ?: "메시지 전송에 실패했습니다."
-        } finally {
-            isTyping = false
-            isTalking = false
+            currentEmotion = emotion
+            sendMessageUseCase.saveReplyMessage(characterId, reply.text, reply.emotion)
         }
+
+        handleAffinityDelta(characterId, result.affinityDelta)
+
+        isTyping = false
+        isTalking = false
     }
 
     fun retrySend(messageId: Long) {
@@ -566,26 +479,28 @@ class ChatViewModel @Inject constructor(
             if (!isOnline.value) return@launch
 
             val ch = characterRepo.getById(characterId) ?: return@launch
-            val params = buildChatParams(characterId)
+            val nickname = prefs.nickname.first()
+            val userMbti = prefs.userMbti.first().ifEmpty { null }
+            val historyCount = remoteConfig.getLong(RemoteConfigManager.KEY_MAX_CONVERSATION_HISTORY).toInt()
+            val recentMessages = messages.value.takeLast(historyCount).map { msg ->
+                mapOf(
+                    "role" to if (msg.isFromUser) "user" else "assistant",
+                    "content" to msg.text
+                )
+            }
+            val memories: List<MemoryItem> = runCatching {
+                memoryRepo.loadMemories(characterId)
+            }.getOrDefault(emptyList())
 
             try {
                 isTyping = true
-                val result = chatRepo.sendMessage(
-                    message = pending.text,
-                    mbti = ch.mbti,
-                    speechStyle = ch.speechStyle,
-                    relationship = ch.relationship,
-                    nickname = params.nickname,
-                    affinityLevel = ch.affinityLevel,
-                    conversationHistory = params.history,
-                    userMbti = params.userMbti,
-                    characterName = ch.name,
-                    characterId = characterId.toString(),
-                    personaRaw = ch.personaRaw,
-                    personaSummary = ch.personaSummary,
-                    dialoguePrompt = ch.dialoguePrompt,
-                    visualPrompt = ch.visualPrompt,
-                    memories = params.memories
+                val result = sendMessageUseCase.sendMessageRest(
+                    text = pending.text,
+                    character = ch,
+                    nickname = nickname,
+                    userMbti = userMbti,
+                    conversationHistory = recentMessages,
+                    memories = memories,
                 )
                 chatRepo.updateSendStatus(messageId, "SENT")
 
@@ -597,20 +512,11 @@ class ChatViewModel @Inject constructor(
                         CharacterEmotion.NEUTRAL
                     }
                     currentEmotion = emotion
-                    chatRepo.saveMessage(
-                        characterId = characterId,
-                        text = reply.text,
-                        isFromUser = false,
-                        emotion = reply.emotion
-                    )
+                    sendMessageUseCase.saveReplyMessage(characterId, reply.text, reply.emotion)
                 }
 
                 handleAffinityDelta(characterId, result.affinityDelta)
-            } catch (e: ApiErrorException) {
-                errorMessage = e.message
-                chatRepo.updateSendStatus(messageId, "FAILED")
-            } catch (e: Exception) {
-                errorMessage = e.message ?: "메시지 재전송에 실패했습니다."
+            } catch (_: Exception) {
                 chatRepo.updateSendStatus(messageId, "FAILED")
             } finally {
                 isTyping = false
@@ -620,10 +526,34 @@ class ChatViewModel @Inject constructor(
     }
 
     fun submitFeedback(messageId: Long, feedbackType: String) {
-        if (feedbackMap.containsKey(messageId)) return
-        feedbackMap[messageId] = feedbackType
         viewModelScope.launch {
-            chatRepo.submitFeedback(messageId, characterId, feedbackType)
+            feedbackUseCase.submitFeedback(
+                messageId = messageId,
+                feedbackType = feedbackType,
+                characterId = characterId,
+            )
+        }
+    }
+
+    /** 세션 피드백 시트 닫기 */
+    fun dismissFeedbackSheet() {
+        _showFeedbackSheet.value = false
+    }
+
+    /**
+     * 세션 피드백 제출 — 별점과 선택적 텍스트를 서버로 전송 후 시트 닫기.
+     * feedback_type 은 "session_rating:{rating}" 형식, detail 에 텍스트를 담는다.
+     */
+    fun submitSessionFeedback(rating: Int, text: String?) {
+        viewModelScope.launch {
+            runCatching {
+                feedbackUseCase.submitFeedback(
+                    messageId = -1L, // 세션 전체 피드백이므로 메시지 ID 없음
+                    feedbackType = "session_rating:$rating",
+                    characterId = characterId,
+                )
+            }
+            dismissFeedbackSheet()
         }
     }
 
@@ -634,78 +564,32 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
+     * 온보딩 첫 인사 — 신규 채팅방 진입 시 1회만 호출.
+     * 서버에서 캐릭터 MBTI에 맞는 첫 인사를 받아 캐릭터 메시지로 저장.
+     * 실패 시 사용자 경험을 방해하지 않고 조용히 무시.
+     */
+    private suspend fun sendInitialGreeting() {
+        val ch = characterRepo.getById(characterId) ?: return
+        runCatching {
+            val response = chatApi.sendGreeting(
+                mapOf("character_mbti" to ch.mbti, "character_name" to ch.name)
+            )
+            if (response.greeting.isNotBlank()) {
+                sendMessageUseCase.saveReplyMessage(
+                    characterId = characterId,
+                    text = response.greeting,
+                    emotion = "NEUTRAL",
+                )
+            }
+        }
+    }
+
+    /**
      * 표정 세트 백그라운드 생성 시작 + 폴링.
      * ImageGeneratorSheet에서 캐릭터 생성 직후 호출.
+     * → ExpressionManager에 위임.
      */
     fun startExpressionSetGeneration(basePrompt: String, characterIdStr: String) {
-        viewModelScope.launch {
-            try {
-                val response = chatApi.generateImageSet(
-                    ImageSetRequest(
-                        basePrompt = basePrompt,
-                        characterId = characterIdStr
-                    )
-                )
-                expressionSetTaskId = response.taskId
-                pollExpressionSetStatus(response.taskId)
-            } catch (e: Exception) {
-                // 표정 세트 생성 실패는 치명적이지 않으므로 로그만
-                android.util.Log.w("ChatViewModel", "Expression set generation failed", e)
-            }
-        }
-    }
-
-    private suspend fun pollExpressionSetStatus(taskId: String) {
-        val maxAttempts = 30 // 최대 30회 (약 5분)
-        var attempt = 0
-        while (attempt < maxAttempts) {
-            delay(10_000) // 10초 간격 폴링
-            attempt++
-            try {
-                val status = chatApi.getImageSetStatus(taskId)
-                when (status.status) {
-                    "completed" -> {
-                        expressionUrls = status.urls
-                        val type = Types.newParameterizedType(Map::class.java, String::class.java, String::class.java)
-                        val adapter = moshi.adapter<Map<String, String>>(type)
-                        val json = adapter.toJson(status.urls)
-                        characterRepo.updateExpressionSet(characterId, json)
-                        prefs.clearExpressionSetTaskId(characterId)
-                        return
-                    }
-                    "failed" -> {
-                        prefs.clearExpressionSetTaskId(characterId)
-                        return
-                    }
-                    // "processing" → 계속 폴링
-                }
-            } catch (e: Exception) {
-                android.util.Log.w("ChatViewModel", "Expression poll error (attempt $attempt)", e)
-                if (attempt >= maxAttempts) break
-            }
-        }
-        // 최대 시도 초과 시 정리 — taskId 보존하여 다음 세션에서 재시도 가능
-        android.util.Log.w("ChatViewModel", "Expression set polling timed out after $maxAttempts attempts")
-    }
-
-    private suspend fun waitForExpressionSetTaskId(): String? {
-        repeat(8) {
-            val taskId = prefs.getExpressionSetTaskId(characterId)
-            if (taskId != null) {
-                return taskId
-            }
-            delay(500)
-        }
-        return null
-    }
-
-    private fun parseExpressionSet(json: String): Map<String, String>? {
-        return try {
-            val type = Types.newParameterizedType(Map::class.java, String::class.java, String::class.java)
-            val adapter = moshi.adapter<Map<String, String>>(type)
-            adapter.fromJson(json)
-        } catch (_: Exception) {
-            null
-        }
+        expressionManager.startExpressionSetGeneration(basePrompt, characterIdStr, characterId, viewModelScope)
     }
 }

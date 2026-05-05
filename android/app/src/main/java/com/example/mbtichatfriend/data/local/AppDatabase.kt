@@ -7,7 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [MessageEntity::class, CharacterEntity::class, DiaryEntity::class, MemoryEntity::class, FeedbackEntity::class],
-    version = 8,
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -87,16 +87,6 @@ abstract class AppDatabase : RoomDatabase() {
                         createdAt INTEGER NOT NULL
                     )"""
                 )
-            }
-        }
-
-        /** v7 -> v8: 자유 페르소나/프롬프트 필드 추가 */
-        val MIGRATION_7_8 = object : Migration(7, 8) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE characters ADD COLUMN personaRaw TEXT NOT NULL DEFAULT ''")
-                db.execSQL("ALTER TABLE characters ADD COLUMN personaSummary TEXT NOT NULL DEFAULT ''")
-                db.execSQL("ALTER TABLE characters ADD COLUMN dialoguePrompt TEXT NOT NULL DEFAULT ''")
-                db.execSQL("ALTER TABLE characters ADD COLUMN visualPrompt TEXT NOT NULL DEFAULT ''")
             }
         }
     }
