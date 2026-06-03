@@ -399,7 +399,8 @@ interface ChatApi {
     @POST("api/v1/referral/link")
     suspend fun generateReferralLink(): ReferralLinkResponse
 
-    @POST("api/v1/referral/redeem-v3")
+    // 서버에는 /redeem 단일 엔드포인트만 존재(A4: {code} JSON body + 인증토큰 uid). redeem-v3는 서버에 없음.
+    @POST("api/v1/referral/redeem")
     suspend fun redeemReferral(@Body req: RedeemRequest): Response<ReferralRedeemResponse>
 
     // ── 커뮤니티 고정 공지 (29차 스프린트) ───────────────────────────────────

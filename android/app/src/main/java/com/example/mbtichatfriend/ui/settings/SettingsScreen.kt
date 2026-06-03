@@ -28,12 +28,14 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -48,6 +50,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -80,9 +83,30 @@ fun SettingsScreen(
     val referralStats by viewModel.referralStats.collectAsState()
     val referralDeepLink by viewModel.referralDeepLink.collectAsState()
     val referralCtaText = viewModel.referralCtaText
+    val redeemState by viewModel.redeemState.collectAsState()
     val context = LocalContext.current
     var showNicknameDialog by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var inviteCodeInput by remember { mutableStateOf("") }
+    var redeemSnackbarMessage by remember { mutableStateOf<String?>(null) }
+
+    // 리딤 결과를 스낵바로 노출 후 상태 초기화
+    LaunchedEffect(redeemState) {
+        when (val state = redeemState) {
+            is SettingsViewModel.RedeemState.Success -> {
+                redeemSnackbarMessage =
+                    if (state.bonusDays > 0) "초대 코드 적용 완료! +${state.bonusDays}일 보너스"
+                    else "초대 코드가 적용되었습니다."
+                inviteCodeInput = ""
+                viewModel.clearRedeemState()
+            }
+            is SettingsViewModel.RedeemState.Error -> {
+                redeemSnackbarMessage = state.message
+                viewModel.clearRedeemState()
+            }
+            else -> Unit
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -345,6 +369,76 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(8.dp))
 
+            // 초대 코드 입력 섹션 (A8 이후 Settings 이동)
+            SectionTitle("초대 코드 입력")
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "친구에게 받은 초대 코드를 입력하면 보너스 이용일을 받을 수 있어요.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = inviteCodeInput,
+                        onValueChange = { if (it.length <= 16) inviteCodeInput = it.uppercase() },
+                        label = { Text("초대 코드") },
+                        placeholder = { Text("예: ABC12345") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.tertiary
+                        ),
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.CardGiftcard,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.tertiary
+                            )
+                        },
+                        enabled = redeemState !is SettingsViewModel.RedeemState.Loading
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    FilledTonalButton(
+                        onClick = { viewModel.redeemInviteCode(inviteCodeInput) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        enabled = inviteCodeInput.trim().isNotEmpty() &&
+                                redeemState !is SettingsViewModel.RedeemState.Loading,
+                        colors = androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
+                            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                        )
+                    ) {
+                        if (redeemState is SettingsViewModel.RedeemState.Loading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "적용 중...",
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        } else {
+                            Text(
+                                "적용하기",
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
             // 언어 설정 섹션 (36차 스프린트)
             SectionTitle("언어")
             SettingsItem(
@@ -401,6 +495,20 @@ fun SettingsScreen(
             }
         ) {
             Text(error)
+        }
+    }
+
+    // 초대 코드 리딤 결과 Snackbar
+    redeemSnackbarMessage?.let { msg ->
+        Snackbar(
+            modifier = Modifier.padding(16.dp),
+            action = {
+                TextButton(onClick = { redeemSnackbarMessage = null }) {
+                    Text("확인")
+                }
+            }
+        ) {
+            Text(msg)
         }
     }
 
