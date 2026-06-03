@@ -70,6 +70,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
+import com.example.mbtichatfriend.ui.theme.SoftMint
+import com.example.mbtichatfriend.ui.theme.SoftYellow
+import com.example.mbtichatfriend.ui.theme.PastelPink
+import com.example.mbtichatfriend.ui.theme.PastelPurple
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -528,28 +532,27 @@ private fun CharacterCard(
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                     Spacer(Modifier.width(6.dp))
-                    // 호감도 레벨 표시
+                    // 호감도 레벨 표시 — Lv.1(첫 만남)도 항상 표시 (A9)
                     val levelTag = when (character.affinityLevel) {
+                        1 -> "첫 만남"
                         2 -> "Lv.2"
                         3 -> "Lv.3"
                         4 -> "Lv.4"
                         5 -> "Lv.5"
-                        else -> null
+                        else -> "첫 만남"
                     }
-                    levelTag?.let {
-                        Text(
-                            text = it,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = affinityColor,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .background(
-                                    affinityColor.copy(alpha = 0.15f),
-                                    RoundedCornerShape(4.dp)
-                                )
-                                .padding(horizontal = 5.dp, vertical = 1.dp)
-                        )
-                    }
+                    Text(
+                        text = levelTag,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = affinityColor,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .background(
+                                affinityColor.copy(alpha = 0.15f),
+                                RoundedCornerShape(4.dp)
+                            )
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    )
                 }
 
                 Spacer(Modifier.height(4.dp))
@@ -587,18 +590,64 @@ private fun CharacterCard(
 
                 Spacer(Modifier.height(4.dp))
 
-                LinearProgressIndicator(
-                    progress = { character.affinityScore / 100f },
+                // 관계 온도계: 구간별 색상 진행 표시 (A9)
+                // 회색(Lv.1) → 민트(Lv.2) → 노랑(Lv.3) → 핑크(Lv.4) → 보라(Lv.5)
+                AffinityThermometer(
+                    score = character.affinityScore,
+                    level = character.affinityLevel,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp)),
-                    color = affinityColor,
-                    trackColor = MaterialTheme.colorScheme.outlineVariant,
+                        .height(4.dp),
                 )
             }
         }
     }
+}
+
+/**
+ * 관계 온도계 — 호감도 구간별로 색이 달라지는 진행 표시 (A9).
+ *
+ * 구간 색상 매핑 (score 0~100):
+ *  0~19  (Lv.1): 회색   — 낯선 사이
+ * 20~39  (Lv.2): 민트   — 아는 사이
+ * 40~59  (Lv.3): 노랑   — 친한 친구
+ * 60~79  (Lv.4): 핑크   — 특별한 사이
+ * 80~100 (Lv.5): 보라   — 연인
+ *
+ * 현재 레벨 내 진행도(0~1)를 계산해 해당 색의 LinearProgressIndicator를 그린다.
+ * 과도한 의존성 없이 기존 Compose LinearProgressIndicator + 색 보간만 사용.
+ */
+@Composable
+private fun AffinityThermometer(
+    score: Int,
+    level: Int,
+    modifier: Modifier = Modifier,
+) {
+    // 레벨 구간별 기준 색상 (Color.kt 토큰 사용)
+    val levelColor = when (level) {
+        1 -> Color(0xFFB0B0C0)  // 회색
+        2 -> SoftMint            // 민트
+        3 -> SoftYellow          // 노랑
+        4 -> PastelPink          // 핑크
+        5 -> PastelPurple        // 보라
+        else -> Color(0xFFB0B0C0)
+    }
+
+    // 레벨 내 진행도 계산 (각 레벨 구간은 20점)
+    val levelStart = ((level - 1).coerceIn(0, 4)) * 20
+    val progressInLevel = ((score - levelStart).coerceIn(0, 20)) / 20f
+
+    val animatedColor by animateColorAsState(
+        targetValue = levelColor,
+        label = "thermometerColor",
+    )
+
+    LinearProgressIndicator(
+        progress = { progressInLevel },
+        modifier = modifier.clip(RoundedCornerShape(2.dp)),
+        color = animatedColor,
+        trackColor = MaterialTheme.colorScheme.outlineVariant,
+    )
 }
 
 private fun formatRelativeTime(timestamp: Long): String {

@@ -4,9 +4,17 @@ from typing import Optional
 import json
 import os
 import random
+from app.auth_middleware import require_auth_always
 from app.postgres_async import get_async_db
 
 router = APIRouter(prefix="/api/v1/community", tags=["community"])
+
+
+def _assert_owner(user: dict, user_id: str) -> None:
+    """인증 토큰의 uid가 요청의 user_id와 일치하는지 검증 (IDOR 방지)."""
+    token_uid = user.get("uid")
+    if not token_uid or token_uid != user_id:
+        raise HTTPException(status_code=403, detail="본인 계정으로만 수행할 수 있습니다.")
 
 # 익명 닉네임 생성용 풀
 _MBTI_ANIMALS = {
@@ -44,8 +52,13 @@ class CommentCreate(BaseModel):
 
 
 @router.post("/posts", status_code=201)
-async def create_post(body: PostCreate, db=Depends(get_async_db)):
+async def create_post(
+    body: PostCreate,
+    user: dict = Depends(require_auth_always),
+    db=Depends(get_async_db),
+):
     """게시글 작성"""
+    _assert_owner(user, body.user_id)
     anonymous_name = _generate_anonymous_name(body.mbti.upper())
     row = await db.fetchrow(
         """
@@ -89,11 +102,14 @@ async def list_posts(mbti: Optional[str] = None, limit: int = 20, offset: int = 
 _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 _TRENDING_TTL = 600  # 10분
 
+# 스키마 정합성: community_posts 컬럼은 mbti(=mbti_type 아님), 공감 테이블은
+# community_empathies(복합 PK post_id+user_id, id 컬럼 없음). 클라이언트 TrendingPostUi가
+# mbti_type 키를 기대하므로 p.mbti AS mbti_type 으로 매핑한다.
 _TRENDING_QUERY = """
-        SELECT p.id, p.user_id, p.mbti_type, p.content, p.comment_count,
+        SELECT p.id, p.user_id, p.mbti AS mbti_type, p.content, p.comment_count,
                p.created_at,
-               COUNT(DISTINCT e.id) AS empathy_count,
-               (COUNT(DISTINCT e.id) + p.comment_count) AS score
+               COUNT(DISTINCT e.user_id) AS empathy_count,
+               (COUNT(DISTINCT e.user_id) + p.comment_count) AS score
         FROM community_posts p
         LEFT JOIN community_empathies e ON e.post_id = p.id
         WHERE p.deleted_at IS NULL
@@ -104,15 +120,15 @@ _TRENDING_QUERY = """
         """
 
 _TRENDING_QUERY_MBTI = """
-        SELECT p.id, p.user_id, p.mbti_type, p.content, p.comment_count,
+        SELECT p.id, p.user_id, p.mbti AS mbti_type, p.content, p.comment_count,
                p.created_at,
-               COUNT(DISTINCT e.id) AS empathy_count,
-               (COUNT(DISTINCT e.id) + p.comment_count) AS score
+               COUNT(DISTINCT e.user_id) AS empathy_count,
+               (COUNT(DISTINCT e.user_id) + p.comment_count) AS score
         FROM community_posts p
         LEFT JOIN community_empathies e ON e.post_id = p.id
         WHERE p.deleted_at IS NULL
           AND p.created_at >= now() - INTERVAL '{interval}'
-          AND p.mbti_type = $2
+          AND p.mbti = $2
         GROUP BY p.id
         ORDER BY score DESC
         LIMIT $1
@@ -123,8 +139,9 @@ _TRENDING_QUERY_MBTI = """
 async def get_pinned_posts(db=Depends(get_async_db)):
     """고정 공지 게시글 — 인증 불필요"""
     rows = await db.fetch("""
-        SELECT p.id, p.mbti_type, p.content, p.comment_count, p.created_at, p.is_pinned,
-               COUNT(DISTINCT e.id) AS empathy_count
+        SELECT p.id, p.mbti, p.content, p.anonymous_name, p.comment_count,
+               p.created_at, p.is_pinned,
+               COUNT(DISTINCT e.user_id) AS empathy_count
         FROM community_posts p
         LEFT JOIN community_empathies e ON e.post_id = p.id
         WHERE p.is_pinned = TRUE AND p.deleted_at IS NULL AND p.is_hidden = FALSE
@@ -208,17 +225,20 @@ async def get_trending_posts(limit: int = 3, mbti: Optional[str] = None, db=Depe
 
 @router.get("/posts/event-trending")
 async def get_event_trending_posts(db=Depends(get_async_db)):
-    """가정의 달 이벤트 기간(4/10~4/30) 공감 상위 5건"""
+    """이벤트 트렌딩 — 최근 31일 공감 상위 5건.
+
+    (이전 버전은 '2027-04-10~05-01' 하드코딩이라 항상 빈 결과였음 — 연도 무관 윈도우로 수정.)
+    스키마: community_posts.mbti / community_empathies(post_id,user_id) 기준.
+    """
     rows = await db.fetch("""
-        SELECT p.id, p.content, p.mbti_type, p.created_at,
-               COUNT(e.id) AS empathy_count
+        SELECT p.id, p.content, p.mbti, p.anonymous_name, p.comment_count, p.created_at,
+               COUNT(DISTINCT e.user_id) AS empathy_count
         FROM community_posts p
-        LEFT JOIN post_empathies e ON e.post_id = p.id
+        LEFT JOIN community_empathies e ON e.post_id = p.id
         WHERE p.is_pinned = FALSE
           AND p.deleted_at IS NULL
           AND p.is_hidden = FALSE
-          AND p.created_at >= '2027-04-10'::timestamptz
-          AND p.created_at < '2027-05-01'::timestamptz
+          AND p.created_at >= now() - INTERVAL '31 days'
         GROUP BY p.id
         ORDER BY empathy_count DESC
         LIMIT 5
@@ -246,8 +266,9 @@ async def get_post(post_id: int, db=Depends(get_async_db)):
 async def get_public_post(post_id: int, db=Depends(get_async_db)):
     """게시글 공개 조회 — 인증 불필요"""
     row = await db.fetchrow("""
-        SELECT p.id, p.mbti_type, p.content, p.comment_count, p.created_at,
-               COUNT(DISTINCT e.id) AS empathy_count
+        SELECT p.id, p.mbti AS mbti_type, p.content, p.anonymous_name, p.comment_count,
+               p.created_at,
+               COUNT(DISTINCT e.user_id) AS empathy_count
         FROM community_posts p
         LEFT JOIN community_empathies e ON e.post_id = p.id
         WHERE p.id = $1 AND p.deleted_at IS NULL
@@ -259,8 +280,14 @@ async def get_public_post(post_id: int, db=Depends(get_async_db)):
 
 
 @router.delete("/posts/{post_id}", status_code=204)
-async def delete_post(post_id: int, user_id: str, db=Depends(get_async_db)):
+async def delete_post(
+    post_id: int,
+    user_id: str,
+    user: dict = Depends(require_auth_always),
+    db=Depends(get_async_db),
+):
     """게시글 소프트 삭제 (본인만)"""
+    _assert_owner(user, user_id)
     result = await db.execute(
         """
         UPDATE community_posts
@@ -274,8 +301,14 @@ async def delete_post(post_id: int, user_id: str, db=Depends(get_async_db)):
 
 
 @router.post("/posts/{post_id}/empathy")
-async def toggle_empathy(post_id: int, body: EmpathyToggle, db=Depends(get_async_db)):
+async def toggle_empathy(
+    post_id: int,
+    body: EmpathyToggle,
+    user: dict = Depends(require_auth_always),
+    db=Depends(get_async_db),
+):
     """공감 토글 (추가 또는 취소)"""
+    _assert_owner(user, body.user_id)
     existing = await db.fetchrow(
         "SELECT 1 FROM community_empathies WHERE post_id = $1 AND user_id = $2",
         post_id, body.user_id,
@@ -318,13 +351,18 @@ async def toggle_empathy(post_id: int, body: EmpathyToggle, db=Depends(get_async
 
 
 @router.post("/posts/{post_id}/report")
-async def report_post(post_id: int, body: dict, db=Depends(get_async_db)):
+async def report_post(
+    post_id: int,
+    body: dict,
+    user: dict = Depends(require_auth_always),
+    db=Depends(get_async_db),
+):
     """게시글 신고. 동일 사용자의 중복 신고는 무시. 신고 3회 이상 시 자동 숨김(트리거)."""
     user_id = body.get("user_id", "")
     reason = body.get("reason", "")
     if not user_id or not reason:
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail="user_id와 reason이 필요합니다")
+    _assert_owner(user, user_id)
     await db.execute("""
         INSERT INTO post_reports(reporter_id, post_id, reason)
         VALUES ($1, $2, $3)
@@ -334,8 +372,14 @@ async def report_post(post_id: int, body: dict, db=Depends(get_async_db)):
 
 
 @router.post("/posts/{post_id}/comments", status_code=201)
-async def create_comment(post_id: int, body: CommentCreate, db=Depends(get_async_db)):
+async def create_comment(
+    post_id: int,
+    body: CommentCreate,
+    user: dict = Depends(require_auth_always),
+    db=Depends(get_async_db),
+):
     """댓글 작성. 게시글 작성자에게 FCM 알림."""
+    _assert_owner(user, body.user_id)
     anonymous_name = _generate_anonymous_name(body.mbti.upper())
     row = await db.fetchrow(
         """
@@ -382,8 +426,15 @@ async def list_comments(post_id: int, db=Depends(get_async_db)):
 
 
 @router.delete("/posts/{post_id}/comments/{comment_id}", status_code=204)
-async def delete_comment(post_id: int, comment_id: int, user_id: str, db=Depends(get_async_db)):
+async def delete_comment(
+    post_id: int,
+    comment_id: int,
+    user_id: str,
+    user: dict = Depends(require_auth_always),
+    db=Depends(get_async_db),
+):
     """댓글 소프트 삭제 (본인만)"""
+    _assert_owner(user, user_id)
     result = await db.execute(
         """
         UPDATE community_comments

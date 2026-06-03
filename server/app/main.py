@@ -15,7 +15,7 @@ from .config import CORS_ORIGINS, ENVIRONMENT, HOST, PORT, REQUIRE_AUTH
 from .firebase_service import init_firebase
 from .image_service import init_storage
 from .postgres import init_postgres_schema
-from .postgres_async import get_async_db
+from .postgres_async import get_async_db, initialize_read_pool
 from .scheduler import start_scheduler
 
 from .routers import (
@@ -38,6 +38,7 @@ from .routers import (
     compatibility,
     notifications,
     users,
+    events,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -57,12 +58,13 @@ async def close_async_pool() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("MBTI Chat Friend 서버 시작")
-    # BD-NEW: production에서 REQUIRE_AUTH 강제 검증
+    # BD-NEW: production에서 REQUIRE_AUTH 강제 검증 — 비활성 시 기동 중단
     if ENVIRONMENT == "production" and not REQUIRE_AUTH:
         logger.critical(
-            "[보안 경고] ENVIRONMENT=production이지만 REQUIRE_AUTH가 비활성화되어 있습니다. "
-            "모든 인증이 우회될 수 있습니다. 즉시 설정을 확인하세요."
+            "[보안 차단] ENVIRONMENT=production이지만 REQUIRE_AUTH가 비활성화되어 있습니다. "
+            "인증 우회 위험으로 서버 기동을 중단합니다. REQUIRE_AUTH=true로 설정하세요."
         )
+        raise RuntimeError("production 환경에서는 REQUIRE_AUTH=false로 기동할 수 없습니다.")
     elif ENVIRONMENT == "production":
         logger.info("Production 환경: 인증 강제 활성화 확인됨")
     init_firebase()
@@ -70,6 +72,8 @@ async def lifespan(app: FastAPI):
     init_postgres_schema()
     # W1-2: 비동기 PostgreSQL 풀 초기화
     await init_async_pool()
+    # A5: 읽기 복제본 풀 초기화 (DATABASE_REPLICA_URL 없으면 내부적으로 스킵)
+    await initialize_read_pool()
     start_scheduler()
     yield
     await close_async_pool()
@@ -89,10 +93,13 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# CORS: 와일드카드(*) origin과 allow_credentials=True 조합은 브라우저 표준 위반이며
+# 보안상 위험하다. 명시적 origin이 설정된 경우에만 credentials를 허용한다.
+_allow_credentials = bool(CORS_ORIGINS) and "*" not in CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=_allow_credentials,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
@@ -117,6 +124,7 @@ app.include_router(community.router)
 app.include_router(compatibility.router)
 app.include_router(notifications.router)
 app.include_router(users.router)
+app.include_router(events.router)
 
 # /health (루트 레벨, 하위 호환)
 @app.get("/health")

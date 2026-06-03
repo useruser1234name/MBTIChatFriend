@@ -8,6 +8,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -104,6 +105,8 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
 
         // === 온보딩 ===
         composable(Route.Nickname.route) {
+            // onboarding_step: step_index=0 (Nickname)
+            LaunchedEffect(Unit) { onboardingViewModel.trackStep(0) }
             NicknameScreen(
                 viewModel = onboardingViewModel,
                 onNext = { navController.navigate(Route.Gender.route) }
@@ -111,6 +114,8 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
         }
 
         composable(Route.Gender.route) {
+            // onboarding_step: step_index=1 (Gender)
+            LaunchedEffect(Unit) { onboardingViewModel.trackStep(1) }
             GenderScreen(
                 viewModel = onboardingViewModel,
                 onNext = { navController.navigate(Route.Age.route) },
@@ -119,6 +124,8 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
         }
 
         composable(Route.Age.route) {
+            // onboarding_step: step_index=2 (Age)
+            LaunchedEffect(Unit) { onboardingViewModel.trackStep(2) }
             AgeScreen(
                 viewModel = onboardingViewModel,
                 onNext = { navController.navigate(Route.MbtiSelect.route) },
@@ -127,6 +134,8 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
         }
 
         composable(Route.MbtiSelect.route) {
+            // onboarding_step: step_index=3 (MbtiSelect)
+            LaunchedEffect(Unit) { onboardingViewModel.trackStep(3) }
             MbtiSelectScreen(
                 viewModel = onboardingViewModel,
                 onNext = { navController.navigate(Route.StyleSelect.route) },
@@ -135,6 +144,8 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
         }
 
         composable(Route.StyleSelect.route) {
+            // onboarding_step: step_index=4 (StyleSelect / 캐릭터 선택)
+            LaunchedEffect(Unit) { onboardingViewModel.trackStep(4) }
             // MBTI 선택 + 캐릭터 추천을 인라인으로 통합한 OnboardingScreen.
             // 기존 4단계(별도 캐릭터 추천 화면)를 3단계로 통합: MBTI 선택 완료 시 하단에 슬라이드인.
             OnboardingScreen(
@@ -146,6 +157,8 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
                 onSkipToTest = { /* 외부 MBTI 테스트 링크 — 추후 구현 */ },
                 onCharacterSelected = { character ->
                     onboardingViewModel.updateSelectedCharacter(character)
+                    // 캐릭터 선택 완료 이벤트 — character_id(=mbti)를 payload에 포함
+                    onboardingViewModel.trackCharacterSelected(character)
                     navController.navigate(Route.StarterSelection.route)
                 },
             )

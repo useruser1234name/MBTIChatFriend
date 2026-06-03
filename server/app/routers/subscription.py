@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..auth_middleware import verify_firebase_token
+from ..auth_middleware import require_auth_always, verify_firebase_token
 from ..models import SubscriptionStatusResponse, SubscriptionUpgradeRequest
 from ..postgres_async import get_async_db
 from ..subscription import get_subscription_manager
@@ -38,6 +38,7 @@ async def get_subscription_status(
             max_affinity_level=free_limits["max_affinity_level"],
             expression_set=free_limits["expression_set"],
             night_diary=free_limits["night_diary"],
+            night_diary_weekly_limit=free_limits.get("night_diary_weekly_limit", 0),
         )
 
     uid = user.get("uid", "")
@@ -85,6 +86,7 @@ async def get_subscription_status(
         max_affinity_level=limits["max_affinity_level"],
         expression_set=limits["expression_set"],
         night_diary=limits["night_diary"],
+        night_diary_weekly_limit=limits.get("night_diary_weekly_limit", 0),
         expires_at=expires_at_str,
     )
 
@@ -92,16 +94,27 @@ async def get_subscription_status(
 @router.post("/subscription/upgrade")
 async def upgrade_subscription(
     req: SubscriptionUpgradeRequest,
-    user: Optional[dict] = Depends(verify_firebase_token),
+    user: dict = Depends(require_auth_always),
 ):
-    """구독 플랜 업그레이드 엔드포인트 (결제 연동 전 mock).
+    """구독 플랜 변경 엔드포인트.
 
-    다음 스프린트에서 실제 결제 게이트웨이(토스페이먼츠 등)로 교체 예정.
-    현재는 테스트 목적으로 DB에 직접 플랜을 기록한다.
-
-    보안 주의: 프로덕션 환경에서는 반드시 결제 검증 후 플랜 변경할 것.
+    보안(P0-2): 인증 필수 + 토큰 uid 일치 검증.
+    프리미엄 등 유료 플랜으로의 업그레이드는 이 엔드포인트로 처리하지 않는다.
+    유료 결제는 반드시 /api/v1/billing/verify-purchase(영수증 서버 검증)를 거친다.
+    여기서는 본인 계정의 무료 플랜 다운그레이드(해지)만 허용한다.
     """
     from ..postgres import execute as pg_exec_sub, postgres_enabled
+
+    token_uid = user.get("uid")
+    if not token_uid or token_uid != req.user_id:
+        raise HTTPException(status_code=403, detail="user_id가 인증 토큰과 일치하지 않습니다")
+
+    # 유료 플랜 업그레이드는 결제 검증 경로(billing/verify-purchase)로만 허용
+    if str(req.plan).lower() not in ("free", "basic"):
+        raise HTTPException(
+            status_code=402,
+            detail="유료 플랜은 /api/v1/billing/verify-purchase 로 결제 검증 후 활성화됩니다",
+        )
 
     if not postgres_enabled():
         # DB 미연결 환경에서도 mock 응답 반환 (개발 편의)

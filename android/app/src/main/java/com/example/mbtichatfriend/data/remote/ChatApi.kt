@@ -298,6 +298,11 @@ interface ChatApi {
     @POST("api/v1/billing/verify-purchase")
     suspend fun verifyPurchase(@Body req: PurchaseVerifyRequest): PurchaseVerifyResponse
 
+    // ── 분석 이벤트 로깅 (PM 로드맵 — 최소 계측) ──────────────────────────────
+
+    @POST("api/v1/events/batch")
+    suspend fun logEvents(@Body batch: EventBatchRequest): Response<EventBatchResponse>
+
     // ── 편지 ─────────────────────────────────────────────────────────────────
 
     @GET("api/v1/letter/latest")
@@ -445,6 +450,27 @@ data class ReferralRedeemResponse(
 data class ReferralStatsResponse(
     @Json(name = "invited_count") val invitedCount: Int = 0,
     @Json(name = "reward_days") val rewardDays: Int = 0
+)
+
+// ── 분석 이벤트 모델 (PM 로드맵) ─────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class ClientEventDto(
+    @Json(name = "event_type") val eventType: String,
+    @Json(name = "room_id") val roomId: String = "",
+    @Json(name = "character_id") val characterId: String = "",
+    val payload: Map<String, Any?> = emptyMap(),
+)
+
+@JsonClass(generateAdapter = false)
+data class EventBatchRequest(
+    val events: List<ClientEventDto>,
+)
+
+@JsonClass(generateAdapter = false)
+data class EventBatchResponse(
+    val accepted: Int = 0,
+    val skipped: List<String> = emptyList(),
 )
 
 // ── 커뮤니티 모델 (19차 스프린트) ────────────────────────────────────────────

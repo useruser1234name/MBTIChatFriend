@@ -31,6 +31,16 @@ async def generate_diary_entry(
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
     """캐릭터 시점에서 오늘의 일기 생성"""
+    # PM 로드맵: 밤 일기 주간 한도 게이팅 (FREE 주 3회, PREMIUM 무제한).
+    if user and user.get("uid"):
+        from ..subscription import get_subscription_manager
+
+        allowed, reason = await get_subscription_manager().check_night_diary_limit(
+            user["uid"]
+        )
+        if not allowed:
+            raise HTTPException(status_code=402, detail=reason)
+
     diary_text, emotion = await generate_diary(
         character_name=req.character_name,
         mbti=req.mbti,
@@ -53,7 +63,7 @@ async def create_diary_entry(
 ):
     """사용자 감정 일기 생성"""
     row = await conn.fetchrow(
-        "INSERT INTO diary_entries(user_id, content, emotion_tags) VALUES($1,$2,$3) RETURNING *",
+        "INSERT INTO user_diary_entries(user_id, content, emotion_tags) VALUES($1,$2,$3) RETURNING *",
         uid, content, emotion_tags
     )
     return dict(row)
@@ -66,7 +76,7 @@ async def get_diary_entries(
 ):
     """사용자 감정 일기 목록 조회 (최근 30건)"""
     rows = await conn.fetch(
-        "SELECT * FROM diary_entries WHERE user_id=$1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 30",
+        "SELECT * FROM user_diary_entries WHERE user_id=$1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 30",
         uid
     )
     return [dict(r) for r in rows]
@@ -80,7 +90,7 @@ async def get_weekly_report(
     """최근 7일 감정 태그 집계 리포트"""
     rows = await conn.fetch("""
         SELECT emotion_tags, COUNT(*) as count
-        FROM diary_entries
+        FROM user_diary_entries
         WHERE user_id=$1 AND created_at >= NOW() - INTERVAL '7 days' AND deleted_at IS NULL
         GROUP BY emotion_tags
     """, uid)

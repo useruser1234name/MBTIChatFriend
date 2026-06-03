@@ -1,10 +1,13 @@
 """
 APScheduler 기반 배치 작업 모음
 """
+import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 import pytz
+
+logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
@@ -13,55 +16,97 @@ KST = pytz.timezone("Asia/Seoul")
 
 async def flush_empathy_notifications():
     """30분마다 pending 공감 알림을 묶음 발송"""
-    from app.postgres_async import _pool
+    from app.postgres_async import get_async_db
     from app.firebase_service import send_notification_with_record
 
-    if _pool is None:
+    db = get_async_db()
+    if not db.available:
         return
 
-    async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, post_id, author_id, actor_name
-            FROM pending_empathy_notifications
-            WHERE sent_at IS NULL
-            ORDER BY author_id, created_at
-            """
+    rows = await db.fetch(
+        """
+        SELECT id, post_id, author_id, actor_name
+        FROM pending_empathy_notifications
+        WHERE sent_at IS NULL
+        ORDER BY author_id, created_at
+        """
+    )
+    if not rows:
+        return
+
+    # author_id별 묶음
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(row["author_id"], []).append(dict(row))
+
+    for author_id, items in grouped.items():
+        first_actor = items[0]["actor_name"]
+        count = len(items)
+        post_id = items[0]["post_id"]
+        message = (
+            f"{first_actor}님 외 {count - 1}명이 회원님의 고민에 공감했어요"
+            if count > 1
+            else f"{first_actor}님이 회원님의 고민에 공감했어요"
         )
-        if not rows:
-            return
-
-        # author_id별 묶음
-        grouped: dict[str, list] = {}
-        for row in rows:
-            grouped.setdefault(row["author_id"], []).append(dict(row))
-
-        for author_id, items in grouped.items():
-            first_actor = items[0]["actor_name"]
-            count = len(items)
-            post_id = items[0]["post_id"]
-            message = (
-                f"{first_actor}님 외 {count - 1}명이 회원님의 고민에 공감했어요"
-                if count > 1
-                else f"{first_actor}님이 회원님의 고민에 공감했어요"
+        try:
+            await send_notification_with_record(
+                user_id=author_id,
+                title="공감",
+                body=message,
+                notification_type="empathy_batch",
+                data={"count": str(count), "post_id": str(post_id)},
+                deep_link=f"mbtichat://community/{post_id}",
             )
-            try:
-                await send_notification_with_record(
-                    user_id=author_id,
-                    title="공감",
-                    body=message,
-                    notification_type="empathy_batch",
-                    data={"count": str(count), "post_id": str(post_id)},
-                    deep_link=f"mbtichat://community/{post_id}",
-                )
-            except Exception:
-                pass
+        except Exception:
+            logger.exception("flush_empathy_notifications: FCM 발송 실패 (author_id=%s)", author_id)
 
-            ids = [item["id"] for item in items]
-            await conn.execute(
-                "UPDATE pending_empathy_notifications SET sent_at = now() WHERE id = ANY($1)",
-                ids,
+        ids = [item["id"] for item in items]
+        await db.execute(
+            "UPDATE pending_empathy_notifications SET sent_at = now() WHERE id = ANY($1)",
+            ids,
+        )
+
+
+async def send_night_diary_push():
+    """매일 밤 21:00 KST — 오늘 생성된 캐릭터 밤 일기를 작성자에게 알림.
+
+    diary_entries(room_id, character_id, diary_date) 기준. room_id는 '{uid}:...' 형식이라
+    앞부분을 user_id로 사용한다. (PM 로드맵 — 밤 일기 D7 훅 FCM 연결)
+    """
+    from app.postgres_async import get_async_db
+    from app.firebase_service import send_notification_with_record
+
+    db = get_async_db()
+    if not db.available:
+        return
+
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT room_id, character_id
+        FROM diary_entries
+        WHERE diary_date = CURRENT_DATE
+        """
+    )
+    if not rows:
+        return
+
+    seen: set[str] = set()
+    for row in rows:
+        room_id = row["room_id"] or ""
+        uid = room_id.split(":", 1)[0] if room_id else ""
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        try:
+            await send_notification_with_record(
+                user_id=uid,
+                title="오늘 밤 일기가 도착했어요 🌙",
+                body="오늘 하루를 함께한 친구가 일기를 썼어요. 어떤 마음이었을까요?",
+                notification_type="night_diary",
+                deep_link="mbtichat://diary",
             )
+        except Exception:
+            logger.exception("send_night_diary_push: FCM 발송 실패 (uid=%s)", uid)
 
 
 async def send_d3_personalized_notifications():
@@ -76,24 +121,29 @@ async def send_d3_personalized_notifications():
     current_hour_kst = datetime.datetime.now(KST).hour
 
     async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT ON (m.user_id)
-                m.user_id,
-                m.content,
-                EXTRACT(HOUR FROM (m.created_at AT TIME ZONE 'Asia/Seoul')) AS last_active_hour
-            FROM messages m
-            WHERE m.created_at >= now() - INTERVAL '3 days 1 hour'
-              AND m.created_at < now() - INTERVAL '3 days'
-              AND m.role = 'user'
-              AND NOT EXISTS (
-                SELECT 1 FROM messages m2
-                WHERE m2.user_id = m.user_id
-                  AND m2.created_at >= now() - INTERVAL '3 days'
-              )
-            ORDER BY m.user_id, m.created_at DESC
-            """
-        )
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (m.user_id)
+                    m.user_id,
+                    m.content,
+                    EXTRACT(HOUR FROM (m.created_at AT TIME ZONE 'Asia/Seoul')) AS last_active_hour
+                FROM messages m
+                WHERE m.created_at >= now() - INTERVAL '3 days 1 hour'
+                  AND m.created_at < now() - INTERVAL '3 days'
+                  AND m.role = 'user'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM messages m2
+                    WHERE m2.user_id = m.user_id
+                      AND m2.created_at >= now() - INTERVAL '3 days'
+                  )
+                ORDER BY m.user_id, m.created_at DESC
+                """
+            )
+        except Exception as e:
+            logger.exception("send_d3_personalized_notifications: DB 오류")
+            return
+
         if not rows:
             return
 
@@ -123,7 +173,7 @@ async def send_d3_personalized_notifications():
                     deep_link="mbtichat://chat",
                 )
             except Exception:
-                pass
+                logger.exception("send_d3_personalized_notifications: FCM 발송 실패 (uid=%s)", uid)
 
 
 async def send_d5_character_messages():
@@ -148,20 +198,25 @@ async def send_d5_character_messages():
     DEFAULT_LONGING = "요즘 많이 바빴죠? 나는 여기서 기다리고 있었어요."
 
     async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT m.user_id, m.character_mbti
-            FROM messages m
-            WHERE m.created_at >= now() - INTERVAL '5 days 1 hour'
-              AND m.created_at < now() - INTERVAL '5 days'
-              AND NOT EXISTS (
-                SELECT 1 FROM messages m2
-                WHERE m2.user_id = m.user_id
-                  AND m2.created_at >= now() - INTERVAL '5 days'
-              )
-            ORDER BY m.user_id
-            """
-        )
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT m.user_id, m.character_mbti
+                FROM messages m
+                WHERE m.created_at >= now() - INTERVAL '5 days 1 hour'
+                  AND m.created_at < now() - INTERVAL '5 days'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM messages m2
+                    WHERE m2.user_id = m.user_id
+                      AND m2.created_at >= now() - INTERVAL '5 days'
+                  )
+                ORDER BY m.user_id
+                """
+            )
+        except Exception as e:
+            logger.exception("send_d5_character_messages: DB 오류")
+            return
+
         if not rows:
             return
 
@@ -182,11 +237,14 @@ async def send_d5_character_messages():
                     deep_link="mbtichat://chat",
                 )
             except Exception:
-                pass
+                logger.exception("send_d5_character_messages: FCM 발송 실패 (uid=%s)", uid)
 
 
 async def send_weekly_summary():
-    """매주 월요일 09:00 KST — 지난 7일 대화 수 요약 알림 발송."""
+    """매주 월요일 09:00 KST — 지난 7일 대화 수 요약 알림 발송.
+
+    metric_events(event_type='chat_turn', user_id)로 집계한다.
+    """
     from app.postgres_async import _pool
     from app.firebase_service import send_notification_with_record
 
@@ -194,16 +252,22 @@ async def send_weekly_summary():
         return
 
     async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT user_id, COUNT(*) AS msg_count
-            FROM messages
-            WHERE created_at >= now() - INTERVAL '7 days'
-              AND role = 'user'
-            GROUP BY user_id
-            HAVING COUNT(*) > 0
-            """
-        )
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT user_id, COUNT(*) AS msg_count
+                FROM metric_events
+                WHERE event_type = 'chat_turn'
+                  AND created_at >= now() - INTERVAL '7 days'
+                  AND user_id IS NOT NULL
+                GROUP BY user_id
+                HAVING COUNT(*) > 0
+                """
+            )
+        except Exception as e:
+            logger.exception("send_weekly_summary: DB 오류")
+            return
+
         if not rows:
             return
 
@@ -221,11 +285,11 @@ async def send_weekly_summary():
                     deep_link="mbtichat://chat",
                 )
             except Exception:
-                pass
+                logger.exception("send_weekly_summary: FCM 발송 실패 (uid=%s)", uid)
 
 
 async def send_gratitude_day_push():
-    """가정의 달 릴리즈 당일 전체 푸시 (4/24 09:00 KST 단발)"""
+    """가정의 달 릴리즈 당일 전체 푸시 (4/24 09:00 KST 단발)."""
     from app.postgres_async import _pool
     from app.firebase_service import send_notification_with_record
 
@@ -233,17 +297,27 @@ async def send_gratitude_day_push():
         return
 
     async with _pool.acquire() as conn:
-        users = await conn.fetch(
-            "SELECT user_id, mbti_type FROM users WHERE push_enabled = TRUE"
-        )
+        try:
+            users = await conn.fetch(
+                "SELECT user_id, mbti_type FROM users WHERE push_enabled = TRUE"
+            )
+        except Exception as e:
+            logger.exception("send_gratitude_day_push: DB 오류")
+            return
+
         for user in users:
             mbti = user["mbti_type"] or "ENFP"
-            await send_notification_with_record(
-                user_id=user["user_id"],
-                title="오늘은 어버이날이에요 \U0001f49b",
-                body=f"부모님께 {mbti} 감사 카드를 보내드리세요.",
-                deep_link="mbtichat://gratitude",
-            )
+            try:
+                await send_notification_with_record(
+                    user_id=user["user_id"],
+                    title="오늘은 어버이날이에요 \U0001f49b",
+                    body=f"부모님께 {mbti} 감사 카드를 보내드리세요.",
+                    deep_link="mbtichat://gratitude",
+                )
+            except Exception:
+                logger.exception(
+                    "send_gratitude_day_push: FCM 발송 실패 (uid=%s)", user.get("user_id")
+                )
 
 # APScheduler 등록 (scheduler 초기화 코드 근처)
 # scheduler.add_job(send_gratitude_day_push, 'date',
@@ -277,6 +351,13 @@ def start_scheduler():
         send_weekly_summary,
         trigger=CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=KST),
         id="send_weekly_summary",
+        replace_existing=True,
+    )
+    # 밤 일기 알림 — 매일 21:00 KST (PM 로드맵 D7 훅)
+    scheduler.add_job(
+        send_night_diary_push,
+        trigger=CronTrigger(hour=21, minute=0, timezone=KST),
+        id="send_night_diary_push",
         replace_existing=True,
     )
     scheduler.start()

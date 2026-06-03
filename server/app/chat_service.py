@@ -13,7 +13,13 @@ from typing import List, Optional, Tuple
 from openai import AsyncOpenAI
 
 from .circuit_breaker import CircuitOpenError, get_openai_circuit
-from .config import OPENAI_API_KEY, TOGETHER_API_KEY, MAX_TOKENS
+from .config import (
+    OPENAI_API_KEY,
+    TOGETHER_API_KEY,
+    MAX_TOKENS,
+    LLM_MODEL_COMPLEX,
+    LLM_MODEL_SIMPLE,
+)
 from .content_filter import check_content, detect_crisis, get_safety_system_prompt
 from .models import HistoryMessage, MemoryItem, ReplyPart
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
@@ -712,12 +718,12 @@ async def generate_reply(
                 else:
                     # character_id 없으면 기존 복잡도 기반 라우팅 유지
                     complexity = _classify_message_complexity(message, len(conversation_history))
-                    model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
+                    model_id = LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE
             except Exception as _ab_err:
                 # A/B 배정 실패 → graceful fallback
                 logger.warning("[AB] variant 배정 실패, 복잡도 라우팅으로 fallback: %s", _ab_err)
                 complexity = _classify_message_complexity(message, len(conversation_history))
-                model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
+                model_id = LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE
 
         # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
         from .routers.chat import _resolve_model as _resolve_lora
@@ -768,16 +774,33 @@ async def generate_reply(
         total_completion_tokens = response.usage.completion_tokens if response.usage else 0
         llm_call_count = 1
 
-        # 품질 게이트: 매우 저품질 시 1회 재생성, 점수 비교 후 교체
+        # 품질 게이트: 매우 저품질 시 1회 재생성, 점수 비교 후 더 좋은 쪽 채택
         if replies:
             score = quick_score(message, content, mbti)
             if score < QUALITY_GATE_THRESHOLD:
                 logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
+
+                # 첫 응답이 JSON 파싱 깨짐(매우 낮은 점수)이면 형식 강제 보강.
+                # response_format=json_object는 배열 형식과 호환 깨지므로 사용 X.
+                # prefix caching 유지를 위해 기존 messages는 그대로 두고,
+                # 트레일링 user 메시지만 추가해 형식만 다시 환기시킨다.
+                retry_messages = messages
+                if score <= 0.2:  # 형식 자체가 깨진 경우만
+                    retry_messages = messages + [{
+                        "role": "user",
+                        "content": (
+                            "직전 응답 형식이 올바르지 않았어. 반드시 "
+                            '[{"text":"...","emotion":"EMOTION_CODE"}] '
+                            "형태의 JSON 배열로만 다시 답해줘. "
+                            "코드블록·설명·다른 텍스트는 절대 붙이지 마."
+                        ),
+                    }]
+
                 try:
                     retry_response = await _openai_cb.call(
                         _active_client.chat.completions.create(
                             model=model_id,
-                            messages=messages,
+                            messages=retry_messages,
                             temperature=0.9,
                             max_tokens=1200,
                         )
@@ -785,30 +808,32 @@ async def generate_reply(
                 except CircuitOpenError:
                     logger.warning("[CB] openai circuit OPEN — 품질 게이트 재시도 스킵")
                     retry_response = None
+
                 if retry_response:
                     retry_content = retry_response.choices[0].message.content or ""
                     retry_replies = _parse_reply(retry_content)
                     if retry_replies:
-                        replies = retry_replies
-                        content = retry_content
+                        retry_score = quick_score(message, retry_content, mbti)
+                        # 원본과 재시도 중 점수가 더 높은 쪽 채택.
+                        # 동점이면 재시도(더 최신·형식 보강 반영)를 선호.
+                        if retry_score >= score:
+                            logger.info(
+                                f"재생성 채택 (retry={retry_score} >= orig={score})"
+                            )
+                            replies = retry_replies
+                            content = retry_content
+                        else:
+                            logger.info(
+                                f"원본 유지 (orig={score} > retry={retry_score})"
+                            )
 
-        # AI 응답 안전성 필터
+        # AI 응답 안전성 필터 (H-1)
         filtered_replies = []
         for reply in replies:
             is_safe, _ = check_content(reply.text)
             if is_safe:
                 filtered_replies.append(reply)
         result = filtered_replies if filtered_replies else [
-            ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
-        ]
-
-        # AI 응답 필터링 복원 (H-1)
-        filtered = []
-        for reply in result:
-            safe, _ = check_content(reply.text)
-            if safe:
-                filtered.append(reply)
-        result = filtered if filtered else [
             ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
         ]
 

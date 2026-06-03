@@ -16,8 +16,8 @@ from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 
 from ..auth_middleware import verify_firebase_token
-from ..chat_service import generate_reply, generate_night_diary, stream_lora_response
-from ..config import DAILY_TOKEN_LIMIT, MAX_TOKENS, OPENAI_API_KEY, TOGETHER_API_KEY, VLLM_BASE_URL
+from ..chat_service import generate_reply, generate_night_diary, stream_lora_response, AFFINITY_LEVEL_THRESHOLDS
+from ..config import DAILY_TOKEN_LIMIT, LLM_MODEL_SIMPLE, MAX_TOKENS, OPENAI_API_KEY, TOGETHER_API_KEY, VLLM_BASE_URL
 from ..content_filter import (
     check_content,
     classify_crisis_type,
@@ -254,6 +254,62 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
         next_hook = next_hook or latest.next_hook
         next_goal = next_goal or latest.next_goal
 
+    # A2: affinity_level_up 이벤트 기록 — 레벨이 변동된 경우에만 fire-and-forget
+    if affinity_delta != 0:
+        _old_level = req.affinity_level
+        # 임계값 기반 새 레벨 추정 (클라이언트가 실제 score를 갖고 있어 서버는 추정)
+        # affinity_delta > 0 이면 현재 레벨보다 높아질 수 있고,
+        # affinity_delta < 0 이면 낮아질 수 있다.
+        # 단순하게 delta 부호로 레벨 이동을 판정한다.
+        _new_level = _old_level
+        if affinity_delta > 0 and _old_level < 5:
+            # 다음 레벨 임계값을 넘을 가능성이 있으면 레벨 +1로 간주
+            # (정확한 score는 클라이언트 관리이므로 delta 양수 = 가능성 있음)
+            _next_threshold = AFFINITY_LEVEL_THRESHOLDS.get(_old_level + 1, 101)
+            # delta가 충분히 크면(임계값 gap의 50% 이상) 레벨 업 추정
+            _cur_threshold = AFFINITY_LEVEL_THRESHOLDS.get(_old_level, 0)
+            _gap = _next_threshold - _cur_threshold
+            if affinity_delta >= max(1, _gap // 2):
+                _new_level = _old_level + 1
+        elif affinity_delta < 0 and _old_level > 1:
+            _prev_threshold = AFFINITY_LEVEL_THRESHOLDS.get(_old_level, 0)
+            if abs(affinity_delta) >= max(1, _prev_threshold // 4):
+                _new_level = _old_level - 1
+
+        if _new_level != _old_level:
+            try:
+                import asyncio as _asyncio
+                from ..analytics_events import AFFINITY_LEVEL_UP
+
+                async def _record_affinity_level_up(
+                    from_level: int, to_level: int, turn_count: int, character_id: str
+                ) -> None:
+                    try:
+                        record_event(
+                            event_type=AFFINITY_LEVEL_UP,
+                            room_id=room_id,
+                            character_id=character_id,
+                            payload={
+                                "from_level": from_level,
+                                "to_level": to_level,
+                                "turn_count": turn_count,
+                                "character_id": character_id,
+                            },
+                        )
+                    except Exception as _e:
+                        logger.warning("affinity_level_up 이벤트 기록 실패: %s", _e)
+
+                _asyncio.create_task(
+                    _record_affinity_level_up(
+                        from_level=_old_level,
+                        to_level=_new_level,
+                        turn_count=state.turn_count,
+                        character_id=effective_character_id,
+                    )
+                )
+            except Exception as _e:
+                logger.warning("affinity_level_up 이벤트 태스크 생성 실패: %s", _e)
+
     record_event(
         event_type="chat_turn",
         room_id=room_id,
@@ -268,6 +324,77 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
             "client_local_hour": req.client_local_hour,
         },
     )
+
+    # scheduler D+3/D+5 리텐션 알림을 위해 users/messages 테이블에 데이터 적재.
+    # fire-and-forget: DB 미연결 환경에서도 메인 응답을 블로킹하지 않는다.
+    _uid = (user or {}).get("uid", "") if user else ""
+    _character_mbti = (req.mbti or "").upper()
+    _user_message = req.message or ""
+    _assistant_text = replies[0].text if replies else ""
+
+    async def _persist_chat_data(
+        uid: str,
+        character_mbti: str,
+        user_message: str,
+        assistant_text: str,
+    ) -> None:
+        if not uid:
+            return
+        from ..postgres_async import get_async_db as _get_db
+        db = _get_db()
+        if not db.available:
+            return
+        try:
+            # users upsert: 최초 가입 시 created_at 기록, 이후엔 last_active_at만 갱신
+            await db.execute(
+                """
+                INSERT INTO users (user_id, created_at, last_active_at)
+                VALUES ($1, NOW(), NOW())
+                ON CONFLICT (user_id)
+                DO UPDATE SET last_active_at = NOW()
+                """,
+                uid,
+            )
+        except Exception as _e:
+            logger.warning("users upsert 실패 (uid=%s): %s", uid, _e)
+
+        try:
+            # user 메시지 적재
+            if user_message:
+                await db.execute(
+                    """
+                    INSERT INTO messages (user_id, character_mbti, role, content)
+                    VALUES ($1, $2, 'user', $3)
+                    """,
+                    uid,
+                    character_mbti,
+                    user_message[:2000],
+                )
+        except Exception as _e:
+            logger.warning("messages(user) INSERT 실패 (uid=%s): %s", uid, _e)
+
+        try:
+            # assistant 응답 적재
+            if assistant_text:
+                await db.execute(
+                    """
+                    INSERT INTO messages (user_id, character_mbti, role, content)
+                    VALUES ($1, $2, 'assistant', $3)
+                    """,
+                    uid,
+                    character_mbti,
+                    assistant_text[:2000],
+                )
+        except Exception as _e:
+            logger.warning("messages(assistant) INSERT 실패 (uid=%s): %s", uid, _e)
+
+    import asyncio as _asyncio_chat
+    try:
+        _asyncio_chat.create_task(
+            _persist_chat_data(_uid, _character_mbti, _user_message, _assistant_text)
+        )
+    except Exception as _e:
+        logger.warning("_persist_chat_data 태스크 생성 실패: %s", _e)
 
     return {
         "room_id": room_id,
@@ -350,7 +477,7 @@ async def send_message(
             event_type="crisis_detected",
             room_id=result["room_id"],
             character_id=req.character_id,
-            payload={"tier": crisis_tier, "message_snippet": req.message[:50], "model": selected_model},
+            payload={"tier": crisis_tier, "model": selected_model},
         )
 
     return ChatResponse(
@@ -535,7 +662,9 @@ async def extract_memory(
 
 
 @router.get("/chat/starters")
+@limiter.limit("10/minute")
 async def get_conversation_starters(
+    request: Request,
     user_mbti: str = "",
     character_mbti: str = "",
     character_name: str = "",
@@ -570,7 +699,7 @@ async def get_conversation_starters(
     try:
         client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
         resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=150,
             temperature=0.8,
@@ -630,7 +759,9 @@ _MBTI_GREETING_PROMPTS: dict[str, str] = {
 
 
 @router.post("/chat/greeting")
+@limiter.limit("10/minute")
 async def send_greeting(
+    request: Request,
     character_mbti: str = Body(...),
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
@@ -653,7 +784,7 @@ async def send_greeting(
     try:
         _client = _openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
         resp = await _client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=LLM_MODEL_SIMPLE,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100,
             temperature=0.9,

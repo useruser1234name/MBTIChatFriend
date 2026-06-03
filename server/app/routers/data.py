@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from ..auth_middleware import verify_firebase_token
+from ..auth_middleware import require_auth_always, verify_firebase_token
 from ..postgres_async import get_async_db
 
 logger = logging.getLogger(__name__)
@@ -26,15 +26,23 @@ class DataConsentResponse(BaseModel):
 
 
 @router.post("/data/consent")
-async def update_data_consent(req: DataConsentRequest):
+async def update_data_consent(
+    req: DataConsentRequest,
+    user: dict = Depends(require_auth_always),
+):
     """
     사용자 학습 데이터 활용 opt-in 동의 저장/철회.
+
+    보안(S-2): 인증 필수 + 토큰 uid 일치 검증 (GDPR — 타인 동의 조작 방지).
 
     법무 요건 (10차 회의 — 법무 전문가 김지은):
     - 명시적 opt-in (기본값 False)
     - 철회 시 기존 학습 데이터 삭제 플래그 설정
     - 목적: AI 캐릭터 품질 개선
     """
+    token_uid = user.get("uid")
+    if not token_uid or token_uid != req.user_id:
+        raise HTTPException(status_code=403, detail="user_id가 인증 토큰과 일치하지 않습니다")
     db = get_async_db()
     await db.execute(
         """
@@ -51,8 +59,14 @@ async def update_data_consent(req: DataConsentRequest):
 
 
 @router.get("/data/consent/{user_id}")
-async def get_data_consent(user_id: str):
-    """사용자 동의 상태 조회."""
+async def get_data_consent(
+    user_id: str,
+    user: dict = Depends(require_auth_always),
+):
+    """사용자 동의 상태 조회. 본인만 조회 가능."""
+    token_uid = user.get("uid")
+    if not token_uid or token_uid != user_id:
+        raise HTTPException(status_code=403, detail="본인의 동의 상태만 조회할 수 있습니다.")
     db = get_async_db()
     row = await db.fetchone(
         "SELECT consented FROM user_data_consent WHERE user_id = $1",
@@ -102,6 +116,9 @@ async def cost_summary(
 
     DATA-A 오재원 제안: 실측 데이터 기반 비용 최적화 의사결정 지원.
     """
+    # INTERVAL '%s days'는 %s가 문자열 리터럴 내부라 파라미터 바인딩이 되지 않는다.
+    # make_interval(days => %s)로 정수 days를 안전하게 바인딩한다.
+    days = max(1, min(int(days), 365))
     from ..postgres import fetchall
     rows = fetchall(
         """
@@ -112,7 +129,7 @@ async def cost_summary(
             SUM(completion_tokens) AS total_completion,
             SUM(total_tokens) AS total_tokens
         FROM api_usage
-        WHERE created_at >= NOW() - INTERVAL '%s days'
+        WHERE created_at >= NOW() - make_interval(days => %s)
         GROUP BY model_id
         ORDER BY total_tokens DESC
         """,

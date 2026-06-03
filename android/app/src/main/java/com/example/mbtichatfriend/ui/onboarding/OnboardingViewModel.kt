@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.ChatApi
 import com.example.mbtichatfriend.data.remote.ReferralRedeemRequest
+import com.example.mbtichatfriend.data.repository.AnalyticsEvent
+import com.example.mbtichatfriend.data.repository.AnalyticsRepository
 import com.example.mbtichatfriend.model.AgeGroup
 import com.example.mbtichatfriend.model.Gender
 import com.example.mbtichatfriend.model.MbtiType
@@ -23,7 +25,8 @@ import javax.inject.Inject
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     private val prefs: UserPreferences,
-    private val chatApi: ChatApi
+    private val chatApi: ChatApi,
+    private val analyticsRepository: AnalyticsRepository,
 ) : ViewModel() {
 
     val isOnboardingCompleted: Flow<Boolean> = prefs.isOnboardingCompleted
@@ -87,6 +90,36 @@ class OnboardingViewModel @Inject constructor(
             ?.let { speechStyle = it }
         runCatching { Relationship.valueOf(value.relationship) }.getOrNull()
             ?.let { relationship = it }
+    }
+
+    // ── 분석 이벤트 (PM 로드맵 A1) ────────────────────────────────────────────
+
+    /**
+     * 온보딩 단계 진입 시 호출. stepIndex 0~4 (Nickname=0, Gender=1, Age=2, Mbti=3, StyleSelect=4).
+     * 캐릭터 선택 완료 단계(4)는 [trackCharacterSelected]로 character_id를 포함해 별도 호출.
+     */
+    fun trackStep(stepIndex: Int) {
+        analyticsRepository.track(
+            scope = viewModelScope,
+            eventType = AnalyticsEvent.ONBOARDING_STEP,
+            payload = mapOf("step_index" to stepIndex),
+        )
+    }
+
+    /**
+     * 온보딩 캐릭터 선택 완료 시 호출 (stepIndex=4).
+     * character_id(=mbti 코드)와 step_index를 payload에 포함한다.
+     */
+    fun trackCharacterSelected(character: PresetCharacter) {
+        analyticsRepository.track(
+            scope = viewModelScope,
+            eventType = AnalyticsEvent.ONBOARDING_STEP,
+            characterId = character.mbti,
+            payload = mapOf(
+                "step_index" to 4,
+                "character_id" to character.mbti,
+            ),
+        )
     }
 
     fun saveOnboarding(onComplete: () -> Unit) {

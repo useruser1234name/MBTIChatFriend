@@ -346,11 +346,11 @@ class ABTestManager:
                         MAX(metric_value)   AS max_val
                     FROM ab_test_results
                     WHERE experiment_id = %s
-                      AND created_at >= NOW() - INTERVAL '%s days'
+                      AND created_at >= NOW() - make_interval(days => %s)
                     GROUP BY variant, metric_name
                     ORDER BY variant, metric_name
                     """,
-                    (experiment_id, days),
+                    (experiment_id, int(days)),
                 )
 
                 variants: dict = {}

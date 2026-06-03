@@ -36,9 +36,10 @@ DB_POOL_MIN_SIZE = int(os.getenv("DB_POOL_MIN_SIZE", "5"))
 DB_POOL_MAX_SIZE = int(os.getenv("DB_POOL_MAX_SIZE", "20"))
 
 # LLM model settings
-LLM_MODEL_COMPLEX = os.getenv("LLM_MODEL_COMPLEX", "gpt-4o")
-LLM_MODEL_SIMPLE = os.getenv("LLM_MODEL_SIMPLE", "gpt-4o-mini")
-LLM_MODEL_BASE = os.getenv("LLM_MODEL_BASE", "gpt-4o")
+# 프로젝트 컨벤션: gpt-4.1 / gpt-4.1-mini만 사용 (gpt-4o 금지 — CLAUDE.md)
+LLM_MODEL_COMPLEX = os.getenv("LLM_MODEL_COMPLEX", "gpt-4.1")
+LLM_MODEL_SIMPLE = os.getenv("LLM_MODEL_SIMPLE", "gpt-4.1-mini")
+LLM_MODEL_BASE = os.getenv("LLM_MODEL_BASE", "gpt-4.1")
 
 # W2-6: 사용자당 일일 토큰 상한 (PM-B 손민준 + ARCH-B 황인호 설계)
 # 기본값 50,000 토큰 = GPT-4o-mini 기준 약 1만 단어 교환
@@ -51,3 +52,16 @@ SESSION_LIMIT_MINOR_MINUTES = int(os.getenv("SESSION_LIMIT_MINOR_MINUTES", "60")
 SESSION_CONSECUTIVE_DAYS_THRESHOLD = int(os.getenv("SESSION_CONSECUTIVE_DAYS_THRESHOLD", "7"))
 
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "768"))
+
+# ── Google Play 결제 검증 (billing) ──────────────────────────────
+# 서버측 영수증 검증 설정. 미구성 시 production에서는 프리미엄 부여를 거부한다.
+GOOGLE_PLAY_PACKAGE_NAME = os.getenv("GOOGLE_PLAY_PACKAGE_NAME", "")
+# 서비스 계정 JSON 파일 경로 (Google Play Developer API 호출용)
+GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", "")
+# RTDN(Pub/Sub push) OIDC 토큰 검증용 audience. 미설정 시 production에서 webhook 거부.
+PLAY_RTDN_AUDIENCE = os.getenv("PLAY_RTDN_AUDIENCE", "")
+# 결제 검증 미구성 상태에서 개발 편의를 위해 mock 허용 여부 (production 무시)
+BILLING_ALLOW_MOCK = os.getenv("BILLING_ALLOW_MOCK", "true").lower() == "true"
+
+# 내부/배치/관리자 엔드포인트 보호용 토큰 (스케줄러·크론이 호출 시 헤더로 전달)
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
