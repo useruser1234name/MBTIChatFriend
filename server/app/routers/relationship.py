@@ -1,8 +1,9 @@
-"""관계 히스토리 & 기억 앨범 엔드포인트"""
+"""관계 히스토리 & 기억 앨범 & 호감도 미러링 엔드포인트"""
 
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -11,6 +12,7 @@ from ..models import (
     MemoryMomentRequest,
     RelationshipSummaryResponse,
 )
+from ..postgres_async import get_async_db
 from ..relationship_history import (
     get_relationship_summary,
     save_memory_moment,
@@ -20,6 +22,23 @@ from ..relationship_history import (
 limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/api/v1", tags=["relationship"])
+
+
+# ── 호감도 미러링 스키마 ──────────────────────────────────────────────
+
+class AffinitySyncRequest(BaseModel):
+    """클라이언트 → 서버 호감도 동기화 요청."""
+    room_id: str = Field(..., min_length=1)
+    character_id: str = Field(..., min_length=1)
+    score: int = Field(..., ge=0, le=100)
+    level: int = Field(..., ge=1, le=5)
+
+
+class AffinityResponse(BaseModel):
+    room_id: str
+    character_id: str
+    score: int
+    level: int
 
 
 @router.get(
@@ -73,6 +92,68 @@ async def save_relationship_memory(
         user_note=req.user_note,
     )
     return result
+
+
+@router.post("/affinity/sync", response_model=AffinityResponse)
+@limiter.limit("60/minute")
+async def sync_affinity(
+    request: Request,
+    req: AffinitySyncRequest,
+    user: Optional[dict] = Depends(verify_firebase_token),
+    db=Depends(get_async_db),
+):
+    """클라이언트 호감도 점수를 서버에 동기화 (미러링).
+
+    room_id 소유자 검증: room_id는 '{uid}:...' 형식이어야 한다.
+    재설치 후 복구 및 서버 권위 데이터 확보용.
+    """
+    if user:
+        uid = user.get("uid", "")
+        if uid and not req.room_id.startswith(uid):
+            raise HTTPException(status_code=403, detail="본인의 room_id만 동기화할 수 있습니다.")
+
+    await db.execute(
+        """
+        INSERT INTO affinity_scores (room_id, character_id, score, level, updated_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (room_id) DO UPDATE
+        SET character_id = $2, score = $3, level = $4, updated_at = NOW()
+        """,
+        req.room_id,
+        req.character_id,
+        req.score,
+        req.level,
+    )
+    return AffinityResponse(
+        room_id=req.room_id,
+        character_id=req.character_id,
+        score=req.score,
+        level=req.level,
+    )
+
+
+@router.get("/affinity/{room_id}", response_model=AffinityResponse)
+async def get_affinity(
+    room_id: str,
+    user: Optional[dict] = Depends(verify_firebase_token),
+    db=Depends(get_async_db),
+):
+    """서버에 저장된 호감도 점수 조회 (재설치 복구용).
+
+    room_id 소유자 검증 적용.
+    """
+    if user:
+        uid = user.get("uid", "")
+        if uid and not room_id.startswith(uid):
+            raise HTTPException(status_code=403, detail="본인의 room_id만 조회할 수 있습니다.")
+
+    row = await db.fetchrow(
+        "SELECT room_id, character_id, score, level FROM affinity_scores WHERE room_id = $1",
+        room_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="호감도 데이터가 없습니다.")
+    return AffinityResponse(**row)
 
 
 @router.get("/relationship/{room_id}/album")
