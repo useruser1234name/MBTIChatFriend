@@ -28,6 +28,7 @@ from .finetune_service import get_model_for_character
 from .memory_service import summarize_conversation, extract_facts, extract_episodes, build_memory_context
 from .quality_service import check_diversity, quick_score, score_response_async
 from .metrics_service import record_event
+from .background_tasks import create_tracked_task
 
 logger = logging.getLogger(__name__)
 
@@ -518,6 +519,45 @@ def _filter_relevant_memories(
     return [mem for _, mem in scored[:top_k]]
 
 
+async def _background_memory_extraction(
+    character_name: str,
+    nickname: str,
+    conversation_history: List[HistoryMessage],
+    character_id: str,
+    room_id: str,
+) -> None:
+    """백그라운드 메모리 추출 (사용자 응답 블로킹 방지).
+
+    10턴마다 호출되어 대화 요약·팩트·에피소드를 갱신한다.
+    (과거 extract_memories는 memory_service 리팩토링으로 제거되어 호출하지 않는다.)
+    """
+    try:
+        await summarize_conversation(
+            character_name,
+            nickname,
+            conversation_history,
+            room_id=room_id,
+            character_id=character_id,
+        )
+        await extract_facts(
+            character_name,
+            nickname,
+            conversation_history,
+            room_id=room_id,
+            character_id=character_id,
+        )
+        await extract_episodes(
+            character_name,
+            nickname,
+            conversation_history,
+            character_id,
+            room_id,
+        )
+        logger.info(f"백그라운드 메모리 추출 완료: {character_name}")
+    except Exception as e:
+        logger.warning(f"백그라운드 메모리 추출 실패: {e}")
+
+
 async def generate_reply(
     message: str,
     mbti: str,
@@ -697,7 +737,8 @@ async def generate_reply(
         # 모델 선택 (Phase 5: 복잡도 기반 라우팅 + A/B 테스트 overlay)
         finetuned_model = get_model_for_character(character_id) if character_id else None
         _ab_variant: Optional[str] = None  # 기록용
-        if finetuned_model and finetuned_model != "gpt-4o":
+        # finetuned 감지: base 모델(gpt-4o, gpt-4.1)을 제외해야 복잡도 라우팅/AB가 동작 (CLAUDE.md)
+        if finetuned_model and finetuned_model not in ("gpt-4o", "gpt-4.1"):
             model_id = finetuned_model  # 파인튜닝 모델 우선
         else:
             try:
@@ -726,8 +767,10 @@ async def generate_reply(
                 model_id = LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE
 
         # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
+        # _resolve_model은 async (vLLM 헬스체크 await) — 반드시 await 필요.
+        # await 누락 시 coroutine 언패킹 TypeError → 외부 except가 삼켜 전 응답이 폴백됨.
         from .routers.chat import _resolve_model as _resolve_lora
-        _resolved_model_id, _lora_base_url = _resolve_lora(model_id, _ab_variant or "")
+        _resolved_model_id, _lora_base_url = await _resolve_lora(model_id, _ab_variant or "")
         if _lora_base_url and TOGETHER_API_KEY:
             _active_client = AsyncOpenAI(
                 api_key=TOGETHER_API_KEY,
@@ -852,12 +895,15 @@ async def generate_reply(
         # H-3: 비용 메트릭 백그라운드 기록
         usage = getattr(response, "usage", None)
         if usage:
+            _prompt_tokens_details = getattr(usage, "prompt_tokens_details", None)
+            _cached_tokens = getattr(_prompt_tokens_details, "cached_tokens", 0) or 0
             asyncio.create_task(_record_usage(
                 room_id="",  # main.py에서 room_id 주입 불가, chat_service 레벨에서는 빈값
                 character_id=character_id,
                 model_id=model_id,
                 prompt_tokens=getattr(usage, "prompt_tokens", 0),
                 completion_tokens=getattr(usage, "completion_tokens", 0),
+                cached_tokens=_cached_tokens,
             ))
 
         # A/B 테스트 결과 기록 (백그라운드)
@@ -923,6 +969,7 @@ async def _record_usage(
     model_id: str,
     prompt_tokens: int,
     completion_tokens: int,
+    cached_tokens: int = 0,
 ) -> None:
     """OpenAI API 사용량 비동기 기록 (H-3)."""
     try:
@@ -935,6 +982,7 @@ async def _record_usage(
                 model_id=model_id,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                cached_tokens=cached_tokens,
             )
     except Exception as e:
         logger.warning(f"API 사용량 기록 실패: {e}")

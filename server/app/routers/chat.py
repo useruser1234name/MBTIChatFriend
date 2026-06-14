@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from ..auth_middleware import verify_firebase_token
 from ..chat_service import generate_reply, generate_night_diary, stream_lora_response, AFFINITY_LEVEL_THRESHOLDS
-from ..config import DAILY_TOKEN_LIMIT, LLM_MODEL_SIMPLE, MAX_TOKENS, OPENAI_API_KEY, TOGETHER_API_KEY, VLLM_BASE_URL
+from ..config import DAILY_TOKEN_LIMIT, LLM_MODEL_COMPLEX, LLM_MODEL_SIMPLE, MAX_TOKENS, OPENAI_API_KEY, TOGETHER_API_KEY, VLLM_BASE_URL
 from ..content_filter import (
     check_content,
     classify_crisis_type,
@@ -110,12 +110,14 @@ def _merge_memories(base: list[MemoryItem], extra: list[MemoryItem]) -> list[Mem
 def _select_model(crisis_result: dict) -> str:
     """위기 감지 결과에 따라 GPT 모델을 동적으로 선택한다.
 
-    tier1 또는 tier2 위기 상황이면 gpt-4o, 그 외에는 gpt-4o-mini를 사용한다.
+    tier1/tier2 위기 상황이면 고성능 모델(LLM_MODEL_COMPLEX), 그 외에는
+    경량 모델(LLM_MODEL_SIMPLE)을 사용한다.
+    프로젝트 컨벤션: gpt-4.1 / gpt-4.1-mini만 사용 (gpt-4o 금지 — CLAUDE.md).
     """
     level = crisis_result.get("level", "none")
     if level in ("tier1", "tier2"):
-        return "gpt-4o"
-    return "gpt-4o-mini"
+        return LLM_MODEL_COMPLEX
+    return LLM_MODEL_SIMPLE
 
 
 import os as _os
@@ -310,10 +312,15 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
             except Exception as _e:
                 logger.warning("affinity_level_up 이벤트 태스크 생성 실패: %s", _e)
 
+    # scheduler D+3/D+5 리텐션 알림을 위해 users/messages 테이블에 데이터 적재.
+    # fire-and-forget: DB 미연결 환경에서도 메인 응답을 블로킹하지 않는다.
+    _uid = (user or {}).get("uid", "") if user else ""
+
     record_event(
         event_type="chat_turn",
         room_id=room_id,
         character_id=effective_character_id,
+        user_id=_uid,
         payload={
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "turn_count": state.turn_count,
@@ -324,10 +331,6 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
             "client_local_hour": req.client_local_hour,
         },
     )
-
-    # scheduler D+3/D+5 리텐션 알림을 위해 users/messages 테이블에 데이터 적재.
-    # fire-and-forget: DB 미연결 환경에서도 메인 응답을 블로킹하지 않는다.
-    _uid = (user or {}).get("uid", "") if user else ""
     _character_mbti = (req.mbti or "").upper()
     _user_message = req.message or ""
     _assistant_text = replies[0].text if replies else ""
@@ -635,7 +638,7 @@ async def stream_message(
             "data": done_data
         }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(event_generator(), ping=15)
 
 
 # === 메모리 엔드포인트 ===
