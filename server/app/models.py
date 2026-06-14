@@ -191,6 +191,13 @@ class DeleteConversationResponse(BaseModel):
     cleanup_warnings: List[str] = Field(default_factory=list)
 
 
+class AccountDeleteResponse(BaseModel):
+    """계정 완전삭제 응답 (S-6)."""
+    status: str = "deleted"
+    uid: str = ""
+    message: str = "계정이 삭제되었습니다."
+
+
 class SessionStartRequest(BaseModel):
     character_id: str = Field(..., min_length=1)
     current_affinity_score: int = Field(..., ge=0, le=100)
