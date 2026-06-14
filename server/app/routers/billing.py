@@ -2,12 +2,16 @@ import base64
 import json as _json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from ..auth_middleware import require_auth_always
 from ..play_billing import verify_rtdn_token, verify_subscription_purchase
 from ..postgres_async import get_async_db
+
+limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
 
@@ -24,7 +28,9 @@ class RTDNMessage(BaseModel):
 
 
 @router.post("/rtdn-webhook")
+@limiter.limit("30/minute")
 async def rtdn_webhook(
+    request: Request,
     body: RTDNMessage,
     authorization: Optional[str] = Header(default=None),
 ):
@@ -88,7 +94,9 @@ async def rtdn_webhook(
 
 
 @router.post("/verify-purchase")
+@limiter.limit("10/minute")
 async def verify_purchase(
+    request: Request,
     req: PurchaseVerifyRequest,
     user=Depends(require_auth_always),
 ):
