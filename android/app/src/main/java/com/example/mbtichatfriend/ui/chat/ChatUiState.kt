@@ -1,14 +1,13 @@
 package com.example.mbtichatfriend.ui.chat
 
 import com.example.mbtichatfriend.data.local.CharacterEntity
+import com.example.mbtichatfriend.model.CharacterEmotion
 import com.example.mbtichatfriend.model.ChatMessage
 
 /**
- * MVI 아키텍처 1단계 — ChatViewModel 단일 UiState.
- * 9차 스프린트 (ARCH-B 황인호 + ARCH-C 오세진).
- *
- * 기존 복수 StateFlow → 단일 ChatUiState.Success로 통합.
- * ChatScreen에서 when(uiState) 분기로 렌더링.
+ * MVI 아키텍처 2단계 — ChatViewModel 단일 UiState.
+ * 스프린트 2 (A-4): isTyping/currentEmotion/errorMessage/levelUpEvent/levelDownEvent
+ * 기존 mutableStateOf 병렬 상태를 Success 필드로 흡수.
  *
  * 실제 타입 기준:
  * - messages: List<ChatMessage> (MessageEntity 아님, ChatRepository에서 매핑된 모델)
@@ -29,6 +28,10 @@ sealed class ChatUiState {
         val affinityLevel: Int = 1,
         val error: String? = null,
         val isOnline: Boolean = true,
+        // A-4: 흡수된 mutableStateOf 필드
+        val currentEmotion: CharacterEmotion = CharacterEmotion.NEUTRAL,
+        val levelUpEvent: Int? = null,
+        val levelDownEvent: Int? = null,
     ) : ChatUiState()
 
     /** 치명적 오류 상태 */

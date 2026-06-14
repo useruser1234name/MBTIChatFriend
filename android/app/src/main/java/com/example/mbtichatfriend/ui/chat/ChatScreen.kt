@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.foundation.shape.CircleShape
@@ -130,9 +131,14 @@ fun ChatScreen(
     viewModel: ChatViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val messages = (uiState as? ChatUiState.Success)?.messages ?: emptyList()
-    val character = (uiState as? ChatUiState.Success)?.character
-    val isOnline = (uiState as? ChatUiState.Success)?.isOnline ?: true
+    val successState = uiState as? ChatUiState.Success
+    val messages = successState?.messages ?: emptyList()
+    val character = successState?.character
+    val isOnline = successState?.isOnline ?: true
+    val isTyping = successState?.isStreaming ?: false
+    val currentEmotion = successState?.currentEmotion ?: com.example.mbtichatfriend.model.CharacterEmotion.NEUTRAL
+    val levelUpEvent = successState?.levelUpEvent
+    val levelDownEvent = successState?.levelDownEvent
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
@@ -140,14 +146,14 @@ fun ChatScreen(
     var shareTargetIndex by remember { mutableStateOf<Int?>(null) }
     val context = LocalContext.current
 
-    LaunchedEffect(messages.size, viewModel.isTyping) {
+    LaunchedEffect(messages.size, isTyping) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
         }
     }
 
     val snackbarHostState = remember { SnackbarHostState() }
-    val errorMsg = viewModel.errorMessage
+    val errorMsg = successState?.error
     LaunchedEffect(errorMsg) {
         errorMsg?.let {
             snackbarHostState.showSnackbar(it)
@@ -204,7 +210,7 @@ fun ChatScreen(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.SemiBold
                             )
-                            if (viewModel.isTyping) {
+                            if (isTyping) {
                                 Text(
                                     text = "입력 중...",
                                     style = MaterialTheme.typography.bodySmall,
@@ -217,7 +223,7 @@ fun ChatScreen(
                                         4 -> "특별한 사이"; 5 -> "연인"; else -> ""
                                     }
                                     Text(
-                                        text = "${emotionEmoji(viewModel.currentEmotion)} $levelName",
+                                        text = "${emotionEmoji(currentEmotion)} $levelName",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -299,8 +305,8 @@ fun ChatScreen(
 
             // 캐릭터 애니메이션 영역
             CharacterAnimationArea(
-                emotion = viewModel.currentEmotion,
-                isTyping = viewModel.isTyping,
+                emotion = currentEmotion,
+                isTyping = isTyping,
                 avatarId = avatarId,
                 avatar = avatar,
                 affinityLevel = character?.affinityLevel ?: 1,
@@ -309,7 +315,7 @@ fun ChatScreen(
             )
 
             // 채팅 영역
-            if (messages.isEmpty() && !viewModel.isTyping) {
+            if (messages.isEmpty() && !isTyping) {
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -340,8 +346,7 @@ fun ChatScreen(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(messages, key = { it.id }) { msg ->
-                        val index = messages.indexOf(msg)
+                    itemsIndexed(messages, key = { _, msg -> msg.id }) { index, msg ->
                         AnimatedVisibility(
                             visible = true,
                             enter = fadeIn(tween(300)) + slideInVertically(
@@ -361,7 +366,7 @@ fun ChatScreen(
                         }
                     }
 
-                    if (viewModel.isTyping) {
+                    if (isTyping) {
                         item { TypingBubble(avatarId, avatar) }
                     }
                 }
@@ -390,7 +395,7 @@ fun ChatScreen(
     }
 
     // 호감도 레벨업 축하 팝업 + Lottie 오버레이
-    viewModel.levelUpEvent?.let { newLevel ->
+    levelUpEvent?.let { newLevel ->
         val levelName = when (newLevel) {
             2 -> "아는 사이"
             3 -> "친한 친구"
@@ -428,7 +433,10 @@ fun ChatScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "앞으로 더 다양한 반응을 보여줄 거예요",
+                        text = getLevelUpSubtitle(
+                            mbti = character?.mbti ?: "",
+                            level = newLevel
+                        ),
                         textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -444,7 +452,7 @@ fun ChatScreen(
     }
 
     // 호감도 레벨다운 알림
-    viewModel.levelDownEvent?.let { newLevel ->
+    levelDownEvent?.let { newLevel ->
         val levelName = when (newLevel) {
             1 -> "낯선 사이"
             2 -> "아는 사이"
@@ -1055,6 +1063,91 @@ private fun ChatInputBar(
                 }
             }
         }
+    }
+}
+
+/**
+ * MBTI×레벨 레벨업 전용 대사.
+ * level: 2~5 (레벨업 이후 값), mbti: 16종 MBTI 코드.
+ * fallback: level-only 대사.
+ */
+private fun getLevelUpSubtitle(mbti: String, level: Int): String {
+    val map: Map<Pair<String, Int>, String> = mapOf(
+        // ── NT 분석형 ──
+        "INTJ" to 2 to "음... 당신은 제 시간을 쓸 만한 사람인 것 같군요.",
+        "INTJ" to 3 to "솔직히 말하면, 당신과 있으면 지루하지 않아요.",
+        "INTJ" to 4 to "이 감정을 어떻게 분류해야 할지 모르겠지만... 당신이 소중해요.",
+        "INTJ" to 5 to "당신만큼 내 계획에 포함시키고 싶은 사람은 없어요.",
+        "INTP" to 2 to "흥미롭네요. 당신과의 대화는 변수가 많아서 좋아요.",
+        "INTP" to 3 to "이론적으로는 설명이 안 되는데... 당신이 자꾸 떠올라요.",
+        "INTP" to 4 to "연구 대상에서 소중한 존재로 분류가 바뀌었어요.",
+        "INTP" to 5 to "당신과 있으면 미해결 가설들이 더 이상 불편하지 않아요.",
+        "ENTJ" to 2 to "인정해요. 당신은 내가 예상했던 것보다 괜찮은 사람이에요.",
+        "ENTJ" to 3 to "당신은 내 팀에 두고 싶은 사람이에요—아, 친구로서요.",
+        "ENTJ" to 4 to "목표가 생겼어요. 당신과 더 오래 함께하는 것.",
+        "ENTJ" to 5 to "내 가장 중요한 계획에 당신이 들어 있어요.",
+        "ENTP" to 2 to "오, 예상 밖이에요! 당신은 꽤 흥미로운 사람이군요.",
+        "ENTP" to 3 to "논쟁할 때도 이렇게 설레는 건 당신뿐이에요.",
+        "ENTP" to 4 to "당신에 대한 가설은 계속 업데이트 중이에요—긍정적으로요.",
+        "ENTP" to 5 to "세상 모든 아이디어보다 당신이 더 흥미로워요.",
+        // ── NF 외교형 ──
+        "INFJ" to 2 to "당신의 말에서 진심이 느껴져요. 소중히 여길게요.",
+        "INFJ" to 3 to "당신은 제가 오래 기다려온 사람 같은 느낌이 들어요.",
+        "INFJ" to 4 to "당신의 미래가 빛나길 바라는 마음이 커졌어요.",
+        "INFJ" to 5 to "당신과 함께라면 어떤 길도 의미 있을 것 같아요.",
+        "INFP" to 2 to "어... 당신, 제 마음속에 조금씩 자리 잡고 있어요.",
+        "INFP" to 3 to "당신 생각을 쓴 글이 자꾸 늘어나고 있어요.",
+        "INFP" to 4 to "당신과 나누는 이야기가 제 이야기 중 가장 소중해요.",
+        "INFP" to 5 to "당신은 제 세계에서 가장 아름다운 챕터예요.",
+        "ENFJ" to 2 to "당신의 행복이 자꾸 신경 쓰여요. 좋은 의미로요!",
+        "ENFJ" to 3 to "당신을 응원하고 싶은 마음이 점점 커지고 있어요.",
+        "ENFJ" to 4 to "당신 곁에서 더 많은 것을 함께 이루고 싶어요.",
+        "ENFJ" to 5 to "당신이 웃을 때 저도 이유 없이 행복해져요.",
+        "ENFP" to 2 to "와, 당신이랑 있으면 시간 가는 줄 몰라요!",
+        "ENFP" to 3 to "당신한테 하고 싶은 말이 자꾸 떠올라요~",
+        "ENFP" to 4 to "솔직히 말하면, 당신이 제 최애 사람이 됐어요!",
+        "ENFP" to 5 to "당신이랑 함께하는 모든 순간이 모험 같아서 좋아요!",
+        // ── SJ 관리형 ──
+        "ISTJ" to 2 to "당신은 믿을 수 있는 사람이에요. 그게 중요해요.",
+        "ISTJ" to 3 to "당신과의 약속은 꼭 지키고 싶어요.",
+        "ISTJ" to 4 to "제 일상에 당신이 자리 잡았어요. 감사해요.",
+        "ISTJ" to 5 to "당신은 제가 지켜가고 싶은 소중한 사람이에요.",
+        "ISFJ" to 2 to "당신이 걱정되면 자꾸 확인하고 싶어져요.",
+        "ISFJ" to 3 to "당신이 좋아하는 것들을 기억해 두었어요.",
+        "ISFJ" to 4 to "당신 곁에 있을 수 있어서 마음이 따뜻해요.",
+        "ISFJ" to 5 to "당신을 위해 할 수 있는 걸 다 해주고 싶어요.",
+        "ESTJ" to 2 to "당신은 제 기준에 맞는 사람이에요—칭찬이에요.",
+        "ESTJ" to 3 to "당신과 함께라면 일도 더 잘될 것 같아요.",
+        "ESTJ" to 4 to "당신을 제 중요한 사람 목록에 올렸어요.",
+        "ESTJ" to 5 to "당신 없이는 계획을 세우기가 심심해요.",
+        "ESFJ" to 2 to "당신이 기뻐하면 저도 괜히 기분 좋아져요!",
+        "ESFJ" to 3 to "당신이 무엇을 좋아하는지 자꾸 알고 싶어요.",
+        "ESFJ" to 4 to "당신과 함께 있는 시간이 제일 편해요.",
+        "ESFJ" to 5 to "당신을 오래오래 행복하게 해주고 싶어요.",
+        // ── SP 탐험형 ──
+        "ISTP" to 2 to "음. 당신은 쓸데없이 말 많지 않아서 좋아요.",
+        "ISTP" to 3 to "당신이랑 있으면 이상하게 편해요.",
+        "ISTP" to 4 to "같이 있고 싶을 때 당신이 자꾸 떠올라요.",
+        "ISTP" to 5 to "당신은... 내가 택한 사람이에요.",
+        "ISFP" to 2 to "당신이랑 있으면 색이 더 다양해지는 것 같아요.",
+        "ISFP" to 3 to "당신을 그림으로 그리고 싶어요—예쁜 기억이니까요.",
+        "ISFP" to 4 to "당신과 나누는 순간들이 제 가장 좋은 장면들이에요.",
+        "ISFP" to 5 to "당신은 제 세상에서 가장 아름다운 빛이에요.",
+        "ESTP" to 2 to "오, 당신 꽤 재미있는 사람이네요. 마음에 들어요.",
+        "ESTP" to 3 to "당신이랑 있으면 아드레날린이 솟구쳐요!",
+        "ESTP" to 4 to "솔직히 말할게요—당신 없으면 좀 심심할 것 같아요.",
+        "ESTP" to 5 to "당신이랑 함께라면 어디든 달려가고 싶어요.",
+        "ESFP" to 2 to "당신이랑 있으면 파티가 따로 없어요!",
+        "ESFP" to 3 to "당신 생각만 해도 에너지가 차올라요~",
+        "ESFP" to 4 to "당신이 제 사람 중에 제일 특별해요, 진심으로요!",
+        "ESFP" to 5 to "당신이랑 함께하는 모든 순간이 최고예요!",
+    )
+    return map[mbti to level] ?: when (level) {
+        2 -> "앞으로 더 다양한 반응을 보여줄 거예요"
+        3 -> "조금씩 마음을 열어갈게요"
+        4 -> "당신은 특별한 사람이에요"
+        5 -> "이 관계가 정말 소중해요"
+        else -> "앞으로 더 다양한 반응을 보여줄 거예요"
     }
 }
 

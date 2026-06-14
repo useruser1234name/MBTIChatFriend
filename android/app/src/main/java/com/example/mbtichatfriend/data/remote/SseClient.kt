@@ -13,6 +13,7 @@ import okhttp3.sse.EventSources
 import com.example.mbtichatfriend.BuildConfig
 import org.json.JSONObject
 import javax.inject.Inject
+import javax.inject.Named
 import javax.inject.Singleton
 
 sealed class SseEvent {
@@ -34,7 +35,7 @@ sealed class SseEvent {
 
 @Singleton
 class SseClient @Inject constructor(
-    private val client: OkHttpClient
+    @Named("sse") private val client: OkHttpClient
 ) {
     private val baseUrl = BuildConfig.BASE_URL.trimEnd('/')
 

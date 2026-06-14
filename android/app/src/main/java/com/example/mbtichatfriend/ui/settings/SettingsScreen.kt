@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.EmojiEvents
@@ -84,11 +85,15 @@ fun SettingsScreen(
     val referralDeepLink by viewModel.referralDeepLink.collectAsState()
     val referralCtaText = viewModel.referralCtaText
     val redeemState by viewModel.redeemState.collectAsState()
+    val deleteAccountState by viewModel.deleteAccountState.collectAsState()
     val context = LocalContext.current
     var showNicknameDialog by remember { mutableStateOf(false) }
     var showLogoutDialog by remember { mutableStateOf(false) }
+    var showDeleteAccountDialog by remember { mutableStateOf(false) }
+    var showDeleteAccountConfirmDialog by remember { mutableStateOf(false) }
     var inviteCodeInput by remember { mutableStateOf("") }
     var redeemSnackbarMessage by remember { mutableStateOf<String?>(null) }
+    var deleteAccountErrorMessage by remember { mutableStateOf<String?>(null) }
 
     // 리딤 결과를 스낵바로 노출 후 상태 초기화
     LaunchedEffect(redeemState) {
@@ -103,6 +108,17 @@ fun SettingsScreen(
             is SettingsViewModel.RedeemState.Error -> {
                 redeemSnackbarMessage = state.message
                 viewModel.clearRedeemState()
+            }
+            else -> Unit
+        }
+    }
+
+    // 계정 삭제 결과 처리
+    LaunchedEffect(deleteAccountState) {
+        when (val state = deleteAccountState) {
+            is SettingsViewModel.DeleteAccountState.Error -> {
+                deleteAccountErrorMessage = state.message
+                viewModel.clearDeleteAccountState()
             }
             else -> Unit
         }
@@ -480,6 +496,19 @@ fun SettingsScreen(
                 isDestructive = true
             )
 
+            // 계정 삭제 (A-8)
+            SettingsItem(
+                icon = Icons.Default.DeleteForever,
+                title = "계정 삭제",
+                subtitle = "모든 데이터가 영구 삭제됩니다",
+                onClick = {
+                    if (deleteAccountState !is SettingsViewModel.DeleteAccountState.Loading) {
+                        showDeleteAccountDialog = true
+                    }
+                },
+                isDestructive = true
+            )
+
             Spacer(Modifier.height(32.dp))
         }
     }
@@ -510,6 +539,75 @@ fun SettingsScreen(
         ) {
             Text(msg)
         }
+    }
+
+    // 계정 삭제 에러 Snackbar
+    deleteAccountErrorMessage?.let { msg ->
+        Snackbar(
+            modifier = Modifier.padding(16.dp),
+            action = {
+                TextButton(onClick = { deleteAccountErrorMessage = null }) {
+                    Text("확인")
+                }
+            }
+        ) {
+            Text(msg)
+        }
+    }
+
+    // 계정 삭제 1단계 확인 다이얼로그
+    if (showDeleteAccountDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAccountDialog = false },
+            title = { Text("계정 삭제") },
+            text = {
+                Text(
+                    "계정을 삭제하면 모든 채팅 내역, 캐릭터, 일기가 영구 삭제됩니다.\n" +
+                    "이 작업은 되돌릴 수 없습니다."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteAccountDialog = false
+                        showDeleteAccountConfirmDialog = true
+                    }
+                ) {
+                    Text("계속", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAccountDialog = false }) {
+                    Text("취소")
+                }
+            }
+        )
+    }
+
+    // 계정 삭제 2단계 최종 확인 다이얼로그
+    if (showDeleteAccountConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAccountConfirmDialog = false },
+            title = { Text("정말 삭제하시겠어요?") },
+            text = {
+                Text("'삭제' 버튼을 누르면 계정과 모든 데이터가 즉시 삭제됩니다.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteAccountConfirmDialog = false
+                        viewModel.deleteAccount(onSuccess = onLogout)
+                    }
+                ) {
+                    Text("삭제", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAccountConfirmDialog = false }) {
+                    Text("취소")
+                }
+            }
+        )
     }
 
     // 닉네임 변경 다이얼로그

@@ -26,7 +26,7 @@ class ChatFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onNewToken(token: String) {
         super.onNewToken(token)
-        Log.d(TAG, "New FCM token: $token")
+        Log.d(TAG, "New FCM token received")
         serviceScope.launch {
             prefs.updateFcmToken(token)
         }
