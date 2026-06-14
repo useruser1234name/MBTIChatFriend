@@ -1,0 +1,44 @@
+name: Android Unit Tests
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-unit-test.yml"
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-unit-test.yml"
+
+jobs:
+  unit-test:
+    name: Unit Tests (JVM)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "gradle"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x android/gradlew
+
+      - name: Run unit tests
+        run: |
+          cd android
+          ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: android/app/build/reports/tests/testDebugUnitTest/
+          retention-days: 7
