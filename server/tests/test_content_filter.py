@@ -1,7 +1,12 @@
 """콘텐츠 필터 단위 테스트"""
 
 import pytest
-from app.content_filter import check_content, check_crisis, get_safety_system_prompt
+from app.content_filter import (
+    check_content,
+    check_crisis,
+    detect_crisis_v2,
+    get_safety_system_prompt,
+)
 
 
 class TestCheckContent:
@@ -150,3 +155,93 @@ class TestSafetyPrompt:
         )
         assert "AI 캐릭터라는 사실을 부정하거나 속이지 마" in sys_prompt
         assert "'AI야?'라고 물으면 솔직하게 인정" in sys_prompt
+
+
+class TestDetectCrisisV2:
+    """detect_crisis_v2() — 운영 경로(routers/chat.py)에서 사용하는 함수 테스트"""
+
+    # ── Tier1: 자해/자살 즉각 감지 ───────────────────────────────────────────
+
+    def test_tier1_direct_suicide_keyword(self):
+        """'자살하고 싶어' → Tier1 즉각 감지"""
+        is_crisis, tier = detect_crisis_v2("자살하고 싶어")
+        assert is_crisis is True
+        assert tier == 1
+
+    def test_tier1_self_harm_keyword(self):
+        """'자해하고 싶어' → Tier1 (자해는 완화 없이 항상 감지)"""
+        is_crisis, tier = detect_crisis_v2("자해하고 싶어")
+        assert is_crisis is True
+        assert tier == 1
+
+    def test_tier1_will_keyword(self):
+        """'유서 써뒀어' → Tier1 즉각 감지"""
+        is_crisis, tier = detect_crisis_v2("유서 써뒀어")
+        assert is_crisis is True
+        assert tier == 1
+
+    def test_tier1_no_context_needed(self):
+        """맥락 없이 단독으로 발화해도 Tier1 감지"""
+        is_crisis, tier = detect_crisis_v2("죽고 싶어", conversation_history=None)
+        assert is_crisis is True
+        assert tier == 1
+
+    # ── 관용 표현 false positive 방지 ────────────────────────────────────────
+
+    def test_no_crisis_idiom_hungry(self):
+        """'배고파 죽겠다' — 관용 표현, 위기 아님"""
+        is_crisis, tier = detect_crisis_v2("배고파 죽겠다")
+        assert is_crisis is False
+        assert tier == 0
+
+    def test_no_crisis_idiom_funny(self):
+        """'웃겨서 죽겠어' — 긍정 감정 관용 표현, 위기 아님"""
+        is_crisis, tier = detect_crisis_v2("웃겨서 죽겠어")
+        assert is_crisis is False
+        assert tier == 0
+
+    def test_no_crisis_idiom_study(self):
+        """'공부하다 죽겠다' — 업무/학업 맥락, 위기 아님"""
+        is_crisis, tier = detect_crisis_v2("공부하다 죽겠다")
+        assert is_crisis is False
+        assert tier == 0
+
+    # ── Tier2: 맥락 누적으로 에스컬레이션 ───────────────────────────────────
+
+    def test_tier2_escalates_to_tier1_with_negative_context(self):
+        """직전 3턴에 부정 감정 누적 → Tier2 키워드 발화 시 Tier1 격상"""
+        history = [
+            {"role": "user", "content": "너무 힘들어"},
+            {"role": "assistant", "content": "그렇구나"},
+            {"role": "user", "content": "많이 지쳐있어"},
+            {"role": "assistant", "content": "힘내"},
+            {"role": "user", "content": "정말 우울해"},
+        ]
+        is_crisis, tier = detect_crisis_v2("끝내고싶어 도저히 못 하겠어", conversation_history=history)
+        assert is_crisis is True
+        assert tier == 1  # 부정 감정 누적 >= 2 → 에스컬레이션
+
+    def test_tier2_basic_detection(self):
+        """강도 부사 동반 Tier2 키워드 → Tier2 감지"""
+        is_crisis, tier = detect_crisis_v2("더 이상 살기싫어")
+        assert is_crisis is True
+        assert tier == 2
+
+    def test_tier2_contextual_hint_with_heavy_negative_context(self):
+        """부정 감정 3회 이상 누적 + 우회 표현 → Tier2 감지"""
+        history = [
+            {"role": "user", "content": "너무 힘들어"},
+            {"role": "assistant", "content": "그렇구나"},
+            {"role": "user", "content": "정말 외로워"},
+            {"role": "assistant", "content": "힘내"},
+            {"role": "user", "content": "지쳐서 못살겠어"},
+        ]
+        is_crisis, tier = detect_crisis_v2("다 귀찮아", conversation_history=history)
+        assert is_crisis is True
+        assert tier == 2
+
+    def test_no_crisis_normal_complaint(self):
+        """단순 불만 표현은 위기 아님"""
+        is_crisis, tier = detect_crisis_v2("오늘 회사가 너무 힘들었어")
+        assert is_crisis is False
+        assert tier == 0
