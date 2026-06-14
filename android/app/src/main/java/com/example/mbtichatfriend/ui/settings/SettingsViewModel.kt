@@ -3,6 +3,7 @@ package com.example.mbtichatfriend.ui.settings
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.mbtichatfriend.data.local.AppDatabase
 import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.ChatApi
 import com.example.mbtichatfriend.data.remote.RedeemRequest
@@ -28,6 +29,7 @@ class SettingsViewModel @Inject constructor(
     private val authRepository: AuthRepository,
     private val chatApi: ChatApi,
     private val remoteConfigManager: RemoteConfigManager,
+    private val db: AppDatabase,
 ) : ViewModel() {
 
     val nickname = prefs.nickname
@@ -179,5 +181,64 @@ class SettingsViewModel @Inject constructor(
             prefs.clearAll()
             onDone()
         }
+    }
+
+    // ── 계정 삭제 (A-8, S-6) ─────────────────────────────────────────────────
+
+    sealed interface DeleteAccountState {
+        data object Idle : DeleteAccountState
+        data object Loading : DeleteAccountState
+        data object Success : DeleteAccountState
+        data class Error(val message: String) : DeleteAccountState
+    }
+
+    private val _deleteAccountState = MutableStateFlow<DeleteAccountState>(DeleteAccountState.Idle)
+    val deleteAccountState: StateFlow<DeleteAccountState> = _deleteAccountState.asStateFlow()
+
+    /**
+     * 계정 삭제 플로우:
+     *  1. DELETE /api/v1/account 서버 호출 (S-6 구현 중)
+     *  2. 성공(2xx) 또는 서버 미구현(404/405) 시 로컬 데이터 전체 삭제
+     *  3. authRepository.signOut() + prefs.clearAll()
+     *
+     * 서버가 아직 미구현인 경우에도 로컬 삭제는 진행한다(첫 릴리즈 안전장치).
+     */
+    fun deleteAccount(onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            _deleteAccountState.value = DeleteAccountState.Loading
+            runCatching {
+                chatApi.deleteAccount()
+            }.onFailure { e ->
+                // 네트워크 오류는 중단
+                _deleteAccountState.value = DeleteAccountState.Error(
+                    e.localizedMessage ?: "계정 삭제 요청 실패"
+                )
+                return@launch
+            }.onSuccess { response ->
+                // S-6 미구현(404/405)이면 서버 삭제는 건너뛰고 로컬만 삭제
+                if (!response.isSuccessful && response.code() !in listOf(404, 405)) {
+                    _deleteAccountState.value = DeleteAccountState.Error(
+                        "서버 오류(${response.code()}). 잠시 후 다시 시도해 주세요."
+                    )
+                    return@launch
+                }
+            }
+            // Room 전체 삭제
+            runCatching {
+                db.messageDao().deleteAll()
+                db.characterDao().deleteAll()
+                db.diaryDao().deleteAll()
+                db.memoryDao().deleteAll()
+                db.feedbackDao().deleteAll()
+            }
+            authRepository.signOut()
+            prefs.clearAll()
+            _deleteAccountState.value = DeleteAccountState.Success
+            onSuccess()
+        }
+    }
+
+    fun clearDeleteAccountState() {
+        _deleteAccountState.value = DeleteAccountState.Idle
     }
 }

@@ -16,7 +16,6 @@ class FcmTokenManager @Inject constructor(
     suspend fun ensureTokenRegistered() {
         try {
             val token = FirebaseMessaging.getInstance().token.await()
-            Log.d(TAG, "FCM token: $token")
 
             val savedToken = prefs.fcmToken.first()
             if (savedToken != token) {

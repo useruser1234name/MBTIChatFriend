@@ -1,19 +1,29 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  dataExtractionRules — API 31+ (compileSdk 35) 기준 백업/이전 규칙.
+  cloud-backup  : Google Drive Auto Backup
+  device-transfer: 기기 간 데이터 이전 (ADB Backup / 새 기기 복원)
+
+  민감 데이터 exclude:
+    - Room DB (채팅 내역, 호감도, 기억)  → database 도메인
+    - DataStore Preferences (Firebase UID, auth provider, FCM 토큰 등) → file 도메인
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <!-- Room DB 본 파일 및 WAL/SHM 저널 -->
+        <exclude domain="database" path="mbti_chat_db"/>
+        <exclude domain="database" path="mbti_chat_db-shm"/>
+        <exclude domain="database" path="mbti_chat_db-wal"/>
+        <!-- DataStore Preferences -->
+        <exclude domain="file" path="datastore/user_prefs.preferences_pb"/>
     </cloud-backup>
-    <!--
+
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <!-- Room DB -->
+        <exclude domain="database" path="mbti_chat_db"/>
+        <exclude domain="database" path="mbti_chat_db-shm"/>
+        <exclude domain="database" path="mbti_chat_db-wal"/>
+        <!-- DataStore Preferences -->
+        <exclude domain="file" path="datastore/user_prefs.preferences_pb"/>
     </device-transfer>
-    -->
 </data-extraction-rules>

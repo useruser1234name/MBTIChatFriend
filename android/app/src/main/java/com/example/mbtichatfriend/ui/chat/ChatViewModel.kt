@@ -127,9 +127,9 @@ class ChatViewModel @Inject constructor(
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
     /**
-     * messages, character, isTyping, isLottieAnimating 등이 변경될 때
+     * messages, character, isTyping, currentEmotion 등이 변경될 때
      * _uiState를 ChatUiState.Success로 동기화.
-     * 기존 개별 StateFlow/mutableStateOf는 ChatScreen 점진적 마이그레이션 완료 전까지 유지.
+     * A-4: isTyping/currentEmotion/errorMessage/levelUpEvent/levelDownEvent 흡수 완료.
      */
     private fun syncUiState() {
         val currentMessages = messages.value
@@ -143,6 +143,9 @@ class ChatViewModel @Inject constructor(
             affinityLevel = currentCharacter?.affinityLevel ?: 1,
             error = errorMessage,
             isOnline = isOnline.value,
+            currentEmotion = currentEmotion,
+            levelUpEvent = levelUpEvent,
+            levelDownEvent = levelDownEvent,
         )
     }
 
@@ -195,12 +198,18 @@ class ChatViewModel @Inject constructor(
         // 기존 expressionSet 로드 또는 진행 중인 생성 작업 폴링 → ExpressionManager에 위임
         expressionManager.loadExistingExpressionSet(characterId, viewModelScope)
 
-        // AffinityManager StateFlow → Compose mutableState 동기화
+        // AffinityManager StateFlow → Compose mutableState 동기화 + uiState 반영
         viewModelScope.launch {
-            affinityManager.levelUpEvent.collect { levelUpEvent = it }
+            affinityManager.levelUpEvent.collect {
+                levelUpEvent = it
+                syncUiState()
+            }
         }
         viewModelScope.launch {
-            affinityManager.levelDownEvent.collect { levelDownEvent = it }
+            affinityManager.levelDownEvent.collect {
+                levelDownEvent = it
+                syncUiState()
+            }
         }
 
         // 레벨업 이벤트 발생 시 Lottie 애니메이션 트리거
@@ -228,6 +237,12 @@ class ChatViewModel @Inject constructor(
             if (initialMessages.isEmpty()) {
                 sendInitialGreeting()
             }
+        }
+
+        // 채팅 시작 시 서버 호감도 복구 — 실패 무시(로컬 우선)
+        // room_id는 AffinityManager가 내부에서 "{uid}:{charId}"로 구성(서버 검증과 일치)
+        viewModelScope.launch {
+            affinityManager.restoreAffinityFromServer(characterId)
         }
 
         // 네트워크 복구 시 대기 중인 메시지 전송
@@ -282,15 +297,21 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    fun dismissLevelUp() = affinityManager.dismissLevelUp()
+    fun dismissLevelUp() {
+        affinityManager.dismissLevelUp()
+        // levelUpEvent StateFlow 변경 → collect 코루틴이 syncUiState() 호출하므로 추가 불필요
+    }
 
-    fun dismissLevelDown() = affinityManager.dismissLevelDown()
+    fun dismissLevelDown() {
+        affinityManager.dismissLevelDown()
+    }
 
     // 화면이 보이는지 추적 (ChatScreen에서 설정)
     var isScreenVisible by mutableStateOf(true)
 
     fun dismissError() {
         errorMessage = null
+        syncUiState()
     }
 
     fun send(text: String) {
@@ -300,6 +321,7 @@ class ChatViewModel @Inject constructor(
         val maxLength = remoteConfig.getLong(RemoteConfigManager.KEY_MAX_MESSAGE_LENGTH).toInt()
         if (trimmed.length > maxLength) {
             errorMessage = "메시지는 ${maxLength}자 이내로 입력해주세요!"
+            syncUiState()
             return
         }
 
@@ -308,6 +330,7 @@ class ChatViewModel @Inject constructor(
             val filterResult = ContentFilter.check(trimmed)
             if (!filterResult.isSafe) {
                 errorMessage = filterResult.reason
+                syncUiState()
                 return
             }
         }
@@ -340,6 +363,7 @@ class ChatViewModel @Inject constructor(
             isTyping = true
             isTalking = true
             errorMessage = null
+            syncUiState()
 
             val ch = characterRepo.getById(characterId) ?: return@launch
             val nickname = prefs.nickname.first()
@@ -409,6 +433,7 @@ class ChatViewModel @Inject constructor(
                         CharacterEmotion.NEUTRAL
                     }
                     currentEmotion = emotion
+                    syncUiState()
                     sendMessageUseCase.saveReplyMessage(characterId, event.text, event.emotion)
                     // 화면이 안 보일 때 알림
                     if (!isScreenVisible) {
@@ -419,6 +444,7 @@ class ChatViewModel @Inject constructor(
                     handleAffinityDelta(characterId, event.affinityDelta)
                     isTyping = false
                     isTalking = false
+                    syncUiState()
                 }
                 is SseEvent.Error -> {
                     if (!sseSucceeded) {
@@ -426,6 +452,7 @@ class ChatViewModel @Inject constructor(
                     } else {
                         isTyping = false
                         isTalking = false
+                        syncUiState()
                     }
                 }
             }
@@ -434,6 +461,7 @@ class ChatViewModel @Inject constructor(
         // Flow가 완료되었는데 아직 타이핑 중이면 해제
         isTyping = false
         isTalking = false
+        syncUiState()
     }
 
     private suspend fun fallbackToRest(
@@ -461,6 +489,7 @@ class ChatViewModel @Inject constructor(
                 CharacterEmotion.NEUTRAL
             }
             currentEmotion = emotion
+            syncUiState()
             sendMessageUseCase.saveReplyMessage(characterId, reply.text, reply.emotion)
         }
 
@@ -468,6 +497,7 @@ class ChatViewModel @Inject constructor(
 
         isTyping = false
         isTalking = false
+        syncUiState()
     }
 
     fun retrySend(messageId: Long) {
@@ -494,6 +524,7 @@ class ChatViewModel @Inject constructor(
 
             try {
                 isTyping = true
+                syncUiState()
                 val result = sendMessageUseCase.sendMessageRest(
                     text = pending.text,
                     character = ch,
@@ -512,6 +543,7 @@ class ChatViewModel @Inject constructor(
                         CharacterEmotion.NEUTRAL
                     }
                     currentEmotion = emotion
+                    syncUiState()
                     sendMessageUseCase.saveReplyMessage(characterId, reply.text, reply.emotion)
                 }
 
@@ -521,6 +553,7 @@ class ChatViewModel @Inject constructor(
             } finally {
                 isTyping = false
                 isTalking = false
+                syncUiState()
             }
         }
     }

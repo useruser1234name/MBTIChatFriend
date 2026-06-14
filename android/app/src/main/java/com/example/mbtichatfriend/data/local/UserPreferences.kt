@@ -34,7 +34,6 @@ class UserPreferences @Inject constructor(
         val AUTH_PROVIDER = stringPreferencesKey("auth_provider") // "anonymous", "google", "none"
         val FCM_TOKEN = stringPreferencesKey("fcm_token")
         val FCM_TOKEN_SYNCED = booleanPreferencesKey("fcm_token_synced")
-        val OPENAI_API_KEY = stringPreferencesKey("openai_api_key")
         val OPEN_BETA_BANNER_DISMISSED = booleanPreferencesKey("open_beta_banner_dismissed")
         val DAU_10K_BANNER_DISMISSED = booleanPreferencesKey("dau_10k_milestone_shown")
         val COMMUNITY_GUIDELINE_SHOWN = booleanPreferencesKey("community_guideline_shown")
@@ -169,16 +168,6 @@ class UserPreferences @Inject constructor(
             if (userMbti.isNotEmpty()) {
                 prefs[Keys.USER_MBTI] = userMbti
             }
-        }
-    }
-
-    val openAiApiKey: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[Keys.OPENAI_API_KEY] ?: ""
-    }
-
-    suspend fun updateOpenAiApiKey(key: String) {
-        context.dataStore.edit { prefs ->
-            prefs[Keys.OPENAI_API_KEY] = key
         }
     }
 

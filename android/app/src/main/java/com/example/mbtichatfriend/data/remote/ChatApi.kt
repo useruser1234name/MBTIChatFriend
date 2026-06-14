@@ -4,6 +4,7 @@ import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
@@ -428,6 +429,19 @@ interface ChatApi {
     // ── 16종 전체 완성 메시지 (37차 스프린트) ─────────────────────────────────
     @GET("api/v1/compatibility/all-complete/{mbti}")
     suspend fun getAllCompleteMessage(@Path("mbti") mbti: String): AllCompleteResponse
+
+    // ── 계정 삭제 (S-6, 출시 게이트 A-8) ────────────────────────────────────
+    @DELETE("api/v1/account")
+    suspend fun deleteAccount(): Response<Unit>
+
+    // ── 호감도 서버 미러링 (S-7 계약 확정) ──────────────────────────────────────
+    // 서버: POST /api/v1/affinity/sync  body: {room_id, character_id, score, level}
+    @POST("api/v1/affinity/sync")
+    suspend fun syncAffinity(@Body req: AffinitySyncRequest): Response<AffinityResponse>
+
+    // 서버: GET /api/v1/affinity/{room_id}  (path param, 재설치 복구용)
+    @GET("api/v1/affinity/{room_id}")
+    suspend fun restoreAffinity(@Path("room_id") roomId: String): Response<AffinityResponse>
 }
 
 // ── 레퍼럴 모델 ──────────────────────────────────────────────────────────────
@@ -653,4 +667,25 @@ data class SummerMessageResponse(
 data class AllCompleteResponse(
     val mbti: String,
     val message: String
+)
+
+// ── 호감도 서버 미러링 모델 (S-7 계약 확정) ──────────────────────────────────
+// 서버 스키마: POST /api/v1/affinity/sync (body: room_id, character_id, score, level)
+//              GET  /api/v1/affinity/{room_id} (path param)
+// AffinityResponse: {room_id, character_id, score, level}
+
+@JsonClass(generateAdapter = false)
+data class AffinitySyncRequest(
+    @Json(name = "room_id") val roomId: String,
+    @Json(name = "character_id") val characterId: String,
+    @Json(name = "score") val score: Int,
+    @Json(name = "level") val level: Int,
+)
+
+@JsonClass(generateAdapter = false)
+data class AffinityResponse(
+    @Json(name = "room_id") val roomId: String = "",
+    @Json(name = "character_id") val characterId: String = "",
+    @Json(name = "score") val score: Int = 0,
+    @Json(name = "level") val level: Int = 1,
 )

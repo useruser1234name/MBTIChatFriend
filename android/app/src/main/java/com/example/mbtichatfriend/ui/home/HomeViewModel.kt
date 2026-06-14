@@ -59,48 +59,40 @@ class HomeViewModel @Inject constructor(
     private val _uiState = MutableStateFlow<HomeUiState>(HomeUiState.Loading)
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
+    /**
+     * A-7: buildList{}로 활성 배너 목록 구성.
+     * 신규 배너 추가 = BannerType 1줄 + if 조건 1줄.
+     */
     private fun syncHomeUiState() {
         viewModelScope.launch {
             try {
                 _uiState.value = HomeUiState.Loading
-                val openBeta = showOpenBetaBanner()
-                val dau10k = showDau10kBanner()
-                val newYearCard = showNewYearCard()
-                val whiteDay = showWhiteDayBanner()
-                val gratitudeCard = showGratitudeCardBanner()
-                val lora8Banner = showLora8Banner()
-                val gratitudeTeaser = showGratitudeTeaserBanner()
-                val lora9Banner = showLora9Banner()
-                val childrenDay = showChildrenDayCard()
-                val esfp10Banner = showEsfp10Banner()
-                val entj11Banner = showEntj11Banner()
-                val istj12Banner = showIstj12Banner()
-                val estp13Banner = showEstp13Banner()
-                val summerCard = showSummerCard()
-                val enfj14Banner = showEnfj14Banner()
-                val allMbtiBanner = showAllMbtiBanner()
+                // 조건 평가 (suspend 함수 포함)
+                val activeBanners: List<BannerType> = buildList {
+                    if (showOpenBetaBanner()) add(BannerType.OPEN_BETA)
+                    if (showDau10kBanner()) add(BannerType.DAU_10K)
+                    if (showNewYearCard()) add(BannerType.NEW_YEAR_CARD)
+                    if (showWhiteDayBanner()) add(BannerType.WHITE_DAY)
+                    if (showGratitudeCardBanner()) add(BannerType.GRATITUDE_CARD)
+                    if (showLora8Banner()) add(BannerType.LORA_8)
+                    if (showGratitudeTeaserBanner()) add(BannerType.GRATITUDE_TEASER)
+                    if (showLora9Banner()) add(BannerType.LORA_9)
+                    if (showChildrenDayCard()) add(BannerType.CHILDREN_DAY)
+                    if (showEsfp10Banner()) add(BannerType.ESFP_10)
+                    if (showEntj11Banner()) add(BannerType.ENTJ_11)
+                    if (showIstj12Banner()) add(BannerType.ISTJ_12)
+                    if (showEstp13Banner()) add(BannerType.ESTP_13)
+                    if (showSummerCard()) add(BannerType.SUMMER_CARD)
+                    if (showEnfj14Banner()) add(BannerType.ENFJ_14)
+                    if (showAllMbtiBanner()) add(BannerType.ALL_MBTI)
+                }
                 combine(characters, _lastMessages, _trendingPosts, _eventTrendingPosts) { chars, _, trending, eventTrending ->
                     HomeUiState.Success(
                         characters = chars,
                         selectedCharacter = chars.firstOrNull(),
-                        openBetaBanner = openBeta,
-                        dau10kBanner = dau10k,
                         trendingPosts = trending,
-                        showNewYearCard = newYearCard,
-                        showWhiteDay = whiteDay,
-                        showGratitudeCard = gratitudeCard,
-                        showLora8Banner = lora8Banner,
-                        showGratitudeTeaser = gratitudeTeaser,
-                        showLora9Banner = lora9Banner,
                         eventTrendingPosts = eventTrending,
-                        showChildrenDay = childrenDay,
-                        showEsfp10Banner = esfp10Banner,
-                        showEntj11Banner = entj11Banner,
-                        showIstj12Banner = istj12Banner,
-                        showEstp13Banner = estp13Banner,
-                        showSummerCard = summerCard,
-                        showEnfj14Banner = enfj14Banner,
-                        showAllMbtiBanner = allMbtiBanner,
+                        activeBanners = activeBanners,
                     )
                 }.collect { state ->
                     _uiState.value = state
@@ -181,7 +173,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setLora10BannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showEsfp10Banner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.ESFP_10) else state
             }
         }
     }
@@ -196,7 +188,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setLora11BannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showEntj11Banner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.ENTJ_11) else state
             }
         }
     }
@@ -211,7 +203,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setLora12BannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showIstj12Banner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.ISTJ_12) else state
             }
         }
     }
@@ -231,7 +223,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setLora13BannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showEstp13Banner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.ESTP_13) else state
             }
         }
     }
@@ -246,7 +238,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setLora14BannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showEnfj14Banner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.ENFJ_14) else state
             }
         }
     }
@@ -261,7 +253,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setAllMbtiBannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showAllMbtiBanner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.ALL_MBTI) else state
             }
         }
     }
@@ -270,7 +262,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setOpenBetaBannerDismissed(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(openBetaBanner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.OPEN_BETA) else state
             }
         }
     }
@@ -279,7 +271,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setDau10kBannerDismissed(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(dau10kBanner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.DAU_10K) else state
             }
         }
     }
@@ -288,7 +280,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setLora8BannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showLora8Banner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.LORA_8) else state
             }
         }
     }
@@ -297,7 +289,7 @@ class HomeViewModel @Inject constructor(
         viewModelScope.launch {
             prefs.setLora9BannerShown(true)
             _uiState.update { state ->
-                if (state is HomeUiState.Success) state.copy(showLora9Banner = false) else state
+                if (state is HomeUiState.Success) state.copy(activeBanners = state.activeBanners - BannerType.LORA_9) else state
             }
         }
     }
