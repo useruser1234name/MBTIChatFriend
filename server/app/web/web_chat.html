@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MBTI Chat MVP</title>
+  <link rel="stylesheet" href="/web-chat.css" />
+</head>
+<body>
+  <main class="app">
+    <aside class="settings" aria-label="chat settings">
+      <h1>MBTI Chat MVP</h1>
+
+      <label>
+        MBTI
+        <select id="mbti">
+          <option>ENFP</option><option>INFP</option><option>ENFJ</option><option>INFJ</option>
+          <option>INTJ</option><option>INTP</option><option>ENTJ</option><option>ENTP</option>
+          <option>ISTJ</option><option>ISFJ</option><option>ESTJ</option><option>ESFJ</option>
+          <option>ISTP</option><option>ISFP</option><option>ESTP</option><option>ESFP</option>
+        </select>
+      </label>
+
+      <label>
+        프롬프트 모드
+        <select id="promptMode">
+          <option value="balanced">Balanced</option>
+          <option value="warm_friend">Warm friend</option>
+          <option value="playful_partner">Playful partner</option>
+          <option value="deep_listener">Deep listener</option>
+        </select>
+      </label>
+
+      <label>
+        페르소나 (캐릭터)
+        <textarea id="persona" rows="6" placeholder="예: 당신은 냉정한 외모지만 나에게만 따뜻한 북부대공."></textarea>
+      </label>
+
+      <label>
+        내 역할 (유저)
+        <textarea id="userRole" rows="3" placeholder="예: 나는 대공의 약혼자. / 나는 오래 사귄 남자친구."></textarea>
+      </label>
+
+      <label>
+        상황 · 장면 (선택)
+        <textarea id="situation" rows="2" placeholder="예: 눈 내리는 겨울 저녁, 대공의 서재에서 단둘이."></textarea>
+      </label>
+
+      <button id="reset" type="button">대화 초기화</button>
+      <p id="status" class="status">대기 중</p>
+    </aside>
+
+    <section class="chat" aria-label="chat">
+      <div id="messages" class="messages"></div>
+      <form id="form" class="composer">
+        <textarea id="message" rows="2" placeholder="메시지를 입력하세요" required></textarea>
+        <button id="send" type="submit">전송</button>
+      </form>
+    </section>
+  </main>
+  <script src="/web-chat.js"></script>
+</body>
+</html>
