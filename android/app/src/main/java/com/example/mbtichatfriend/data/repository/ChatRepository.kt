@@ -19,7 +19,10 @@ import javax.inject.Singleton
 
 data class ChatResult(
     val replies: List<ReplyPart>,
-    val affinityDelta: Int
+    val affinityDelta: Int,
+    val nightDiaryGenerated: Boolean = false,
+    val nextHook: String = "",
+    val nextGoal: String = ""
 )
 
 @Singleton
@@ -116,7 +119,13 @@ class ChatRepository @Inject constructor(
                     memories = memories
                 )
             )
-            ChatResult(replies = response.replies, affinityDelta = response.affinityDelta)
+            ChatResult(
+                replies = response.replies,
+                affinityDelta = response.affinityDelta,
+                nightDiaryGenerated = response.nightDiaryGenerated,
+                nextHook = response.nextHook,
+                nextGoal = response.nextGoal,
+            )
         } catch (e: Exception) {
             ChatResult(
                 replies = listOf(

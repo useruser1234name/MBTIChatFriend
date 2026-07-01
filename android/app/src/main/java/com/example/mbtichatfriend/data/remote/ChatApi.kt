@@ -46,7 +46,10 @@ data class ChatRequest(
 @JsonClass(generateAdapter = false)
 data class ChatResponse(
     val replies: List<ReplyPart>,
-    @Json(name = "affinity_delta") val affinityDelta: Int = 0
+    @Json(name = "affinity_delta") val affinityDelta: Int = 0,
+    @Json(name = "night_diary_generated") val nightDiaryGenerated: Boolean = false,
+    @Json(name = "next_hook") val nextHook: String = "",
+    @Json(name = "next_goal") val nextGoal: String = ""
 )
 
 @JsonClass(generateAdapter = false)
