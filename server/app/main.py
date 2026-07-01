@@ -39,6 +39,7 @@ from .routers import (
     notifications,
     users,
     events,
+    web_chat,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -125,6 +126,7 @@ app.include_router(compatibility.router)
 app.include_router(notifications.router)
 app.include_router(users.router)
 app.include_router(events.router)
+app.include_router(web_chat.router)
 
 # /health (루트 레벨, 하위 호환)
 @app.get("/health")

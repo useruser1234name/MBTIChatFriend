@@ -1,6 +1,14 @@
 """VectorStore 단위 테스트 - 기본 임베딩으로 구조/캐시 동작 검증."""
 
+import os
+
 import pytest
+
+if os.name == "nt" and os.getenv("RUN_CHROMA_TESTS") != "1":
+    pytest.skip(
+        "ChromaDB PersistentClient tests can hang at process shutdown on Windows; set RUN_CHROMA_TESTS=1 to run explicitly.",
+        allow_module_level=True,
+    )
 
 # chromadb가 설치되어 있어야 테스트 실행
 chromadb = pytest.importorskip("chromadb")

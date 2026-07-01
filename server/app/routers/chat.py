@@ -6,8 +6,6 @@ import random
 from datetime import datetime
 from typing import Optional
 
-import httpx
-
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -16,8 +14,15 @@ from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 
 from ..auth_middleware import verify_firebase_token
-from ..chat_service import generate_reply, generate_night_diary, stream_lora_response, AFFINITY_LEVEL_THRESHOLDS
-from ..config import DAILY_TOKEN_LIMIT, LLM_MODEL_SIMPLE, MAX_TOKENS, OPENAI_API_KEY, TOGETHER_API_KEY, VLLM_BASE_URL
+from ..chat_service import (
+    generate_reply,
+    generate_night_diary,
+    stream_lora_response,
+    stream_reply,
+    StreamDone,
+    AFFINITY_LEVEL_THRESHOLDS,
+)
+from ..config import DAILY_TOKEN_LIMIT, LLM_MODEL_SIMPLE, MAX_TOKENS, OPENAI_API_KEY, TOGETHER_API_KEY
 from ..content_filter import (
     check_content,
     classify_crisis_type,
@@ -29,6 +34,8 @@ from ..content_filter import (
 )
 from ..diary_store import has_night_diary, night_bucket_date, save_night_diary
 from ..metrics_service import record_event
+from ..background_tasks import create_tracked_task
+from ..model_routing import resolve_model_endpoint, select_model_for_crisis
 from ..models import (
     ChatRequest,
     ChatResponse,
@@ -107,81 +114,11 @@ def _merge_memories(base: list[MemoryItem], extra: list[MemoryItem]) -> list[Mem
     return merged
 
 
-def _select_model(crisis_result: dict) -> str:
-    """위기 감지 결과에 따라 GPT 모델을 동적으로 선택한다.
+def _prepare_chat_turn(req: ChatRequest, user: Optional[dict]) -> dict:
+    """턴 시작 준비: room_id 해석, 스토리 상태 bump, 콜백/스토리 기억 병합.
 
-    tier1 또는 tier2 위기 상황이면 gpt-4o, 그 외에는 gpt-4o-mini를 사용한다.
+    generate_reply(논스트림)와 stream_reply(스트림)가 공유하는 전처리.
     """
-    level = crisis_result.get("level", "none")
-    if level in ("tier1", "tier2"):
-        return "gpt-4o"
-    return "gpt-4o-mini"
-
-
-import os as _os
-
-
-async def _check_vllm_health() -> bool:
-    """vLLM 서버 헬스체크. 실패 시 False 반환 (Together AI 폴백)"""
-    if not VLLM_BASE_URL:
-        return False
-    try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            resp = await client.get(f"{VLLM_BASE_URL}/health")
-            return resp.status_code == 200
-    except Exception:
-        return False
-
-
-TOGETHER_LORA_MODELS: dict[str, str] = {
-    "lora-enfp-v2": "mbtichatfriend/enfp-lora-v2",
-    "lora-infj-v1": "mbtichatfriend/infj-lora-v1",
-    "lora-intj-v1": "mbtichatfriend/intj-lora-v1",  # INTJ LoRA 추가
-    "lora-isfj-v1": "mbtichatfriend/isfj-lora-v1",
-    "lora-infp-v1": "mbtichatfriend/infp-lora-v1",
-}
-TOGETHER_LORA_MODELS["lora-entp-v1"] = "mbtichatfriend/entp-lora-v1"
-_LORA_MODEL_IDS: dict[str, str] = {}
-_LORA_MODEL_IDS["lora_estj"] = "togetherai/mbtichat-estj-lora-v1"
-_LORA_MODEL_IDS["lora_isfp"] = "togetherai/mbtichat-isfp-lora-v1"
-_LORA_MODEL_IDS["lora_intp"] = "togetherai/mbtichat-intp-lora-v1"
-
-# A/B variant 이름 → TOGETHER_LORA_MODELS 키 매핑
-_AB_VARIANT_TO_LORA_KEY: dict[str, str] = {
-    "lora_intj": "lora-intj-v1",
-    "lora_isfj": "lora-isfj-v1",
-    "lora_infp": "lora-infp-v1",
-}
-_AB_VARIANT_TO_LORA_KEY["lora_entp"] = "lora-entp-v1"
-_AB_VARIANT_TO_LORA_KEY["lora_estj_v1"] = "lora_estj"
-_AB_VARIANT_TO_LORA_KEY["lora_isfp_v1"] = "lora_isfp"
-_AB_VARIANT_TO_LORA_KEY["lora_intp_v1"] = "lora_intp"
-
-
-async def _resolve_model(base_model: str, ab_variant: str) -> tuple[str, str]:
-    """
-    Returns (model_id, base_url).
-    LoRA variant → vLLM (헬스체크 통과 시) 또는 Together AI 엔드포인트 (OpenAI 호환).
-    일반 → OpenAI 기본 (base_url="").
-    9차 스프린트 — CTO-A 박지훈 + CTO-C 이서연.
-
-    lora_intj_v1 실험의 'lora_intj' variant는 'lora-intj-v1' 키로 매핑된다.
-    vLLM 헬스체크 통과 시 VLLM_BASE_URL 사용, 실패 시 Together AI 폴백.
-    """
-    # A/B variant 이름을 LORA 키로 변환 (예: "lora_intj" → "lora-intj-v1")
-    resolved_variant = _AB_VARIANT_TO_LORA_KEY.get(ab_variant, ab_variant)
-    if resolved_variant in TOGETHER_LORA_MODELS and TOGETHER_API_KEY:
-        lora_model_id = TOGETHER_LORA_MODELS[resolved_variant]
-        # vLLM 헬스체크: 통과 시 vLLM base_url 사용, 실패 시 Together AI 폴백
-        if VLLM_BASE_URL and await _check_vllm_health():
-            logger.info("[ModelRouting] vLLM 헬스체크 통과 → vLLM 사용: %s", VLLM_BASE_URL)
-            return lora_model_id, VLLM_BASE_URL
-        logger.info("[ModelRouting] vLLM 헬스체크 실패 또는 미설정 → Together AI 폴백")
-        return lora_model_id, "https://api.together.xyz/v1"
-    return base_model, ""
-
-
-async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
     room_id = _resolve_room_id(req, user)
     character_id = req.character_id or ""
 
@@ -190,21 +127,30 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
     callback_key, callback_hint = maybe_build_callback_hint(state)
     story_memories = build_story_memory_items(state, callback_hint or "")
     merged_memories = _merge_memories(req.memories or [], story_memories)
+    return {
+        "room_id": room_id,
+        "state": state,
+        "effective_character_id": effective_character_id,
+        "callback_key": callback_key,
+        "merged_memories": merged_memories,
+    }
 
-    replies, affinity_delta = await generate_reply(
-        message=req.message,
-        mbti=req.mbti,
-        speech_style=req.speech_style,
-        relationship=req.relationship,
-        nickname=req.nickname,
-        affinity_level=req.affinity_level,
-        conversation_history=req.conversation_history,
-        user_mbti=req.user_mbti,
-        character_name=req.character_name,
-        character_id=effective_character_id,
-        memories=merged_memories,
-    )
 
+async def _finalize_chat_turn(
+    req: ChatRequest,
+    user: Optional[dict],
+    *,
+    room_id: str,
+    state,
+    effective_character_id: str,
+    callback_key,
+    replies: list,
+    affinity_delta: int,
+) -> dict:
+    """응답 생성 이후 후처리: 콜백 마킹, 야간 일기, hook/goal, 이벤트, 영속화.
+
+    논스트림/스트림 두 경로가 동일하게 호출한다.
+    """
     if callback_key:
         mark_callback_used(room_id, callback_key, state.turn_count)
 
@@ -278,7 +224,6 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
 
         if _new_level != _old_level:
             try:
-                import asyncio as _asyncio
                 from ..analytics_events import AFFINITY_LEVEL_UP
 
                 async def _record_affinity_level_up(
@@ -299,13 +244,14 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
                     except Exception as _e:
                         logger.warning("affinity_level_up 이벤트 기록 실패: %s", _e)
 
-                _asyncio.create_task(
+                create_tracked_task(
                     _record_affinity_level_up(
                         from_level=_old_level,
                         to_level=_new_level,
                         turn_count=state.turn_count,
                         character_id=effective_character_id,
-                    )
+                    ),
+                    name="record-affinity-level-up",
                 )
             except Exception as _e:
                 logger.warning("affinity_level_up 이벤트 태스크 생성 실패: %s", _e)
@@ -388,10 +334,10 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
         except Exception as _e:
             logger.warning("messages(assistant) INSERT 실패 (uid=%s): %s", uid, _e)
 
-    import asyncio as _asyncio_chat
     try:
-        _asyncio_chat.create_task(
-            _persist_chat_data(_uid, _character_mbti, _user_message, _assistant_text)
+        create_tracked_task(
+            _persist_chat_data(_uid, _character_mbti, _user_message, _assistant_text),
+            name="persist-chat-data",
         )
     except Exception as _e:
         logger.warning("_persist_chat_data 태스크 생성 실패: %s", _e)
@@ -404,6 +350,34 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
         "next_hook": next_hook or "",
         "next_goal": next_goal or "",
     }
+
+
+async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
+    """논스트림 경로: 준비 → 전체 응답 생성 → 후처리."""
+    prep = _prepare_chat_turn(req, user)
+    replies, affinity_delta = await generate_reply(
+        message=req.message,
+        mbti=req.mbti,
+        speech_style=req.speech_style,
+        relationship=req.relationship,
+        nickname=req.nickname,
+        affinity_level=req.affinity_level,
+        conversation_history=req.conversation_history,
+        user_mbti=req.user_mbti,
+        character_name=req.character_name,
+        character_id=prep["effective_character_id"],
+        memories=prep["merged_memories"],
+    )
+    return await _finalize_chat_turn(
+        req,
+        user,
+        room_id=prep["room_id"],
+        state=prep["state"],
+        effective_character_id=prep["effective_character_id"],
+        callback_key=prep["callback_key"],
+        replies=replies,
+        affinity_delta=affinity_delta,
+    )
 
 
 async def _gate_user(req: ChatRequest, user: Optional[dict], request: Request):
@@ -460,7 +434,7 @@ async def send_message(
 
     # 하이브리드 GPT 라우팅: 위기 수준에 따라 모델 동적 선택
     crisis_result = {"level": crisis_tier if is_crisis else "none"}
-    selected_model = _select_model(crisis_result)
+    selected_model = select_model_for_crisis(crisis_result)
     logger.info(f"[ModelRouting] crisis_level={crisis_result['level']}, model={selected_model}")
 
     result = await _run_chat_pipeline(req, user)
@@ -512,7 +486,7 @@ async def stream_message(
 
     # 하이브리드 GPT 라우팅: 위기 수준에 따라 모델 동적 선택
     crisis_result = {"level": crisis_tier if is_crisis else "none"}
-    selected_model = _select_model(crisis_result)
+    selected_model = select_model_for_crisis(crisis_result)
     logger.info(f"[ModelRouting] crisis_level={crisis_result['level']}, model={selected_model}")
 
     # 위기 유형 분류 및 시스템 프롬프트 추가 지침 생성
@@ -542,35 +516,64 @@ async def stream_message(
             )
         # acute_crisis 유형: 기존 tier2 응급 대응 유지 (변경 없음)
 
-    result = await _run_chat_pipeline(req, user)
-    replies = result["replies"]
-    affinity_delta = result["affinity_delta"]
-
-    if is_crisis:
+    # 위기 개입 문구: 세션당 1회 (히스토리에 이미 권유 문구 있으면 생략)
+    _insert_crisis = is_crisis and not _crisis_referral_already_shown(req.conversation_history)
+    _crisis_reply = None
+    if _insert_crisis:
         from ..models import ReplyPart as _ReplyPart
-        # 세션당 1회 제한: 히스토리에 이미 전문가 권유 문구가 있으면 삽입 생략
-        if not _crisis_referral_already_shown(req.conversation_history):
-            crisis_reply = _ReplyPart(text=get_crisis_response(crisis_tier), emotion="SAD", delay=0)
-            replies = [crisis_reply] + list(replies)
-        record_event(
-            event_type="crisis_detected",
-            room_id=result["room_id"],
-            character_id=req.character_id,
-            payload={
-                "tier": crisis_tier,
-                "model": selected_model,
-                "crisis_type_hint": crisis_type_hint[:50] if crisis_type_hint else "",
-            },
-        )
+        _crisis_reply = _ReplyPart(text=get_crisis_response(crisis_tier), emotion="SAD", delay=0)
 
-    # LoRA 스트리밍 분기: _resolve_model() 결과에서 base_url이 있으면 vLLM 또는 Together AI LoRA 스트리밍 사용
+    def _message_event(part) -> dict:
+        return {
+            "event": "message",
+            "data": json.dumps(
+                {"text": part.text, "emotion": part.emotion, "delay": part.delay},
+                ensure_ascii=False,
+            ),
+        }
+
+    def _done_event(meta: dict) -> dict:
+        return {
+            "event": "done",
+            "data": json.dumps(
+                {
+                    "affinity_delta": meta["affinity_delta"],
+                    "night_diary_generated": meta["night_diary_generated"],
+                    "next_hook": meta["next_hook"],
+                    "next_goal": meta["next_goal"],
+                    "room_id": meta["room_id"],
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+    def _record_crisis(room_id: str) -> None:
+        if is_crisis:
+            record_event(
+                event_type="crisis_detected",
+                room_id=room_id,
+                character_id=req.character_id,
+                payload={
+                    "tier": crisis_tier,
+                    "model": selected_model,
+                    "crisis_type_hint": crisis_type_hint[:50] if crisis_type_hint else "",
+                },
+            )
+
+    # LoRA 스트리밍 분기: base_url이 있으면 vLLM/Together AI LoRA 토큰 스트리밍 사용
     _ab_variant = getattr(req, "ab_variant", "") or ""
-    _lora_model_id, _lora_base_url = await _resolve_model(selected_model, _ab_variant)
+    _lora_model_id, _lora_base_url = await resolve_model_endpoint(selected_model, _ab_variant)
     _use_lora_stream = bool(_lora_base_url and TOGETHER_API_KEY)
 
-    async def event_generator():
-        if _use_lora_stream:
-            # Together AI LoRA 스트리밍 경로
+    if _use_lora_stream:
+        # LoRA 경로: 전체 파이프라인으로 replies/메타 확보 후 토큰 스트리밍 (기존 동작 유지)
+        result = await _run_chat_pipeline(req, user)
+        replies = list(result["replies"])
+        if _crisis_reply is not None:
+            replies = [_crisis_reply] + replies
+        _record_crisis(result["room_id"])
+
+        async def event_generator():
             from ..prompts import build_system_prompt as _build_sys
             sys_prompt = _build_sys(
                 mbti=req.mbti or "",
@@ -600,40 +603,63 @@ async def stream_message(
                     }
             except Exception as _lora_err:
                 logger.warning(f"[LoRA] 스트리밍 실패, 기존 replies 사용: {_lora_err}")
-                # 폴백: 기존 replies 전송
                 for reply in replies:
-                    yield {
-                        "event": "message",
-                        "data": json.dumps(
-                            {"text": reply.text, "emotion": reply.emotion, "delay": reply.delay},
-                            ensure_ascii=False,
-                        ),
-                    }
-        else:
-            # 기존 OpenAI 경로 (gpt-4o-mini 등)
-            for reply in replies:
-                data = json.dumps({
-                    "text": reply.text,
-                    "emotion": reply.emotion,
-                    "delay": reply.delay
-                }, ensure_ascii=False)
-                yield {
-                    "event": "message",
-                    "data": data
-                }
+                    yield _message_event(reply)
+            yield _done_event(result)
 
-        # 완료 이벤트 (호감도 변화 포함)
-        done_data = json.dumps({
-            "affinity_delta": affinity_delta,
-            "night_diary_generated": result["night_diary_generated"],
-            "next_hook": result["next_hook"],
-            "next_goal": result["next_goal"],
-            "room_id": result["room_id"],
-        }, ensure_ascii=False)
-        yield {
-            "event": "done",
-            "data": done_data
-        }
+        return EventSourceResponse(event_generator())
+
+    # OpenAI 경로: 말풍선 점진 스트리밍 (완결되는 즉시 전송해 TTFB 단축)
+    async def event_generator():
+        prep = _prepare_chat_turn(req, user)
+        room_id = prep["room_id"]
+        _record_crisis(room_id)
+
+        # 위기 문구를 가장 먼저 전송 (persistence/finalize 대상에는 미포함 — 기존 동작 유지)
+        if _crisis_reply is not None:
+            yield _message_event(_crisis_reply)
+
+        collected = []
+        affinity_delta = 0
+        try:
+            async for item in stream_reply(
+                message=req.message,
+                mbti=req.mbti,
+                speech_style=req.speech_style,
+                relationship=req.relationship,
+                nickname=req.nickname,
+                affinity_level=req.affinity_level,
+                conversation_history=req.conversation_history,
+                user_mbti=req.user_mbti,
+                character_name=req.character_name,
+                character_id=prep["effective_character_id"],
+                memories=prep["merged_memories"],
+                room_id=room_id,
+            ):
+                if isinstance(item, StreamDone):
+                    affinity_delta = item.affinity_delta
+                else:
+                    collected.append(item)
+                    yield _message_event(item)
+        except Exception as _stream_err:
+            logger.error(f"[stream] OpenAI 스트리밍 실패: {_stream_err}")
+            if not collected:
+                from ..models import ReplyPart as _ReplyPart
+                _fb = _ReplyPart(text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?", emotion="SURPRISED", delay=2000)
+                collected.append(_fb)
+                yield _message_event(_fb)
+
+        meta = await _finalize_chat_turn(
+            req,
+            user,
+            room_id=room_id,
+            state=prep["state"],
+            effective_character_id=prep["effective_character_id"],
+            callback_key=prep["callback_key"],
+            replies=collected,
+            affinity_delta=affinity_delta,
+        )
+        yield _done_event(meta)
 
     return EventSourceResponse(event_generator())
 
@@ -703,6 +729,7 @@ async def get_conversation_starters(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=150,
             temperature=0.8,
+            timeout=20,
         )
         import json as _json
         content = resp.choices[0].message.content.strip()
@@ -788,6 +815,7 @@ async def send_greeting(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100,
             temperature=0.9,
+            timeout=20,
         )
         greeting_text = resp.choices[0].message.content.strip()
     except Exception as exc:

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections import OrderedDict
 from typing import Dict, List, Optional
 
@@ -24,9 +25,65 @@ _character_memories: OrderedDict[str, List[dict]] = OrderedDict()  # key-value �
 # 절대 제거하면 안 되는 핵심 팩트 키
 _CORE_FACT_KEYS = {"이름", "직업", "고민", "좋아하는것", "싫어하는것", "나이", "학교", "취미", "좋아하는 음식", "성격"}
 
+_SENSITIVE_FACT_KEYS = {
+    "비밀번호", "패스워드", "password", "주민등록번호", "주민번호",
+    "카드번호", "신용카드", "계좌번호", "계좌", "주소", "전화번호",
+    "휴대폰", "이메일", "email", "토큰", "api_key", "api key", "apikey",
+}
+_SENSITIVE_VALUE_PATTERNS = [
+    re.compile(r"\b\d{2,3}-\d{3,4}-\d{4}\b"),
+    re.compile(r"\b\d{6}-\d{7}\b"),
+    re.compile(r"\b(?:\d[ -]*?){13,19}\b"),
+    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+]
+
 # 캐시 최대 크기
 _MAX_SUMMARIES = 200
 _MAX_MEMORIES = 200
+
+
+def _normalize_fact_key(key: str) -> str:
+    return re.sub(r"\s+", "", (key or "").strip()).lower()
+
+
+def _is_sensitive_fact(fact: dict) -> bool:
+    key = str(fact.get("key", "")).strip()
+    value = str(fact.get("value", "")).strip()
+    normalized_key = _normalize_fact_key(key)
+    if any(marker in normalized_key for marker in _SENSITIVE_FACT_KEYS):
+        return True
+    return any(pattern.search(value) for pattern in _SENSITIVE_VALUE_PATTERNS)
+
+
+def merge_memory_facts(
+    existing: List[dict],
+    new_facts: List[dict],
+    *,
+    max_total: int = 15,
+) -> List[dict]:
+    """Merge memory facts, replacing stale values and skipping secrets."""
+    merged_by_key: OrderedDict[str, dict] = OrderedDict()
+
+    for fact in list(existing or []) + list(new_facts or []):
+        if not isinstance(fact, dict):
+            continue
+        key = str(fact.get("key", "")).strip()
+        value = str(fact.get("value", "")).strip()
+        if not key or not value:
+            continue
+        cleaned = {"key": key, "value": value}
+        if _is_sensitive_fact(cleaned):
+            continue
+        norm_key = _normalize_fact_key(key)
+        if norm_key in merged_by_key:
+            del merged_by_key[norm_key]
+        merged_by_key[norm_key] = cleaned
+
+    merged = list(merged_by_key.values())
+    core = [f for f in merged if f.get("key") in _CORE_FACT_KEYS]
+    non_core = [f for f in merged if f.get("key") not in _CORE_FACT_KEYS]
+    max_non_core = max(0, max_total - len(core))
+    return core + (non_core[-max_non_core:] if max_non_core > 0 else [])
 
 def _evict_if_needed() -> None:
     """캐시 크기가 MAX를 초과하면 가장 오래된 항목(FIFO) 제거"""
@@ -251,7 +308,8 @@ async def summarize_conversation(
                 {"role": "user", "content": conv_text}
             ],
             temperature=0.3,
-            max_tokens=500
+            max_tokens=500,
+            timeout=30,
         )
         summary = response.choices[0].message.content or ""
         _conversation_summaries[key] = summary.strip()
@@ -307,7 +365,8 @@ async def extract_facts(
             model=LLM_MODEL_SIMPLE,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=300
+            max_tokens=300,
+            timeout=30,
         )
         content = response.choices[0].message.content or ""
 
@@ -332,18 +391,15 @@ async def extract_facts(
                         new_facts.append({"key": k.strip(), "value": v.strip()})
 
         if new_facts:
-            existing_keys = {f["key"] for f in existing if isinstance(f, dict)}
-            merged = list(existing) + [
-                f for f in new_facts if f["key"] not in existing_keys
-            ]
-            # 핵심 정보는 절대 제거하지 않음
-            core = [f for f in merged if isinstance(f, dict) and f.get("key") in _CORE_FACT_KEYS]
-            non_core = [f for f in merged if isinstance(f, dict) and f.get("key") not in _CORE_FACT_KEYS]
-            max_non_core = max(0, 15 - len(core))
-            _character_memories[key] = core + (non_core[-max_non_core:] if max_non_core > 0 else [])
+            _character_memories[key] = merge_memory_facts(existing, new_facts)
             await _save_to_db(key)
             _evict_if_needed()
-            logger.info(f"핵심 정보 업데이트 [{key}]: +{len(new_facts)}개")
+            logger.info(
+                "핵심 정보 업데이트 [%s]: extracted=%s stored=%s",
+                key,
+                len(new_facts),
+                len(_character_memories[key]),
+            )
 
         return _character_memories.get(key, existing)
     except Exception as e:
@@ -393,6 +449,7 @@ async def extract_episodes(
             ],
             temperature=0.3,
             max_tokens=500,
+            timeout=30,
         )
         content = response.choices[0].message.content or ""
 
