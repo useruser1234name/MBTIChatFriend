@@ -9,6 +9,8 @@ import com.android.billingclient.api.ProductDetails
 import com.android.billingclient.api.QueryProductDetailsParams
 import com.example.mbtichatfriend.data.remote.ChatApi
 import com.example.mbtichatfriend.data.remote.PurchaseVerifyRequest
+import com.example.mbtichatfriend.data.repository.AnalyticsEvent
+import com.example.mbtichatfriend.data.repository.AnalyticsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +29,8 @@ data class PremiumUiState(
 @HiltViewModel
 class PremiumViewModel @Inject constructor(
     private val billingClient: BillingClient,
-    private val chatApi: ChatApi
+    private val chatApi: ChatApi,
+    private val analyticsRepository: AnalyticsRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(PremiumUiState())
@@ -37,6 +40,10 @@ class PremiumViewModel @Inject constructor(
 
     init {
         queryProductDetails()
+        // PremiumScreen이 이 앱의 유일한 업그레이드 화면이자 사실상의 페이월이므로
+        // 진입 시 premium_screen_open과 paywall_shown을 함께 기록한다.
+        analyticsRepository.track(scope = viewModelScope, eventType = AnalyticsEvent.PREMIUM_SCREEN_OPEN)
+        analyticsRepository.track(scope = viewModelScope, eventType = AnalyticsEvent.PAYWALL_SHOWN)
     }
 
     private fun queryProductDetails() {
@@ -77,12 +84,14 @@ class PremiumViewModel @Inject constructor(
             .setProductDetailsParamsList(productDetailsParamsList)
             .build()
 
+        analyticsRepository.track(scope = viewModelScope, eventType = AnalyticsEvent.PURCHASE_INITIATED)
         billingClient.launchBillingFlow(activity, billingFlowParams)
     }
 
     // subscribe() 오버로드 — Activity 없이 호출 시 (Composable에서 직접 호출용)
     fun subscribe() {
         _uiState.value = _uiState.value.copy(isLoading = true)
+        analyticsRepository.track(scope = viewModelScope, eventType = AnalyticsEvent.PURCHASE_INITIATED)
         // 실제 Activity는 Composable 레이어에서 주입 필요;
         // 여기서는 상태만 업데이트하고 UI에서 Activity 기반 호출 유도
         viewModelScope.launch {
@@ -106,6 +115,8 @@ class PremiumViewModel @Inject constructor(
                 )
                 if (response.success) {
                     _uiState.value = _uiState.value.copy(isSubscribed = true)
+                    // 결제 검증 성공 콜백 — 현재 구현에서 구매 완료를 확정할 수 있는 유일한 지점
+                    analyticsRepository.track(scope = viewModelScope, eventType = AnalyticsEvent.PURCHASE_COMPLETE)
                 }
             }.onFailure { e ->
                 _uiState.value = _uiState.value.copy(errorMessage = e.message)

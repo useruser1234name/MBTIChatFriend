@@ -266,6 +266,10 @@ def init_postgres_schema() -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """,
+        # P0-4: user_id 컬럼 추가 — 인증 토큰에서 채워 클라 위조를 방지한다.
+        """
+        ALTER TABLE response_feedback ADD COLUMN IF NOT EXISTS user_id TEXT
+        """,
         """
         CREATE INDEX IF NOT EXISTS idx_response_feedback_character
         ON response_feedback(character_id, created_at DESC)
@@ -389,6 +393,10 @@ def init_postgres_schema() -> None:
             text        TEXT,
             created_at  TIMESTAMPTZ DEFAULT now()
         )
+        """,
+        # P0-4: user_id 컬럼 추가 — 인증 토큰에서 채워 클라 위조를 방지한다.
+        """
+        ALTER TABLE session_feedback ADD COLUMN IF NOT EXISTS user_id TEXT
         """,
         """
         CREATE INDEX IF NOT EXISTS idx_session_feedback_room

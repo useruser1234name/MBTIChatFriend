@@ -25,6 +25,7 @@ from .content_filter import check_content, detect_crisis, get_safety_system_prom
 from .background_tasks import create_tracked_task
 from .models import HistoryMessage, MemoryItem, ReplyPart
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
+from .user_preference import derive_user_style, render_preference_section
 from .vector_store import get_store
 from .finetune_service import get_model_for_character
 from .memory_service import summarize_conversation, extract_facts, extract_episodes, build_memory_context
@@ -627,6 +628,12 @@ def _build_chat_messages(
     generate_reply(논스트림)와 stream_reply(스트림)가 공유하여 프롬프트
     정합성을 한 곳에서 보장한다.
     """
+    # 유저 발화 스타일 미러링(개인화 되먹임 MVP). 규칙 기반·LLM 미호출.
+    # 여기 도달하는 conversation_history는 호출부(generate_reply/stream_reply)에서
+    # 이미 최근 10개(=5턴)로 트림된 상태 → 스타일도 최근 5턴 기준으로 산출된다.
+    preference_context = render_preference_section(
+        derive_user_style(conversation_history)
+    )
     system_prompt = build_system_prompt(
         mbti=mbti,
         speech_style=speech_style,
@@ -642,6 +649,7 @@ def _build_chat_messages(
         memories=memory_dicts if memory_dicts else None,
         memory_context=mem_ctx,
         episode_context=episode_context,
+        preference_context=preference_context,
     )
     # safety_prompt는 거의 변하지 않으므로 정적 system_prompt에 인라인하여 prefix caching 효율 극대화
     safety_prompt = get_safety_system_prompt()
@@ -1217,8 +1225,9 @@ async def stream_reply(
             active_client = client
 
         # 9. 스트리밍 호출 + 증분 파싱
-        parser = IncrementalReplyParser()
-        stream = await active_client.chat.completions.create(
+        # A/B(P0-3): 논스트림 경로와 동일하게 토큰 사용량·응답시간을 기록하기 위해
+        # 가능하면 usage 청크를 요청한다(Together AI LoRA 엔드포인트는 미지원일 수 있어 제외).
+        _stream_kwargs: dict = dict(
             model=model_id,
             messages=messages,
             temperature=0.85,
@@ -1226,7 +1235,17 @@ async def stream_reply(
             timeout=45,
             stream=True,
         )
+        if not (_lora_base_url and TOGETHER_API_KEY):
+            _stream_kwargs["stream_options"] = {"include_usage": True}
+
+        parser = IncrementalReplyParser()
+        _t_start = time.monotonic()
+        _stream_total_tokens = 0.0
+        stream = await active_client.chat.completions.create(**_stream_kwargs)
         async for chunk in stream:
+            _chunk_usage = getattr(chunk, "usage", None)
+            if _chunk_usage is not None:
+                _stream_total_tokens = float(getattr(_chunk_usage, "total_tokens", 0) or 0)
             try:
                 delta = chunk.choices[0].delta.content
             except (IndexError, AttributeError):
@@ -1238,6 +1257,7 @@ async def stream_reply(
                 if is_safe_part:
                     full_text += (" " if full_text else "") + part.text
                     yield part
+        _elapsed_ms = (time.monotonic() - _t_start) * 1000
 
         # 10. 폴백: 형식 파괴로 아무 것도 방출 못한 경우 raw 로 재파싱
         if parser.emitted_count == 0:
@@ -1287,6 +1307,19 @@ async def stream_reply(
                 ),
                 name="quality-check",
             )
+
+        # 15. A/B 테스트 결과 기록 (P0-3, 백그라운드) — 논스트림 경로(generate_reply)와
+        # 동일 컨벤션: assign_variant 시 character_id 기준으로 배정했으므로 결과도
+        # character_id를 user_id로 사용해 기록한다.
+        if _ab_variant and character_id:
+            create_tracked_task(_record_ab_result(
+                experiment_id="model_routing",
+                variant=_ab_variant,
+                user_id=character_id,
+                character_id=character_id,
+                tokens=_stream_total_tokens,
+                response_time_ms=_elapsed_ms,
+            ), name="record-ab-result")
 
     except Exception as e:
         if not affinity_task.done():

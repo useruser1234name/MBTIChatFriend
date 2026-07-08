@@ -132,6 +132,12 @@ class OnboardingViewModel @Inject constructor(
                 speechStyle = speechStyle.name,
                 relationship = relationship.name
             )
+            analyticsRepository.track(
+                scope = viewModelScope,
+                eventType = AnalyticsEvent.ONBOARDING_COMPLETE,
+                characterId = selectedCharacter?.mbti ?: partnerMbti.name,
+                payload = mapOf("character_id" to (selectedCharacter?.mbti ?: partnerMbti.name)),
+            )
             onComplete()
         }
     }

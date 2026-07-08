@@ -22,6 +22,7 @@ class FeedbackUseCase @Inject constructor(
         messageId: Long,
         feedbackType: String,
         characterId: Long,
+        roomId: String = "",
     ) {
         if (_feedbackMap.value.containsKey(messageId)) return
         _feedbackMap.value = _feedbackMap.value + (messageId to feedbackType)
@@ -30,6 +31,7 @@ class FeedbackUseCase @Inject constructor(
                 messageId = messageId,
                 characterId = characterId,
                 feedbackType = feedbackType,
+                roomId = roomId,
             )
         }
     }

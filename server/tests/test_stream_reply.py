@@ -204,3 +204,70 @@ async def test_llm_error_yields_fallback_and_done(patch_deps, monkeypatch):
     assert done is not None
     assert len(parts) == 1
     assert parts[0].emotion == "SURPRISED"
+
+
+# P0-3: 스트리밍 경로 A/B 결과 기록 회귀 테스트.
+# 논스트림 generate_reply만 _record_ab_result를 호출하고 stream_reply는 누락되어
+# 스트리밍으로 전환된 트래픽의 A/B 데이터가 전혀 쌓이지 않던 결함 검증.
+@pytest.mark.asyncio
+async def test_streaming_records_ab_result_when_character_id_set(patch_deps, monkeypatch):
+    patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'])
+
+    # create_tracked_task를 가로채되, 이번 테스트는 코루틴을 즉시 닫지 않고
+    # record-ab-result 태스크만 직접 await 해 내부 record_result 호출을 검증한다.
+    tracked: list[tuple[str, object]] = []
+
+    def _capture_tracked(coro, name=""):
+        tracked.append((name, coro))
+        return None
+
+    monkeypatch.setattr(chat_service, "create_tracked_task", _capture_tracked)
+
+    from app.ab_test import ABTestManager
+
+    recorded: list[dict] = []
+
+    def _fake_record_result(self, experiment_id, variant, metric_name, value, user_id="", character_id=""):
+        recorded.append(
+            dict(
+                experiment_id=experiment_id,
+                variant=variant,
+                metric_name=metric_name,
+                value=value,
+                user_id=user_id,
+                character_id=character_id,
+            )
+        )
+
+    monkeypatch.setattr(ABTestManager, "record_result", _fake_record_result)
+
+    parts, done = await _collect(
+        chat_service.stream_reply(**_base_kwargs(character_id="test-char-ab"))
+    )
+    assert done is not None
+
+    ab_task = next((c for n, c in tracked if n == "record-ab-result"), None)
+    assert ab_task is not None, "character_id가 있으면 record-ab-result 태스크가 스케줄되어야 함"
+    await ab_task
+
+    assert len(recorded) == 2
+    for rec in recorded:
+        # mutation 방어: user_id/character_id가 빈 문자열이 아닌 실제 값이어야 함
+        assert rec["user_id"] == "test-char-ab"
+        assert rec["character_id"] == "test-char-ab"
+        assert rec["experiment_id"] == "model_routing"
+    assert {r["metric_name"] for r in recorded} == {"total_tokens", "response_time_ms"}
+
+    for name, coro in tracked:
+        if name != "record-ab-result":
+            coro.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_skips_ab_result_without_character_id(patch_deps):
+    """character_id 미지정(웹 MVP 등)이면 A/B 기록을 스케줄하지 않는다."""
+    tracked = patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'])
+    _, done = await _collect(chat_service.stream_reply(**_base_kwargs(character_id="")))
+
+    assert done is not None
+    assert "record-ab-result" not in tracked

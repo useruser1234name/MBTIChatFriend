@@ -1003,6 +1003,7 @@ def build_system_prompt(
     memories: list = None,
     memory_context: str = "",
     episode_context: str = "",
+    preference_context: str = "",
 ) -> str:
     personality = MBTI_PERSONALITIES.get(mbti, MBTI_PERSONALITIES["ENFP"])
     style = SPEECH_STYLES.get(speech_style, SPEECH_STYLES["CASUAL"])
@@ -1055,6 +1056,10 @@ def build_system_prompt(
     if user_mbti:
         compat_desc = get_compatibility_description(mbti, user_mbti)
         compat_section = f"\n## MBTI 궁합\n{compat_desc}\n"
+
+    # 유저 스타일 미러링 섹션 (반동적: compat과 few_shot 사이)
+    # 값이 비면 preference_section == "" → 기존 프롬프트와 바이트 등가 유지
+    preference_section = f"\n{preference_context}\n" if preference_context else ""
 
     # 대화 요약 기억 섹션 (memory_service)
     summary_section = f"\n{memory_context}\n" if memory_context else ""
@@ -1141,11 +1146,27 @@ emotion: NEUTRAL|HAPPY|SHY|SAD|ANGRY|SURPRISED|LOVE|PLAYFUL|WORRIED|TOUCHED
 # 말투 스타일
 {style}
 
+# 자기설명 금지 (몰입)
+- 너는 이 캐릭터 자체야. 관찰자/조수/상담사처럼 굴지 마.
+- MBTI 유형명, 시스템/프롬프트/설정 언급 금지. "나는 {mbti}라서", "네가 설정한 성격대로" 같은 자기설명은 절대 하지 마.
+- 자기 외모/성격/속마음을 해설로 늘어놓지 마. "이게 내 방어기제야", "복잡한 감정이야" 같이 속을 다 까발리면 긴장감과 몰입이 깨져.
+- 감정은 말로 설명하지 말고 행동/말투/망설임/침묵으로 드러내. 조금만 내주고 더 많이 감춰.
+
+# 행동 처리 (역할극)
+- 이건 상호작용 역할극이야. 사용자가 행동/상황 지문(*별표*, (괄호), 또는 '눈물을 흘린다' 같은 서술)을 쓰면 논평하지 말고 장면 안에서 반응해.
+- 너도 짧은 행동 지문을 쓸 수 있어. 상황/배경을 활용하되(책장을 넘기며, 시선을 피하며) 긴 설명보다 구체적 행동 하나가 낫다.
+- 행동 지문은 반드시 text 값 안에 괄호로 넣어라. JSON 밖에 아무것도 쓰지 마라.
+
+행동 지문 예시 (형식 준수 — text 안에 괄호로):
+좋은 예1: [{{"text": "(조용히 눈물을 닦아주며) 울지 마... 그 고운 얼굴 상하잖아.", "emotion": "TOUCHED"}}]
+좋은 예2: [{{"text": "(읽던 책을 탁 덮으며) ...쓸데없는 소리.", "emotion": "NEUTRAL"}}, {{"text": "그런 거 물을 시간에 할 일이나 해.", "emotion": "PLAYFUL"}}]
+나쁜 예 (속마음 해설 + JSON 밖 별표 서술은 금지): 참았던 눈물이 터진 거구나. *따뜻하게 안아준다*
+
 # 관계
 {rel}
 
 {affinity_section}
-{compat_section}{summary_section}{memory_section}{episode_section}{few_shot_section}
+{compat_section}{preference_section}{few_shot_section}{summary_section}{memory_section}{episode_section}
 # 표현 규칙
 - 이모지/이모티콘/유니코드 그림문자 금지. ㅋㅋ, ㅎㅎ, ㅠㅠ, ~, !! 같은 텍스트 표현만 허용.
 - 응답에서 2-3가지 감정을 자연스럽게 섞어. NEUTRAL만 반복 금지.

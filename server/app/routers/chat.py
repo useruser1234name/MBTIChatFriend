@@ -151,6 +151,10 @@ async def _finalize_chat_turn(
 
     논스트림/스트림 두 경로가 동일하게 호출한다.
     """
+    # P0-1: 이 턴에서 기록하는 모든 metric_events에 user_id를 채운다.
+    # (라이브 chat_turn 이벤트에 user_id가 비어 있던 결함 수정 — 검증관 실측 기반)
+    _uid = (user or {}).get("uid", "") if user else ""
+
     if callback_key:
         mark_callback_used(room_id, callback_key, state.turn_count)
 
@@ -187,6 +191,7 @@ async def _finalize_chat_turn(
                     event_type="night_diary_generated",
                     room_id=room_id,
                     character_id=effective_character_id,
+                    user_id=_uid,
                     payload={
                         "diary_date": diary_date.isoformat(),
                         "emotion": diary_emotion,
@@ -227,13 +232,14 @@ async def _finalize_chat_turn(
                 from ..analytics_events import AFFINITY_LEVEL_UP
 
                 async def _record_affinity_level_up(
-                    from_level: int, to_level: int, turn_count: int, character_id: str
+                    from_level: int, to_level: int, turn_count: int, character_id: str, user_id: str
                 ) -> None:
                     try:
                         record_event(
                             event_type=AFFINITY_LEVEL_UP,
                             room_id=room_id,
                             character_id=character_id,
+                            user_id=user_id,
                             payload={
                                 "from_level": from_level,
                                 "to_level": to_level,
@@ -250,6 +256,7 @@ async def _finalize_chat_turn(
                         to_level=_new_level,
                         turn_count=state.turn_count,
                         character_id=effective_character_id,
+                        user_id=_uid,
                     ),
                     name="record-affinity-level-up",
                 )
@@ -260,6 +267,7 @@ async def _finalize_chat_turn(
         event_type="chat_turn",
         room_id=room_id,
         character_id=effective_character_id,
+        user_id=_uid,
         payload={
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "turn_count": state.turn_count,
@@ -273,7 +281,7 @@ async def _finalize_chat_turn(
 
     # scheduler D+3/D+5 리텐션 알림을 위해 users/messages 테이블에 데이터 적재.
     # fire-and-forget: DB 미연결 환경에서도 메인 응답을 블로킹하지 않는다.
-    _uid = (user or {}).get("uid", "") if user else ""
+    # _uid는 함수 상단에서 이미 계산됨 (chat_turn 등 이벤트와 동일 값 재사용)
     _character_mbti = (req.mbti or "").upper()
     _user_message = req.message or ""
     _assistant_text = replies[0].text if replies else ""
@@ -451,6 +459,7 @@ async def send_message(
             event_type="crisis_detected",
             room_id=result["room_id"],
             character_id=req.character_id,
+            user_id=(user or {}).get("uid", "") if user else "",
             payload={"tier": crisis_tier, "model": selected_model},
         )
 
@@ -553,6 +562,7 @@ async def stream_message(
                 event_type="crisis_detected",
                 room_id=room_id,
                 character_id=req.character_id,
+                user_id=(user or {}).get("uid", "") if user else "",
                 payload={
                     "tier": crisis_tier,
                     "model": selected_model,

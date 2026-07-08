@@ -159,6 +159,16 @@ data class FeedbackRequest(
     @Json(name = "feedback_detail") val feedbackDetail: String = ""
 )
 
+// ── 세션 별점 피드백 (server/app/routers/quality.py SessionFeedbackRequest 스키마와 일치) ──
+
+@JsonClass(generateAdapter = false)
+data class SessionFeedbackRequest(
+    @Json(name = "session_id") val sessionId: String,
+    @Json(name = "room_id") val roomId: String,
+    val rating: Int,
+    val text: String? = null
+)
+
 // ── 관계 히스토리 & 기억 앨범 모델 (UX-B 안현우 + UI-C 정수아, 5차 회의 합의) ──
 
 @JsonClass(generateAdapter = false)
@@ -274,6 +284,9 @@ interface ChatApi {
 
     @POST("api/v1/feedback/submit")
     suspend fun submitFeedback(@Body req: FeedbackRequest): Response<Unit>
+
+    @POST("api/v1/session-feedback")
+    suspend fun submitSessionFeedback(@Body req: SessionFeedbackRequest): Response<Unit>
 
     @POST("api/v1/session/check")
     suspend fun checkSession(@Body req: SessionCheckRequest): SessionCheckResponse

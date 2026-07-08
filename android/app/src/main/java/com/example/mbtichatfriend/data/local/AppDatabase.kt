@@ -7,7 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [MessageEntity::class, CharacterEntity::class, DiaryEntity::class, MemoryEntity::class, FeedbackEntity::class],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -87,6 +87,13 @@ abstract class AppDatabase : RoomDatabase() {
                         createdAt INTEGER NOT NULL
                     )"""
                 )
+            }
+        }
+
+        /** v7 → v8: feedback 테이블에 roomId 컬럼 추가 (room_id 미전달 결함 수정) */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE feedback ADD COLUMN roomId TEXT NOT NULL DEFAULT ''")
             }
         }
     }

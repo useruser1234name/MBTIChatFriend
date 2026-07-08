@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from ..auth_middleware import verify_firebase_token
+from ..auth_middleware import require_auth_always, verify_firebase_token
 from ..models import FeedbackRequest, QualityDashboardResponse
 from ..postgres import execute as pg_execute
 from ..postgres_async import get_async_db
@@ -25,15 +25,19 @@ router = APIRouter(prefix="/api/v1", tags=["quality"])
 async def submit_feedback(
     request: Request,
     req: FeedbackRequest,
-    user: Optional[dict] = Depends(verify_firebase_token),
+    user: dict = Depends(require_auth_always),
 ):
-    """사용자 피드백 제출 (thumbs_up / thumbs_down)"""
+    """사용자 피드백 제출 (thumbs_up / thumbs_down).
+
+    P0-4: user_id는 인증 토큰에서 채운다(클라 위조 방지 — events.py 라우터와 동일 패턴).
+    """
+    uid = user.get("uid", "")
     try:
         pg_execute(
             """
             INSERT INTO response_feedback
-                (room_id, character_id, message_id, feedback_type, feedback_detail)
-            VALUES (%s, %s, %s, %s, %s)
+                (room_id, character_id, message_id, feedback_type, feedback_detail, user_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 req.room_id,
@@ -41,6 +45,7 @@ async def submit_feedback(
                 req.message_id,
                 req.feedback_type,
                 req.feedback_detail,
+                uid,
             ),
         )
     except Exception as e:
@@ -93,20 +98,30 @@ class SessionFeedbackRequest(BaseModel):
 
 
 @router.post("/session-feedback")
-async def submit_session_feedback(req: SessionFeedbackRequest):
-    """QS 충족 세션 종료 시 인앱 별점 + 피드백 수집"""
+@limiter.limit("30/minute")
+async def submit_session_feedback(
+    request: Request,
+    req: SessionFeedbackRequest,
+    user: dict = Depends(require_auth_always),
+):
+    """QS 충족 세션 종료 시 인앱 별점 + 피드백 수집.
+
+    P0-4: user_id는 인증 토큰에서 채운다(클라 위조 방지 — events.py 라우터와 동일 패턴).
+    """
     if not (1 <= req.rating <= 5):
         raise HTTPException(status_code=400, detail="rating must be 1-5")
+    uid = user.get("uid", "")
     db = get_async_db()
     await db.execute(
         """
-        INSERT INTO session_feedback (session_id, room_id, rating, text)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO session_feedback (session_id, room_id, rating, text, user_id)
+        VALUES ($1, $2, $3, $4, $5)
         """,
         req.session_id,
         req.room_id,
         req.rating,
         req.text,
+        uid,
     )
     return {"status": "ok"}
 

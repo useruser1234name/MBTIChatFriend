@@ -7,6 +7,8 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.mbtichatfriend.data.local.UserPreferences
+import com.example.mbtichatfriend.data.repository.AnalyticsEvent
+import com.example.mbtichatfriend.data.repository.AnalyticsRepository
 import com.example.mbtichatfriend.data.repository.CharacterRepository
 import com.example.mbtichatfriend.data.repository.ChatRepository
 import com.example.mbtichatfriend.data.repository.DiaryRepository
@@ -23,7 +25,8 @@ class DiaryViewModel @Inject constructor(
     private val diaryRepo: DiaryRepository,
     private val characterRepo: CharacterRepository,
     private val chatRepo: ChatRepository,
-    private val prefs: UserPreferences
+    private val prefs: UserPreferences,
+    private val analyticsRepository: AnalyticsRepository,
 ) : ViewModel() {
 
     val characterId: Long = savedStateHandle.get<String>("characterId")?.toLongOrNull() ?: 0L
@@ -33,6 +36,14 @@ class DiaryViewModel @Inject constructor(
 
     val diaries = diaryRepo.observeDiaries(characterId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        analyticsRepository.track(
+            scope = viewModelScope,
+            eventType = AnalyticsEvent.DIARY_OPENED,
+            characterId = characterId.toString(),
+        )
+    }
 
     var isGenerating by mutableStateOf(false)
         private set
