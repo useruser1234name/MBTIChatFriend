@@ -19,11 +19,20 @@ android {
         versionName = "0.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        buildConfigField("String", "BASE_URL", "\"http://192.168.219.108:8090/\"")
     }
 
+    // BASE_URL은 buildType별로 분리한다.
+    // 로컬 개발 IP는 gradle.properties / local.properties / -P 옵션으로 오버라이드 가능.
+    // 예) local.properties 에  BASE_URL_DEBUG=http://192.168.0.10:8090/
+    val baseUrlDebug = (project.findProperty("BASE_URL_DEBUG") as String?)
+        ?: "http://192.168.219.108:8090/"  // 로컬 개발 기본값 (오버라이드 권장)
+    val baseUrlRelease = (project.findProperty("BASE_URL_RELEASE") as String?)
+        ?: "https://api.mbtichatfriend.app/"
+
     buildTypes {
+        debug {
+            buildConfigField("String", "BASE_URL", "\"$baseUrlDebug\"")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -31,6 +40,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            buildConfigField("String", "BASE_URL", "\"$baseUrlRelease\"")
         }
     }
     compileOptions {

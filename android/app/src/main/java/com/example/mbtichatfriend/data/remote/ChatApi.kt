@@ -46,7 +46,10 @@ data class ChatRequest(
 @JsonClass(generateAdapter = false)
 data class ChatResponse(
     val replies: List<ReplyPart>,
-    @Json(name = "affinity_delta") val affinityDelta: Int = 0
+    @Json(name = "affinity_delta") val affinityDelta: Int = 0,
+    @Json(name = "night_diary_generated") val nightDiaryGenerated: Boolean = false,
+    @Json(name = "next_hook") val nextHook: String = "",
+    @Json(name = "next_goal") val nextGoal: String = ""
 )
 
 @JsonClass(generateAdapter = false)
@@ -154,6 +157,16 @@ data class FeedbackRequest(
     @Json(name = "message_id") val messageId: String,
     @Json(name = "feedback_type") val feedbackType: String,
     @Json(name = "feedback_detail") val feedbackDetail: String = ""
+)
+
+// ── 세션 별점 피드백 (server/app/routers/quality.py SessionFeedbackRequest 스키마와 일치) ──
+
+@JsonClass(generateAdapter = false)
+data class SessionFeedbackRequest(
+    @Json(name = "session_id") val sessionId: String,
+    @Json(name = "room_id") val roomId: String,
+    val rating: Int,
+    val text: String? = null
 )
 
 // ── 관계 히스토리 & 기억 앨범 모델 (UX-B 안현우 + UI-C 정수아, 5차 회의 합의) ──
@@ -272,6 +285,9 @@ interface ChatApi {
     @POST("api/v1/feedback/submit")
     suspend fun submitFeedback(@Body req: FeedbackRequest): Response<Unit>
 
+    @POST("api/v1/session-feedback")
+    suspend fun submitSessionFeedback(@Body req: SessionFeedbackRequest): Response<Unit>
+
     @POST("api/v1/session/check")
     suspend fun checkSession(@Body req: SessionCheckRequest): SessionCheckResponse
 
@@ -297,6 +313,11 @@ interface ChatApi {
 
     @POST("api/v1/billing/verify-purchase")
     suspend fun verifyPurchase(@Body req: PurchaseVerifyRequest): PurchaseVerifyResponse
+
+    // ── 분석 이벤트 로깅 (PM 로드맵 — 최소 계측) ──────────────────────────────
+
+    @POST("api/v1/events/batch")
+    suspend fun logEvents(@Body batch: EventBatchRequest): Response<EventBatchResponse>
 
     // ── 편지 ─────────────────────────────────────────────────────────────────
 
@@ -394,7 +415,8 @@ interface ChatApi {
     @POST("api/v1/referral/link")
     suspend fun generateReferralLink(): ReferralLinkResponse
 
-    @POST("api/v1/referral/redeem-v3")
+    // 서버에는 /redeem 단일 엔드포인트만 존재(A4: {code} JSON body + 인증토큰 uid). redeem-v3는 서버에 없음.
+    @POST("api/v1/referral/redeem")
     suspend fun redeemReferral(@Body req: RedeemRequest): Response<ReferralRedeemResponse>
 
     // ── 커뮤니티 고정 공지 (29차 스프린트) ───────────────────────────────────
@@ -445,6 +467,27 @@ data class ReferralRedeemResponse(
 data class ReferralStatsResponse(
     @Json(name = "invited_count") val invitedCount: Int = 0,
     @Json(name = "reward_days") val rewardDays: Int = 0
+)
+
+// ── 분석 이벤트 모델 (PM 로드맵) ─────────────────────────────────────────────
+
+@JsonClass(generateAdapter = false)
+data class ClientEventDto(
+    @Json(name = "event_type") val eventType: String,
+    @Json(name = "room_id") val roomId: String = "",
+    @Json(name = "character_id") val characterId: String = "",
+    val payload: Map<String, Any?> = emptyMap(),
+)
+
+@JsonClass(generateAdapter = false)
+data class EventBatchRequest(
+    val events: List<ClientEventDto>,
+)
+
+@JsonClass(generateAdapter = false)
+data class EventBatchResponse(
+    val accepted: Int = 0,
+    val skipped: List<String> = emptyList(),
 )
 
 // ── 커뮤니티 모델 (19차 스프린트) ────────────────────────────────────────────

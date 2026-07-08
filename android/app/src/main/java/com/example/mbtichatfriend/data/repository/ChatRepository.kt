@@ -11,6 +11,7 @@ import com.example.mbtichatfriend.data.remote.MemoryItem
 import com.example.mbtichatfriend.data.remote.ReplyPart
 import com.example.mbtichatfriend.data.remote.SessionCheckRequest
 import com.example.mbtichatfriend.data.remote.SessionCheckResponse
+import com.example.mbtichatfriend.data.remote.SessionFeedbackRequest
 import com.example.mbtichatfriend.data.remote.SseClient
 import com.example.mbtichatfriend.data.remote.SseEvent
 import kotlinx.coroutines.flow.Flow
@@ -19,7 +20,10 @@ import javax.inject.Singleton
 
 data class ChatResult(
     val replies: List<ReplyPart>,
-    val affinityDelta: Int
+    val affinityDelta: Int,
+    val nightDiaryGenerated: Boolean = false,
+    val nextHook: String = "",
+    val nextGoal: String = ""
 )
 
 @Singleton
@@ -116,7 +120,13 @@ class ChatRepository @Inject constructor(
                     memories = memories
                 )
             )
-            ChatResult(replies = response.replies, affinityDelta = response.affinityDelta)
+            ChatResult(
+                replies = response.replies,
+                affinityDelta = response.affinityDelta,
+                nightDiaryGenerated = response.nightDiaryGenerated,
+                nextHook = response.nextHook,
+                nextGoal = response.nextGoal,
+            )
         } catch (e: Exception) {
             ChatResult(
                 replies = listOf(
@@ -140,26 +150,37 @@ class ChatRepository @Inject constructor(
     }
 
     /** 피드백 제출: 로컬 저장 → 서버 동기화 (오프라인 우선) */
-    suspend fun submitFeedback(messageId: Long, characterId: Long, feedbackType: String) {
+    suspend fun submitFeedback(
+        messageId: Long,
+        characterId: Long,
+        feedbackType: String,
+        roomId: String = "",
+    ) {
         feedbackDao.insert(
             FeedbackEntity(
                 messageId = messageId,
                 characterId = characterId,
                 feedbackType = feedbackType,
+                roomId = roomId,
             )
         )
         try {
-            api.submitFeedback(
+            val response = api.submitFeedback(
                 FeedbackRequest(
+                    roomId = roomId,
                     characterId = characterId.toString(),
                     messageId = messageId.toString(),
                     feedbackType = feedbackType,
                 )
             )
-            val entity = feedbackDao.getByMessageId(messageId)
-            if (entity != null) feedbackDao.markSynced(entity.id)
+            if (response.isSuccessful || response.code() in 400..499) {
+                // 성공, 또는 4xx(검증 실패 등 영구적 거부) → 재시도 큐에서 제외.
+                // 5xx/네트워크 예외만 재시도 대상으로 남긴다.
+                val entity = feedbackDao.getByMessageId(messageId)
+                if (entity != null) feedbackDao.markSynced(entity.id)
+            }
         } catch (_: Exception) {
-            // 서버 실패 시 로컬만 저장, 나중에 재시도
+            // 네트워크 예외(IOException 등) — 로컬만 저장, 나중에 재시도
         }
     }
 
@@ -175,21 +196,42 @@ class ChatRepository @Inject constructor(
     suspend fun checkSession(req: SessionCheckRequest): SessionCheckResponse =
         api.checkSession(req)
 
+    /**
+     * 세션 종료 시 별점 + 텍스트 피드백 제출. 전용 /session-feedback 엔드포인트로 전송한다.
+     * (구 방식: "session_rating:{n}"을 /feedback/submit thumbs 전용 엔드포인트로 보내던 결함 수정 —
+     * 서버가 Literal["thumbs_up","thumbs_down"]만 허용해 422로 전량 거부되고 있었음)
+     */
+    suspend fun submitSessionFeedback(sessionId: String, roomId: String, rating: Int, text: String?) {
+        api.submitSessionFeedback(
+            SessionFeedbackRequest(
+                sessionId = sessionId,
+                roomId = roomId,
+                rating = rating,
+                text = text,
+            )
+        )
+    }
+
     /** 미동기화 피드백 서버 전송 재시도 */
     suspend fun syncPendingFeedback() {
         val unsynced = feedbackDao.getUnsynced()
         for (fb in unsynced) {
             try {
-                api.submitFeedback(
+                val response = api.submitFeedback(
                     FeedbackRequest(
+                        roomId = fb.roomId,
                         characterId = fb.characterId.toString(),
                         messageId = fb.messageId.toString(),
                         feedbackType = fb.feedbackType,
                     )
                 )
-                feedbackDao.markSynced(fb.id)
+                if (response.isSuccessful || response.code() in 400..499) {
+                    // 성공, 또는 4xx 영구 거부 → 무한 재시도 루프 방지 위해 재시도 큐에서 제외
+                    feedbackDao.markSynced(fb.id)
+                }
+                // 5xx: 아무 것도 하지 않음 → 다음 sync에서 재시도
             } catch (_: Exception) {
-                // 다음 시도에서 재시도
+                // 네트워크 예외 — 다음 시도에서 재시도
             }
         }
     }

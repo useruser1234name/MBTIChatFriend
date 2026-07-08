@@ -1,7 +1,7 @@
 """콘텐츠 필터 단위 테스트"""
 
 import pytest
-from app.content_filter import check_content, check_crisis, get_safety_system_prompt
+from app.content_filter import check_content, check_crisis, detect_crisis_v2, get_safety_system_prompt
 
 
 class TestCheckContent:
@@ -123,6 +123,38 @@ class TestCheckCrisis:
         # check_crisis doesn't have media allowlist yet, so this may trigger
         # This test documents the current behavior for future improvement
         pass  # behavior depends on implementation
+
+
+class TestDetectCrisisV2:
+    """detect_crisis_v2() 맥락/오탐 회귀 테스트"""
+
+    def test_v2_allows_common_idiom(self):
+        is_crisis, tier = detect_crisis_v2("배고파 죽겠다")
+        assert is_crisis is False
+        assert tier == 0
+
+    def test_v2_detects_direct_tier1(self):
+        is_crisis, tier = detect_crisis_v2("죽고 싶어")
+        assert is_crisis is True
+        assert tier == 1
+
+    def test_v2_detects_tier2_with_intensity(self):
+        is_crisis, tier = detect_crisis_v2("정말 더 이상 못 하겠어")
+        assert is_crisis is True
+        assert tier == 2
+
+    def test_v2_escalates_with_negative_history(self):
+        history = [
+            {"role": "user", "content": "요즘 너무 힘들어"},
+            {"role": "assistant", "content": "많이 버거웠겠다."},
+            {"role": "user", "content": "계속 외로워"},
+            {"role": "user", "content": "지쳐"},
+        ]
+
+        is_crisis, tier = detect_crisis_v2("정말 포기하고싶어", history)
+
+        assert is_crisis is True
+        assert tier == 1
 
 
 class TestSafetyPrompt:

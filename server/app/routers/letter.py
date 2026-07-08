@@ -1,7 +1,9 @@
+import datetime
+import random
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
-import random
 
 from ..postgres_async import get_async_db
 
@@ -36,11 +38,12 @@ async def generate_letter(req: LetterRequest):
     """
     template = random.choice(LETTER_TEMPLATES)
     content = template.format(topic=req.top_topic)
+    today = datetime.date.today()
     return {
         "letter_id": f"{req.room_id}_{req.character_id}",
         "content": content,
-        "generated_at": "2026-05-06",
-        "expires_at": "2026-06-06",  # 월 1회 기준
+        "generated_at": today.isoformat(),
+        "expires_at": (today + datetime.timedelta(days=30)).isoformat(),  # 월 1회 기준
     }
 
 

@@ -15,11 +15,15 @@ object ContentFilter {
         // 성적 표현 (명확한 것만)
         "섹스", "성관계", "야동", "포르노", "자위", "오르가",
         "알몸", "나체", "음란",
-        // 폭력
-        "자살", "자해", "죽여", "살인", "칼빵",
+        // 폭력 (타인 대상)
+        "살인", "칼빵",
         // 혐오
         "니거", "한남충", "한녀충", "틀딱", "급식충",
     )
+
+    // 위기 감지 키워드(자살/자해 등)는 클라이언트에서 차단하지 않는다.
+    // 차단하면 서버의 Tier1 자해 위기 개입(전문가 안내) 흐름이 막혀 오히려 위험하다.
+    // 이런 메시지는 서버 content_filter의 위기 감지로 전달되어야 한다.
 
     // 단독으로 사용될 때만 차단 (다른 글자 사이에 섞여 있으면 무시)
     private val standalonePatterns = listOf(
@@ -45,30 +49,27 @@ object ContentFilter {
             return FilterResult(false, "메시지가 너무 길어요 (최대 500자)")
         }
 
-        // TODO: 테스트 모드 - 금칙어/패턴 필터 비활성화
-        // 프로덕션 배포 시 아래 주석 해제 필요
+        // 금칙어 체크 (성적/혐오/타인 대상 폭력). 위기 키워드는 의도적으로 제외.
+        val lowerInput = trimmed.lowercase()
+        for (word in bannedPatterns) {
+            if (lowerInput.contains(word)) {
+                return FilterResult(false, "부적절한 표현이 포함되어 있어요")
+            }
+        }
 
-        // // 금칙어 체크
-        // val lowerInput = trimmed.lowercase()
-        // for (word in bannedPatterns) {
-        //     if (lowerInput.contains(word)) {
-        //         return FilterResult(false, "부적절한 표현이 포함되어 있어요")
-        //     }
-        // }
+        // 단독 사용 패턴 체크
+        for (pattern in standalonePatterns) {
+            if (pattern.containsMatchIn(trimmed)) {
+                return FilterResult(false, "부적절한 표현이 포함되어 있어요")
+            }
+        }
 
-        // // 단독 사용 패턴 체크
-        // for (pattern in standalonePatterns) {
-        //     if (pattern.containsMatchIn(trimmed)) {
-        //         return FilterResult(false, "부적절한 표현이 포함되어 있어요")
-        //     }
-        // }
-
-        // // 의심 패턴 체크
-        // for (pattern in suspiciousPatterns) {
-        //     if (pattern.containsMatchIn(trimmed)) {
-        //         return FilterResult(false, "올바른 메시지를 입력해주세요")
-        //     }
-        // }
+        // 의심 패턴 체크 (스팸/도배)
+        for (pattern in suspiciousPatterns) {
+            if (pattern.containsMatchIn(trimmed)) {
+                return FilterResult(false, "올바른 메시지를 입력해주세요")
+            }
+        }
 
         return FilterResult(true)
     }

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.ChatApi
+import com.example.mbtichatfriend.data.remote.RedeemRequest
 import com.example.mbtichatfriend.data.remote.RemoteConfigManager
 import com.example.mbtichatfriend.data.remote.ReferralLinkResponse
 import com.example.mbtichatfriend.data.remote.ReferralStatsResponse
@@ -62,6 +63,47 @@ class SettingsViewModel @Inject constructor(
                 "친구 초대하기"
             }
         }
+
+    // ── 초대 코드 입력 (Settings 진입점, A8 이후) ────────────────────────────
+    sealed interface RedeemState {
+        data object Idle : RedeemState
+        data object Loading : RedeemState
+        data class Success(val bonusDays: Int) : RedeemState
+        data class Error(val message: String) : RedeemState
+    }
+
+    private val _redeemState = MutableStateFlow<RedeemState>(RedeemState.Idle)
+    val redeemState: StateFlow<RedeemState> = _redeemState.asStateFlow()
+
+    /** V3 endpoint `redeemReferral`(body: {"code": "..."}) 재사용. */
+    fun redeemInviteCode(code: String) {
+        val trimmed = code.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            _redeemState.value = RedeemState.Loading
+            runCatching {
+                chatApi.redeemReferral(RedeemRequest(code = trimmed))
+            }.fold(
+                onSuccess = { response ->
+                    val body = response.body()
+                    if (response.isSuccessful && body?.success == true) {
+                        _redeemState.value = RedeemState.Success(body.bonusDays)
+                    } else {
+                        val msg = body?.message?.takeIf { it.isNotEmpty() }
+                            ?: "코드를 확인해 주세요."
+                        _redeemState.value = RedeemState.Error(msg)
+                    }
+                },
+                onFailure = { e ->
+                    _redeemState.value = RedeemState.Error(e.localizedMessage ?: "코드 적용 실패")
+                }
+            )
+        }
+    }
+
+    fun clearRedeemState() {
+        _redeemState.value = RedeemState.Idle
+    }
 
     init {
         loadReferralData()

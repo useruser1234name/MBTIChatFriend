@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import Header, HTTPException
 
-from .config import REQUIRE_AUTH
+from .config import ENVIRONMENT, INTERNAL_API_TOKEN, REQUIRE_AUTH
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,25 @@ async def require_auth_always(
     except Exception as e:
         logger.warning(f"Token verification failed (strict): {e}")
         raise HTTPException(status_code=401, detail="유효하지 않은 인증 토큰입니다.")
+
+
+async def require_internal_token(
+    x_internal_token: Optional[str] = Header(default=None),
+) -> bool:
+    """배치/스케줄러/관리자 전용 엔드포인트 보호.
+
+    INTERNAL_API_TOKEN과 X-Internal-Token 헤더 일치를 요구한다.
+    - 토큰 미설정 시: production은 거부(503), development는 허용(경고).
+    """
+    if not INTERNAL_API_TOKEN:
+        if ENVIRONMENT == "production":
+            logger.error("[auth] INTERNAL_API_TOKEN 미설정 — production 내부 엔드포인트 거부")
+            raise HTTPException(status_code=503, detail="내부 엔드포인트가 구성되지 않았습니다.")
+        logger.warning("[auth] INTERNAL_API_TOKEN 미설정 — 개발 환경 통과")
+        return True
+    if not x_internal_token or x_internal_token != INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=403, detail="내부 토큰이 유효하지 않습니다.")
+    return True
 
 
 async def verify_firebase_token(

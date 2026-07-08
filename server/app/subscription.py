@@ -34,7 +34,9 @@ PLAN_LIMITS: dict[Plan, dict] = {
         "max_memories": 5,          # 저장 가능한 장기 기억 수
         "max_affinity_level": 3,    # 호감도 4-5는 프리미엄 전용
         "expression_set": False,    # 표정 세트 생성 비활성
-        "night_diary": False,       # 야간 일기 비활성
+        # PM 로드맵: 가장 강력한 D7 훅인 밤 일기를 FREE에도 주 3회 제공
+        "night_diary": True,        # 야간 일기 활성 (주간 한도 적용)
+        "night_diary_weekly_limit": 3,  # FREE: 주 3회 (월/수/금 등)
     },
     Plan.PREMIUM: {
         "max_characters": 5,
@@ -43,6 +45,7 @@ PLAN_LIMITS: dict[Plan, dict] = {
         "max_affinity_level": 5,
         "expression_set": True,
         "night_diary": True,
+        "night_diary_weekly_limit": -1,  # 무제한 (매일)
     },
 }
 
@@ -177,6 +180,54 @@ class SubscriptionManager:
             )
             return False, reason
 
+        return True, ""
+
+    # ── 밤 일기 주간 한도 ──────────────────────────────────────────────────────
+
+    async def check_night_diary_limit(self, user_id: str) -> tuple[bool, str]:
+        """이번 주 밤 일기 생성 가능 여부 확인.
+
+        PM 로드맵: FREE는 주 3회, PREMIUM은 무제한.
+        diary_entries.room_id는 '{uid}:...' 형식. 이번 주(월요일 기준) 생성 수를 센다.
+
+        Returns:
+            (is_allowed: bool, reason: str)
+        """
+        from .postgres_async import get_async_db
+
+        limits = self.get_limits(user_id)
+        if not limits.get("night_diary", False):
+            return False, self.get_upgrade_prompt("night_diary")
+
+        weekly_limit: int = limits.get("night_diary_weekly_limit", -1)
+        if weekly_limit == -1:
+            return True, ""
+
+        db = get_async_db()
+        if not db.available:
+            return True, ""  # DB 미연결 시 낙관적 허용
+
+        try:
+            row = await db.fetchone(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM diary_entries
+                WHERE room_id LIKE $1
+                  AND created_at >= date_trunc('week', NOW())
+                """,
+                f"{user_id}:%",
+            )
+            used = int(row["cnt"]) if row else 0
+        except Exception as e:
+            logger.error(f"[Subscription] 밤 일기 한도 조회 실패: {e}")
+            return True, ""  # 낙관적 허용
+
+        if used >= weekly_limit:
+            reason = (
+                f"이번 주 밤 일기 {weekly_limit}회를 모두 받았어요. "
+                "프리미엄으로 업그레이드하면 매일 밤 일기를 받아볼 수 있답니다 🌙"
+            )
+            return False, reason
         return True, ""
 
     # ── 호감도 레벨 게이팅 ────────────────────────────────────────────────────

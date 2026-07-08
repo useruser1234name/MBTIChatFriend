@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth_middleware import verify_firebase_token
+from ..play_billing import verify_subscription_purchase
 from ..postgres_async import get_async_db
 
 router = APIRouter(prefix="/api/v1/subscriptions", tags=["subscriptions"])
@@ -21,10 +22,18 @@ async def get_uid(user: Optional[dict] = Depends(verify_firebase_token)) -> str:
 @router.post("/premium")
 async def subscribe_premium(
     purchase_token: str,
+    product_id: str = "premium_monthly",
     uid: str = Depends(get_uid),
     conn=Depends(get_async_db),
 ):
-    """프리미엄 구독 처리 (30일)"""
+    """프리미엄 구독 처리 (30일).
+
+    보안(P0-2): purchase_token을 Google Play Developer API로 서버측 검증 후에만
+    플랜을 부여한다. 미검증/미구성 시 production에서 거부.
+    """
+    result = verify_subscription_purchase(product_id, purchase_token)
+    if not result.ok:
+        raise HTTPException(status_code=402, detail=f"영수증 검증 실패: {result.reason}")
     expires = datetime.datetime.utcnow() + datetime.timedelta(days=30)
     await conn.execute("""
         INSERT INTO user_subscriptions(user_id, plan, expires_at, purchase_token)

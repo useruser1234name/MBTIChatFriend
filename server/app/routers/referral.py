@@ -4,8 +4,9 @@ import asyncio
 import secrets
 import string
 import time
+from pydantic import BaseModel, Field
 from ..postgres_async import get_async_db
-from ..auth_middleware import verify_firebase_token
+from ..auth_middleware import require_internal_token, verify_firebase_token
 
 router = APIRouter(prefix="/api/v1/referral", tags=["referral"])
 
@@ -15,6 +16,10 @@ async def get_uid(user: Optional[dict] = Depends(verify_firebase_token)) -> str:
     if not user or not user.get("uid"):
         raise HTTPException(status_code=401, detail="인증이 필요합니다.")
     return user["uid"]
+
+
+class RedeemRequest(BaseModel):
+    code: str = Field(..., min_length=1, max_length=32)
 
 
 def _generate_code(length: int = 8) -> str:
@@ -49,13 +54,12 @@ async def generate_referral_link(uid: str = Depends(get_uid), db=Depends(get_asy
 
 
 @router.post("/generate")
-async def generate_referral_code(user_id: str):
-    """초대 코드 생성. 기존 유효 코드 있으면 반환."""
-    db = get_async_db()
+async def generate_referral_code(uid: str = Depends(get_uid), db=Depends(get_async_db)):
+    """초대 코드 생성(본인). 기존 유효 코드 있으면 반환."""
     # 기존 코드 확인
     existing = await db.fetchone(
         "SELECT code FROM referral_codes WHERE inviter_id = $1 AND expires_at > now() AND redeemed_by IS NULL LIMIT 1",
-        user_id,
+        uid,
     )
     if existing:
         return {"code": existing["code"]}
@@ -64,16 +68,18 @@ async def generate_referral_code(user_id: str):
     await db.execute(
         "INSERT INTO referral_codes (code, inviter_id) VALUES ($1, $2)",
         code,
-        user_id,
+        uid,
     )
     return {"code": code}
 
 
 @router.post("/redeem")
-async def redeem_referral_code(code: str, new_user_id: str):
-    """초대 코드 사용. 수신자 trial 3일 + 발신자 trial 7일 연장 및 FCM 알림."""
+async def redeem_referral_code(body: RedeemRequest, uid: str = Depends(get_uid)):
+    """초대 코드 사용(인증된 본인). 수신자 trial 3일 + 발신자 trial 7일 연장 및 FCM 알림."""
     from ..firebase_service import send_notification_with_record
 
+    code = body.code
+    new_user_id = uid
     db = get_async_db()
     row = await db.fetchone(
         "SELECT inviter_id FROM referral_codes WHERE code = $1 AND expires_at > now() AND redeemed_by IS NULL",
@@ -142,8 +148,10 @@ async def get_referral_stats_me(uid: str = Depends(get_uid), db=Depends(get_asyn
 
 
 @router.get("/stats/{user_id}")
-async def get_referral_stats(user_id: str):
-    """초대 현황 조회."""
+async def get_referral_stats(user_id: str, uid: str = Depends(get_uid)):
+    """초대 현황 조회(본인만)."""
+    if uid != user_id:
+        raise HTTPException(status_code=403, detail="본인의 현황만 조회할 수 있습니다.")
     db = get_async_db()
     row = await db.fetchone(
         """
@@ -161,10 +169,13 @@ async def get_referral_stats(user_id: str):
 
 
 @router.get("/pending-notifications")
-async def get_pending_referral_notifications(db=Depends(get_async_db)):
+async def get_pending_referral_notifications(
+    db=Depends(get_async_db),
+    _: bool = Depends(require_internal_token),
+):
     """
     만료 D-2(48시간 이내) 미사용 코드 조회.
-    FCM 배치 스케줄러(매일 자정)가 호출.
+    FCM 배치 스케줄러(매일 자정)가 호출 — 내부 토큰 필요.
     반환: 수신자 초대 대상 + 발신자(inviter) 재공유 유도 목록.
     """
     start = time.monotonic()
@@ -197,10 +208,13 @@ async def get_pending_referral_notifications(db=Depends(get_async_db)):
 
 
 @router.post("/send-d2-notifications")
-async def send_d2_referral_notifications(db=Depends(get_async_db)):
+async def send_d2_referral_notifications(
+    db=Depends(get_async_db),
+    _: bool = Depends(require_internal_token),
+):
     """
     만료 D-2 미사용 코드 보유자에게 FCM 알림 발송.
-    배치 스케줄러(매일 자정)가 호출. deep_link로 레퍼럴 설정 화면 이동.
+    배치 스케줄러(매일 자정)가 호출 — 내부 토큰 필요. deep_link로 레퍼럴 설정 화면 이동.
     """
     from ..firebase_service import send_notification_with_record
 

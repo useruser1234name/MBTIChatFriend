@@ -17,8 +17,8 @@ class ABTestConfig:
     """A/B 실험 설정."""
 
     experiment_id: str
-    variant_a: str          # 대조군 (예: "gpt-4o-mini")
-    variant_b: str          # 실험군 (예: "gpt-4o")
+    variant_a: str          # 대조군 (예: "gpt-4.1-mini")
+    variant_b: str          # 실험군 (예: "gpt-4.1")
     traffic_split: float    # 0~1 사이 float; variant_b에 배정되는 비율
     active: bool = True
     character_filter: str = ""  # 특정 캐릭터 MBTI에만 적용 (빈 문자열이면 전체 적용)
@@ -29,16 +29,16 @@ class ABTestConfig:
 EXPERIMENTS: Dict[str, ABTestConfig] = {
     "model_routing": ABTestConfig(
         experiment_id="model_routing",
-        variant_a="gpt-4o-mini",   # 대조군
-        variant_b="gpt-4o",        # 실험군
-        traffic_split=0.3,          # 30%에게 gpt-4o 제공
+        variant_a="gpt-4.1-mini",  # 대조군
+        variant_b="gpt-4.1",       # 실험군
+        traffic_split=0.3,          # 30%에게 gpt-4.1 제공
         active=True,
     )
 }
 
 EXPERIMENTS["lora_enfp_v2"] = ABTestConfig(
     experiment_id="lora_enfp_v2",
-    variant_a="gpt-4o-mini",    # 기존 모델 (베이스라인)
+    variant_a="gpt-4.1-mini",   # 기존 모델 (베이스라인)
     variant_b="lora-enfp-v2",   # LoRA 적용 모델
     traffic_split=1.0,           # 0.5 → 1.0: 전체 배포
     active=True,
@@ -46,7 +46,7 @@ EXPERIMENTS["lora_enfp_v2"] = ABTestConfig(
 
 EXPERIMENTS["lora_infj_v1"] = ABTestConfig(
     experiment_id="lora_infj_v1",
-    variant_a="gpt-4o-mini",
+    variant_a="gpt-4.1-mini",
     variant_b="lora-infj-v1",
     traffic_split=1.0,  # 전체 배포
     active=True,
@@ -212,14 +212,14 @@ class ABTestManager:
         실험이 비활성화 상태이거나 존재하지 않으면 variant_a(대조군)를 반환한다.
 
         Returns:
-            배정된 variant 문자열 (예: "gpt-4o-mini" 또는 "gpt-4o")
+            배정된 variant 문자열 (예: "gpt-4.1-mini" 또는 "gpt-4.1")
         """
         config = EXPERIMENTS.get(experiment_id)
         if config is None or not config.active:
             # 실험 없음 또는 비활성 → 대조군
             if config:
                 return config.variant_a
-            return "gpt-4o-mini"  # 기본 fallback
+            return "gpt-4.1-mini"  # 기본 fallback
 
         # 분할 기준: character_id 우선, 없으면 user_id
         split_key = character_id if character_id else user_id
@@ -346,11 +346,11 @@ class ABTestManager:
                         MAX(metric_value)   AS max_val
                     FROM ab_test_results
                     WHERE experiment_id = %s
-                      AND created_at >= NOW() - INTERVAL '%s days'
+                      AND created_at >= NOW() - make_interval(days => %s)
                     GROUP BY variant, metric_name
                     ORDER BY variant, metric_name
                     """,
-                    (experiment_id, days),
+                    (experiment_id, int(days)),
                 )
 
                 variants: dict = {}

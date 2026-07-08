@@ -1,22 +1,19 @@
 package com.example.mbtichatfriend.ui.onboarding
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.example.mbtichatfriend.ui.theme.PastelPink
+import com.example.mbtichatfriend.ui.theme.PastelPinkLight
 
 private val DEFAULT_STARTERS = listOf(
     "안녕! 오늘 어떤 하루였어?",
@@ -33,6 +30,13 @@ private val DEFAULT_STARTERS = listOf(
  * 선택된 스타터로 채팅 첫 턴 자동 입력.
  *
  * 온보딩 이탈 목표: MBTI 단계 38% → 15%
+ *
+ * A8 UX 개선 (2026-06-03):
+ * - FilterChip → 채팅 말풍선 UI로 변경
+ * - "직접 입력하기" → "내 말로 시작하기" 문구 변경
+ * - 레퍼럴 코드 섹션을 이 화면에서 제거 (첫 대화 집중도 향상)
+ *   레퍼럴 진입점: Settings 화면 > "초대 코드 입력" 섹션으로 위임
+ *   (Settings에 해당 섹션이 없을 경우 추가 예정 — TODO: SettingsScreen 레퍼럴 섹션)
  */
 @Composable
 fun StarterSelectionScreen(
@@ -54,12 +58,6 @@ fun StarterSelectionScreen(
     var selectedStarter by remember(displayStarters) {
         mutableStateOf(displayStarters.firstOrNull() ?: "")
     }
-
-    // 레퍼럴 코드 상태 (17차 스프린트)
-    var referralCodeExpanded by remember { mutableStateOf(false) }
-    var referralCode by remember { mutableStateOf("") }
-    var referralApplied by remember { mutableStateOf(false) }
-    var referralError by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = modifier
@@ -83,106 +81,21 @@ fun StarterSelectionScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        displayStarters.forEach { starter ->
-            FilterChip(
-                selected = selectedStarter == starter,
-                onClick = { selectedStarter = starter },
-                label = {
-                    Text(
-                        text = starter,
-                        modifier = Modifier.padding(vertical = 4.dp),
-                    )
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
+        // 말풍선 스타터 목록 — 사용자가 실제로 그 문장을 말한 듯한 UI
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            displayStarters.forEach { starter ->
+                StarterBubble(
+                    text = starter,
+                    isSelected = selectedStarter == starter,
+                    onClick = { selectedStarter = starter },
+                )
+            }
         }
 
         Spacer(modifier = Modifier.weight(1f))
-
-        // ── 초대 코드 Expandable 섹션 (17차 스프린트) ────────────────────────
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            shape = MaterialTheme.shapes.medium,
-            tonalElevation = 1.dp
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { referralCodeExpanded = !referralCodeExpanded },
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "초대 코드가 있으신가요?",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Icon(
-                        imageVector = if (referralCodeExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                AnimatedVisibility(visible = referralCodeExpanded) {
-                    Column(modifier = Modifier.padding(top = 12.dp)) {
-                        if (referralApplied) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "초대 코드가 적용됐어요! 프리미엄 3일이 추가됩니다.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        } else {
-                            OutlinedTextField(
-                                value = referralCode,
-                                onValueChange = { referralCode = it.uppercase().take(8) },
-                                label = { Text("초대 코드 8자리") },
-                                placeholder = { Text("예: AB12CD34") },
-                                singleLine = true,
-                                isError = referralError != null,
-                                supportingText = referralError?.let {
-                                    { Text(it, color = MaterialTheme.colorScheme.error) }
-                                },
-                                trailingIcon = {
-                                    if (referralCode.length == 8) {
-                                        IconButton(onClick = {
-                                            viewModel.redeemReferralCode(referralCode) { success, error ->
-                                                if (success) {
-                                                    referralApplied = true
-                                                    referralError = null
-                                                } else {
-                                                    referralError = error ?: "코드를 확인해 주세요."
-                                                }
-                                            }
-                                        }) {
-                                            Icon(Icons.Default.Check, contentDescription = "코드 적용")
-                                        }
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = KeyboardOptions(
-                                    capitalization = KeyboardCapitalization.Characters,
-                                    imeAction = ImeAction.Done
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        // ─────────────────────────────────────────────────────────────────────
 
         Button(
             onClick = {
@@ -200,7 +113,53 @@ fun StarterSelectionScreen(
             onClick = { onStarterConfirmed("") },  // 스타터 없이 시작
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("직접 입력하기")
+            Text("내 말로 시작하기")
         }
+    }
+}
+
+/**
+ * 채팅 말풍선 모양 스타터 아이템.
+ * 선택된 항목: 파스텔 핑크 배경 + 진한 테두리로 강조.
+ * 미선택 항목: 반투명 배경 + 흐린 테두리.
+ *
+ * 꼬리는 우측 하단(사용자 말풍선 방향)에 위치.
+ */
+@Composable
+private fun StarterBubble(
+    text: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+) {
+    val bubbleBackground = if (isSelected) PastelPink else PastelPinkLight.copy(alpha = 0.35f)
+    val borderColor = if (isSelected) PastelPink else PastelPink.copy(alpha = 0.30f)
+    val textColor = if (isSelected) MaterialTheme.colorScheme.onSurface
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+
+    val bubbleShape = RoundedCornerShape(
+        topStart = 16.dp,
+        topEnd = 16.dp,
+        bottomStart = 16.dp,
+        bottomEnd = 4.dp,     // 사용자 말풍선: 우측 하단 꼬리 효과
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(bubbleShape)
+            .background(bubbleBackground, bubbleShape)
+            .border(
+                width = if (isSelected) 1.5.dp else 1.dp,
+                color = borderColor,
+                shape = bubbleShape,
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = textColor,
+        )
     }
 }

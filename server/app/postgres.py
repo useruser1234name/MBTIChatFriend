@@ -266,6 +266,10 @@ def init_postgres_schema() -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """,
+        # P0-4: user_id 컬럼 추가 — 인증 토큰에서 채워 클라 위조를 방지한다.
+        """
+        ALTER TABLE response_feedback ADD COLUMN IF NOT EXISTS user_id TEXT
+        """,
         """
         CREATE INDEX IF NOT EXISTS idx_response_feedback_character
         ON response_feedback(character_id, created_at DESC)
@@ -389,6 +393,10 @@ def init_postgres_schema() -> None:
             text        TEXT,
             created_at  TIMESTAMPTZ DEFAULT now()
         )
+        """,
+        # P0-4: user_id 컬럼 추가 — 인증 토큰에서 채워 클라 위조를 방지한다.
+        """
+        ALTER TABLE session_feedback ADD COLUMN IF NOT EXISTS user_id TEXT
         """,
         """
         CREATE INDEX IF NOT EXISTS idx_session_feedback_room
@@ -554,8 +562,11 @@ def init_postgres_schema() -> None:
         $$
         """,
         # 사용자 감정 일기 (32차 스프린트)
+        # NOTE: 'diary_entries'는 캐릭터 시점 밤일기(room_id/diary_date/diary_text)로 이미
+        # 정의되어 있다. 사용자 감정일기는 컬럼이 완전히 다르므로 별도 테이블로 분리한다.
+        # (이전엔 동일 이름이라 IF NOT EXISTS로 무시되어 /diary/entries CRUD가 크래시했음.)
         """
-        CREATE TABLE IF NOT EXISTS diary_entries (
+        CREATE TABLE IF NOT EXISTS user_diary_entries (
             id BIGSERIAL PRIMARY KEY,
             user_id TEXT NOT NULL,
             content TEXT NOT NULL,
@@ -565,7 +576,52 @@ def init_postgres_schema() -> None:
         )
         """,
         """
-        CREATE INDEX IF NOT EXISTS idx_diary_entries_user_id ON diary_entries(user_id)
+        CREATE INDEX IF NOT EXISTS idx_user_diary_entries_user_id ON user_diary_entries(user_id)
+        """,
+        # FCM 토큰 저장소 (firebase_service가 참조하나 DDL이 누락되어 있었음)
+        """
+        CREATE TABLE IF NOT EXISTS fcm_tokens (
+            user_id    TEXT PRIMARY KEY,
+            token      TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        # 사용자 테이블 — 가입일/마지막 접속 추적, scheduler D+3/D+5/gratitude 쿼리용
+        # push_enabled: FCM 수신 동의 여부 (기본 TRUE — 앱 최초 실행 시 upsert)
+        # mbti_type: gratitude_day_push 메시지 개인화 (선택적, NULL 허용)
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id       TEXT PRIMARY KEY,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            push_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
+            mbti_type     TEXT
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_users_last_active
+            ON users(last_active_at DESC)
+        """,
+        # 채팅 메시지 적재 테이블 — scheduler D+3/D+5 리텐션 알림 쿼리용
+        # character_mbti: D+5 캐릭터 그리움 메시지 개인화에 사용
+        # role: 'user' | 'assistant'
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id             BIGSERIAL PRIMARY KEY,
+            user_id        TEXT NOT NULL,
+            character_mbti TEXT NOT NULL DEFAULT '',
+            role           TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            content        TEXT NOT NULL,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_user_created
+            ON messages(user_id, created_at DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_messages_created
+            ON messages(created_at DESC)
         """,
     ]
 

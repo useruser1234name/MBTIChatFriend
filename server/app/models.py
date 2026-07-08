@@ -263,6 +263,7 @@ class SubscriptionStatusResponse(BaseModel):
     max_affinity_level: int = 3
     expression_set: bool = False
     night_diary: bool = False
+    night_diary_weekly_limit: int = 0    # -1 이면 무제한 (PREMIUM)
     expires_at: Optional[str] = None     # ISO 8601 문자열 또는 None (영구)
 
 

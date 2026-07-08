@@ -17,6 +17,8 @@ import com.example.mbtichatfriend.data.remote.RemoteConfigManager
 import com.example.mbtichatfriend.data.remote.SessionCheckRequest
 import com.example.mbtichatfriend.data.remote.SseEvent
 import com.example.mbtichatfriend.data.remote.MemoryItem
+import com.example.mbtichatfriend.data.repository.AnalyticsEvent
+import com.example.mbtichatfriend.data.repository.AnalyticsRepository
 import com.example.mbtichatfriend.data.repository.CharacterRepository
 import com.example.mbtichatfriend.data.repository.ChatRepository
 import com.example.mbtichatfriend.data.repository.MemoryRepository
@@ -57,6 +59,7 @@ class ChatViewModel @Inject constructor(
     private val affinityManager: AffinityManager,
     private val feedbackUseCase: FeedbackUseCase,
     private val chatApi: ChatApi,
+    private val analyticsRepository: AnalyticsRepository,
 ) : ViewModel() {
 
     val characterId: Long = savedStateHandle.get<String>("characterId")?.toLongOrNull() ?: 0L
@@ -117,6 +120,9 @@ class ChatViewModel @Inject constructor(
 
     // 세션 시작 시각 (ms) — 피드백 QS 시간 조건 판정용
     private val sessionStartMs = System.currentTimeMillis()
+
+    // 세션 피드백(별점) 제출용 세션 식별자 — ViewModel(=화면) 생명주기와 1:1
+    private val sessionId: String = java.util.UUID.randomUUID().toString()
 
     // 유저 MBTI — 궁합 화면 진입 시 AppNavHost에서 접근
     val myMbti: StateFlow<String> = prefs.userMbti
@@ -322,14 +328,17 @@ class ChatViewModel @Inject constructor(
             // room_id는 "uid:character:nickname" 형식으로 서버와 동일하게 구성
             val ch0 = characterRepo.getById(characterId)
             if (ch0 != null) {
-                val nickname0 = prefs.nickname.first()
-                val uid0 = "user" // Firebase UID는 AuthInterceptor에서 토큰으로 인증됨
-                val roomId0 = "${uid0}:${characterId}:${nickname0}"
-                checkSessionLimit(roomId0)
+                checkSessionLimit(buildRoomId())
             }
 
             sendMessageUseCase.saveUserMessage(characterId, trimmed)
             userMessageCount++
+
+            analyticsRepository.track(
+                scope = viewModelScope,
+                eventType = AnalyticsEvent.CHAT_MESSAGE_SENT,
+                characterId = characterId.toString(),
+            )
 
             // QS 조건 확인: 세션 10분 이상 OR 3턴 이상 → 세션 종료 시 피드백 시트 표시 예약
             val elapsedMinutes = (System.currentTimeMillis() - sessionStartMs) / 60_000
@@ -525,12 +534,22 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /**
+     * room_id는 서버(SessionCheckRequest 등)와 동일한 "uid:character:nickname" 형식으로 구성한다.
+     * Firebase UID는 AuthInterceptor가 토큰으로 인증하므로 클라이언트는 고정 문자열 "user"만 사용.
+     */
+    private suspend fun buildRoomId(): String {
+        val nickname = prefs.nickname.first()
+        return "user:${characterId}:${nickname}"
+    }
+
     fun submitFeedback(messageId: Long, feedbackType: String) {
         viewModelScope.launch {
             feedbackUseCase.submitFeedback(
                 messageId = messageId,
                 feedbackType = feedbackType,
                 characterId = characterId,
+                roomId = buildRoomId(),
             )
         }
     }
@@ -541,16 +560,19 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
-     * 세션 피드백 제출 — 별점과 선택적 텍스트를 서버로 전송 후 시트 닫기.
-     * feedback_type 은 "session_rating:{rating}" 형식, detail 에 텍스트를 담는다.
+     * 세션 피드백 제출 — 별점과 선택적 텍스트를 전용 /session-feedback 엔드포인트로 전송 후 시트 닫기.
+     * (과거 "session_rating:{n}"을 thumbs 전용 /feedback/submit로 보내던 결함 수정 —
+     *  서버가 feedback_type을 Literal["thumbs_up","thumbs_down"]로만 검증해 422로 전량 거부되고,
+     *  실패가 runCatching에 삼켜져 Room에 unsynced로 영구히 쌓이며 syncPendingFeedback이 무한 재시도했음)
      */
     fun submitSessionFeedback(rating: Int, text: String?) {
         viewModelScope.launch {
             runCatching {
-                feedbackUseCase.submitFeedback(
-                    messageId = -1L, // 세션 전체 피드백이므로 메시지 ID 없음
-                    feedbackType = "session_rating:$rating",
-                    characterId = characterId,
+                chatRepo.submitSessionFeedback(
+                    sessionId = sessionId,
+                    roomId = buildRoomId(),
+                    rating = rating,
+                    text = text,
                 )
             }
             dismissFeedbackSheet()

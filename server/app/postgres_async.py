@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -22,6 +23,15 @@ from .config import DATABASE_URL
 from .circuit_breaker import CircuitOpenError, get_db_circuit
 
 logger = logging.getLogger(__name__)
+
+# 쿼리는 asyncpg 형식($1, $2, ...)으로 작성한다. psycopg3는 %s 위치 인자만
+# 인식하므로 실행 직전에 변환한다. (동기 postgres.py와 동일한 규약)
+_PG_PLACEHOLDER_RE = re.compile(r"\$(\d+)")
+
+
+def _to_psycopg(query: str) -> str:
+    """asyncpg 플레이스홀더($1, $2, ...) → psycopg 플레이스홀더(%s)로 변환."""
+    return _PG_PLACEHOLDER_RE.sub("%s", query)
 
 try:
     import psycopg
@@ -95,11 +105,12 @@ class AsyncDatabase:
         """INSERT / UPDATE / DELETE 등 결과 없는 쿼리 실행."""
         if not self._pool:
             return
+        q = _to_psycopg(query)
         cb = get_db_circuit()
         try:
             async def _do() -> None:
                 async with self._pool.connection() as conn:
-                    await conn.execute(query, args)
+                    await conn.execute(q, args)
             await cb.call(_do())
         except CircuitOpenError:
             logger.warning("[CB] postgres circuit OPEN — DB 호출 스킵")
@@ -110,12 +121,13 @@ class AsyncDatabase:
         """단일 행 조회."""
         if not self._pool:
             return None
+        q = _to_psycopg(query)
         cb = get_db_circuit()
         try:
             async def _do() -> Optional[dict]:
                 async with self._pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute(query, args)
+                        await cur.execute(q, args)
                         return await cur.fetchone()
             return await cb.call(_do())
         except CircuitOpenError:
@@ -128,12 +140,13 @@ class AsyncDatabase:
         """다중 행 조회."""
         if not self._pool:
             return []
+        q = _to_psycopg(query)
         cb = get_db_circuit()
         try:
             async def _do() -> list[dict]:
                 async with self._pool.connection() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute(query, args)
+                        await cur.execute(q, args)
                         return await cur.fetchall()
             return await cb.call(_do())
         except CircuitOpenError:
@@ -141,6 +154,27 @@ class AsyncDatabase:
             return []
         except Exception:
             raise
+
+    # ── asyncpg 호환 별칭 ──────────────────────────────────────────
+    # 라우터들이 asyncpg API(fetchrow/fetch/fetchval)를 기대하고 작성되어 있어
+    # 누락 시 호출 즉시 AttributeError가 발생한다. dict_row 기반으로 매핑한다.
+    async def fetchrow(self, query: str, *args: Any) -> Optional[dict]:
+        """단일 행 조회 (asyncpg fetchrow 호환). fetchone과 동일."""
+        return await self.fetchone(query, *args)
+
+    async def fetch(self, query: str, *args: Any) -> list[dict]:
+        """다중 행 조회 (asyncpg fetch 호환). fetchall과 동일."""
+        return await self.fetchall(query, *args)
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        """첫 행의 첫 컬럼 값 조회 (asyncpg fetchval 호환)."""
+        row = await self.fetchone(query, *args)
+        if not row:
+            return None
+        # dict_row 기준 첫 번째 값 반환
+        for value in row.values():
+            return value
+        return None
 
     async def record_api_usage(
         self,
@@ -187,12 +221,14 @@ class AsyncDatabase:
             async with get_async_db_read() as conn:
                 async with conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute(
-                        """
-                        SELECT COALESCE(SUM(total_tokens), 0) AS used
-                        FROM api_usage
-                        WHERE room_id LIKE $1
-                          AND created_at >= CURRENT_DATE
-                        """,
+                        _to_psycopg(
+                            """
+                            SELECT COALESCE(SUM(total_tokens), 0) AS used
+                            FROM api_usage
+                            WHERE room_id LIKE $1
+                              AND created_at >= CURRENT_DATE
+                            """
+                        ),
                         (f"{user_id}:%",),
                     )
                     row = await cur.fetchone()
@@ -218,53 +254,57 @@ class AsyncDatabase:
         if not self._pool:
             return 0
 
+        deleted = 0
         async with self._pool.connection() as conn:
             # conversation_memory 삭제
             mem_key = f"{character_id}:{room_id}" if character_id else room_id
             await conn.execute(
-                "DELETE FROM conversation_memory WHERE memory_key LIKE $1",
-                f"%{mem_key}%",
+                _to_psycopg("DELETE FROM conversation_memory WHERE memory_key LIKE $1"),
+                (f"%{mem_key}%",),
             )
 
             # metric_events 삭제
             await conn.execute(
-                "DELETE FROM metric_events WHERE room_id = $1",
-                room_id,
+                _to_psycopg("DELETE FROM metric_events WHERE room_id = $1"),
+                (room_id,),
             )
 
             # story_state 삭제
             await conn.execute(
-                "DELETE FROM story_state WHERE room_id = $1",
-                room_id,
+                _to_psycopg("DELETE FROM story_state WHERE room_id = $1"),
+                (room_id,),
             )
 
             # diary_entries 삭제
             if character_id:
-                await conn.execute(
-                    "DELETE FROM diary_entries WHERE room_id = $1 AND character_id = $2",
-                    room_id,
-                    character_id,
+                cur = await conn.execute(
+                    _to_psycopg(
+                        "DELETE FROM diary_entries WHERE room_id = $1 AND character_id = $2"
+                    ),
+                    (room_id, character_id),
                 )
             else:
-                await conn.execute(
-                    "DELETE FROM diary_entries WHERE room_id = $1",
-                    room_id,
+                cur = await conn.execute(
+                    _to_psycopg("DELETE FROM diary_entries WHERE room_id = $1"),
+                    (room_id,),
                 )
+            deleted = getattr(cur, "rowcount", 0) or 0
 
             # api_usage 삭제
             await conn.execute(
-                "DELETE FROM api_usage WHERE room_id = $1",
-                room_id,
+                _to_psycopg("DELETE FROM api_usage WHERE room_id = $1"),
+                (room_id,),
             )
 
             # 삭제 이력 기록
             await conn.execute(
-                "INSERT INTO deletion_log (room_id, character_id) VALUES ($1, $2)",
-                room_id,
-                character_id or "",
+                _to_psycopg(
+                    "INSERT INTO deletion_log (room_id, character_id) VALUES ($1, $2)"
+                ),
+                (room_id, character_id or ""),
             )
 
-        return 1  # 삭제 완료
+        return deleted
 
     async def record_investment_event(
         self,
@@ -394,7 +434,16 @@ async def initialize_read_pool(dsn: str = None) -> None:
 
 @asynccontextmanager
 async def get_async_db_read():
-    """읽기 전용 DB. replica 없으면 primary로 폴백."""
-    pool = _read_pool if _read_pool else _async_db._pool
+    """읽기 전용 DB. replica 없으면 primary로 폴백.
+
+    _read_pool과 _async_db._pool 모두 None이면 RuntimeError를 일으켜
+    AttributeError 대신 명확한 오류 메시지를 제공한다.
+    """
+    pool = _read_pool if _read_pool is not None else _async_db._pool
+    if pool is None:
+        raise RuntimeError(
+            "읽기 전용 DB 풀이 초기화되지 않았습니다. "
+            "lifespan에서 init_async_pool()이 완료되었는지 확인하세요."
+        )
     async with pool.connection() as conn:
         yield conn

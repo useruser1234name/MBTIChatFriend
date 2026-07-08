@@ -7,21 +7,36 @@ import math
 import random
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import AsyncGenerator, List, Optional, Tuple, Union
 
 from openai import AsyncOpenAI
 
 from .circuit_breaker import CircuitOpenError, get_openai_circuit
-from .config import OPENAI_API_KEY, TOGETHER_API_KEY, MAX_TOKENS
+from .config import (
+    OPENAI_API_KEY,
+    TOGETHER_API_KEY,
+    MAX_TOKENS,
+    LLM_MODEL_COMPLEX,
+    LLM_MODEL_SIMPLE,
+)
 from .content_filter import check_content, detect_crisis, get_safety_system_prompt
+from .background_tasks import create_tracked_task
 from .models import HistoryMessage, MemoryItem, ReplyPart
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
+from .user_preference import derive_user_style, render_preference_section
 from .vector_store import get_store
 from .finetune_service import get_model_for_character
 from .memory_service import summarize_conversation, extract_facts, extract_episodes, build_memory_context
-from .quality_service import check_diversity, quick_score, score_response_async
+from .quality_service import (
+    check_diversity,
+    classify_quality_issues,
+    quick_score,
+    score_response_async,
+)
 from .metrics_service import record_event
+from .model_routing import resolve_model_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +49,6 @@ QUALITY_GATE_THRESHOLD = 0.4
 _MODEL_COSTS = {
     "gpt-4.1":      {"prompt": 0.002, "completion": 0.008},
     "gpt-4.1-mini": {"prompt": 0.0004, "completion": 0.0016},
-    # Legacy fallback
-    "gpt-4o":       {"prompt": 0.0025, "completion": 0.0100},
-    "gpt-4o-mini":  {"prompt": 0.00015, "completion": 0.0006},
 }
 
 
@@ -456,7 +468,8 @@ async def extract_memories(
             model=LLM_MODEL_SIMPLE,
             messages=messages,
             temperature=0.2,
-            max_tokens=300
+            max_tokens=300,
+            timeout=30,
         )
 
         content = response.choices[0].message.content or ""
@@ -510,6 +523,180 @@ def _filter_relevant_memories(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [mem for _, mem in scored[:top_k]]
+
+
+def _rag_search_sync(scope_id: str, message: str) -> Tuple[List[str], List[dict]]:
+    """블로킹 Chroma 검색 — asyncio.to_thread로 실행해 이벤트 루프 보호.
+
+    Returns (relevant_docs, episodes). 스토어 부재/실패 시 빈 결과.
+    """
+    store = get_store()
+    if not store:
+        return [], []
+    try:
+        docs = store.search_relevant(scope_id, message, n_results=3)
+    except Exception as e:
+        logger.warning(f"[RAG] search_relevant 실패: {e}")
+        docs = []
+    try:
+        episodes = store.search_episodes(scope_id, message, n_results=3)
+    except Exception as e:
+        logger.warning(f"[RAG] search_episodes 실패: {e}")
+        episodes = []
+    return docs, episodes
+
+
+_MEMORY_EXTRACT_INTERVAL = 10  # N턴마다 요약·팩트·에피소드 갱신
+
+
+def _should_extract_memory(orig_history_len: int) -> bool:
+    """기억 추출 트리거 판정.
+
+    반드시 트림 전 원본 히스토리 길이로 판정한다. 트림 후 길이는 10턴
+    이후 항상 _MAX_HISTORY(=10)로 고정되어 매 턴 True가 되는 버그가 있었다.
+    """
+    return orig_history_len >= 4 and orig_history_len % _MEMORY_EXTRACT_INTERVAL == 0
+
+
+async def _background_memory_extraction(
+    character_name: str,
+    nickname: str,
+    conversation_history: List[HistoryMessage],
+    character_id: str,
+    room_id: str,
+) -> None:
+    """백그라운드 메모리 추출 (사용자 응답 블로킹 방지).
+
+    N턴마다 호출되어 대화 요약·팩트·에피소드를 갱신한다. 각 단계는 독립
+    실패해도 나머지를 진행한다(부분 성공 허용).
+    """
+    try:
+        await summarize_conversation(
+            character_name,
+            nickname,
+            conversation_history,
+            room_id=room_id,
+            character_id=character_id,
+        )
+    except Exception as e:
+        logger.warning(f"[memory] 요약 갱신 실패: {e}")
+    try:
+        await extract_facts(
+            character_name,
+            nickname,
+            conversation_history,
+            room_id=room_id,
+            character_id=character_id,
+        )
+    except Exception as e:
+        logger.warning(f"[memory] 팩트 추출 실패: {e}")
+    try:
+        await extract_episodes(
+            character_name,
+            nickname,
+            conversation_history,
+            character_id,
+            room_id,
+        )
+    except Exception as e:
+        logger.warning(f"[memory] 에피소드 추출 실패: {e}")
+    logger.info(f"백그라운드 메모리 추출 완료: {character_name}")
+
+
+def _build_chat_messages(
+    *,
+    mbti: str,
+    speech_style: str,
+    relationship: str,
+    nickname: str,
+    character_name: str,
+    affinity_level: int,
+    user_mbti: str,
+    persona_raw: str,
+    persona_summary: str,
+    dialogue_prompt: str,
+    visual_prompt: str,
+    memory_dicts: Optional[List[dict]],
+    mem_ctx: str,
+    episode_context: str,
+    mood: Optional[str],
+    conversation_history: List[HistoryMessage],
+    message: str,
+) -> List[dict]:
+    """시스템 프롬프트 + safety + 히스토리 + 현재 메시지로 messages 배열 조립.
+
+    generate_reply(논스트림)와 stream_reply(스트림)가 공유하여 프롬프트
+    정합성을 한 곳에서 보장한다.
+    """
+    # 유저 발화 스타일 미러링(개인화 되먹임 MVP). 규칙 기반·LLM 미호출.
+    # 여기 도달하는 conversation_history는 호출부(generate_reply/stream_reply)에서
+    # 이미 최근 10개(=5턴)로 트림된 상태 → 스타일도 최근 5턴 기준으로 산출된다.
+    preference_context = render_preference_section(
+        derive_user_style(conversation_history)
+    )
+    system_prompt = build_system_prompt(
+        mbti=mbti,
+        speech_style=speech_style,
+        relationship=relationship,
+        nickname=nickname,
+        character_name=character_name,
+        affinity_level=affinity_level,
+        user_mbti=user_mbti or "",
+        persona_raw=persona_raw,
+        persona_summary=persona_summary,
+        dialogue_prompt=dialogue_prompt,
+        visual_prompt=visual_prompt,
+        memories=memory_dicts if memory_dicts else None,
+        memory_context=mem_ctx,
+        episode_context=episode_context,
+        preference_context=preference_context,
+    )
+    # safety_prompt는 거의 변하지 않으므로 정적 system_prompt에 인라인하여 prefix caching 효율 극대화
+    safety_prompt = get_safety_system_prompt()
+    combined_prompt = f"{system_prompt}\n\n{safety_prompt}" if safety_prompt else system_prompt
+    messages: List[dict] = [{"role": "system", "content": combined_prompt}]
+    # mood만 별도 system 메시지로 분리 (동적 블록)
+    if mood:
+        messages.append({"role": "system", "content": f"[사용자 오늘 기분: {mood}]"})
+    # 대화 히스토리 추가 (DCI에서 이미 최근 10개로 제한됨)
+    for hist in conversation_history:
+        role = hist.role if hist.role in ("user", "assistant") else "user"
+        if hist.content.strip():
+            messages.append({"role": role, "content": hist.content})
+    # 현재 메시지 (prompt injection 방어를 위한 명시적 경계)
+    messages.append({"role": "user", "content": f"[사용자 메시지]\n{message}\n[/사용자 메시지]"})
+    return messages
+
+
+def _route_model(
+    character_id: str, message: str, history_len: int
+) -> Tuple[str, Optional[str]]:
+    """모델 선택: 파인튜닝 우선 → A/B variant → 복잡도 라우팅.
+
+    Returns (model_id, ab_variant). ab_variant 는 결과 기록용(없으면 None).
+    """
+    finetuned_model = get_model_for_character(character_id) if character_id else None
+    if finetuned_model and finetuned_model != LLM_MODEL_COMPLEX:
+        return finetuned_model, None  # 파인튜닝 모델 우선
+
+    try:
+        if character_id:
+            from .ab_test import get_ab_manager
+            ab_variant = get_ab_manager().assign_variant(
+                user_id=character_id,
+                experiment_id="model_routing",
+            )
+            logger.info(
+                "[AB] model_routing: character_id=%s → variant=%s",
+                character_id, ab_variant,
+            )
+            return ab_variant, ab_variant
+        complexity = _classify_message_complexity(message, history_len)
+        return (LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE), None
+    except Exception as _ab_err:
+        logger.warning("[AB] variant 배정 실패, 복잡도 라우팅으로 fallback: %s", _ab_err)
+        complexity = _classify_message_complexity(message, history_len)
+        return (LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE), None
 
 
 async def generate_reply(
@@ -586,8 +773,18 @@ async def generate_reply(
                 memory_context=_pre_mem_ctx,
             )
         )
+        # RAG(Chroma) 검색도 스레드에서 병렬 시작 — 호감도 분석과 동시 실행되어
+        # LLM 프롬프트 조립 전까지 지연을 흡수한다.
+        _rag_scope_id = _storage_scope_id(room_id, character_id)
+        if _rag_scope_id and get_store():
+            rag_task = asyncio.create_task(
+                asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
+            )
+        else:
+            rag_task = None
     else:
         affinity_task = None
+        rag_task = None
         affinity_delta = calculate_affinity_delta(
             message, affinity_level, conversation_history, user_mbti, mbti
         )
@@ -601,8 +798,7 @@ async def generate_reply(
         # 대화 요약 기억 (memory_service): 10메시지마다 요약/핵심정보 갱신 (백그라운드)
         mem_ctx = _pre_mem_ctx  # 이미 조회한 memory_context 재사용
         if character_name and nickname and conversation_history:
-            hist_len = len(conversation_history)
-            if hist_len >= 4 and hist_len % 10 == 0:
+            if _should_extract_memory(_orig_history_len):
                 create_tracked_task(
                     _background_memory_extraction(
                         character_name,
@@ -621,30 +817,30 @@ async def generate_reply(
                     character_id=character_id,
                 )
 
-        # RAG: Chroma에서 현재 메시지와 관련된 기억 시맨틱 검색
+        # RAG: Chroma 검색 결과 수집 (이미 스레드에서 병렬 실행 중인 rag_task await)
         all_memories = list(memories or [])
         episode_context = ""
-        scope_id = _storage_scope_id(room_id, character_id)
-        if scope_id:
-            store = get_store()
-            if store:
-                rag_docs = store.search_relevant(scope_id, message, n_results=3)
-                existing_keys = {m.key for m in all_memories}
-                for doc in rag_docs:
-                    if ": " in doc:
-                        key, value = doc.split(": ", 1)
-                        if key not in existing_keys:
-                            all_memories.append(MemoryItem(key=key, value=value))
-                            existing_keys.add(key)
+        if rag_task is not None:
+            try:
+                rag_docs, episodes = await rag_task
+            except Exception as e:
+                logger.warning(f"[RAG] 검색 태스크 실패, 스킵: {e}")
+                rag_docs, episodes = [], []
 
-                # 에피소드 기억 검색
-                episodes = store.search_episodes(scope_id, message, n_results=3)
-                if episodes:
-                    ep_lines = ["## 떠오르는 기억"]
-                    ep_lines.append("이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해.")
-                    for ep in episodes:
-                        ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
-                    episode_context = "\n".join(ep_lines)
+            existing_keys = {m.key for m in all_memories}
+            for doc in rag_docs:
+                if ": " in doc:
+                    key, value = doc.split(": ", 1)
+                    if key not in existing_keys:
+                        all_memories.append(MemoryItem(key=key, value=value))
+                        existing_keys.add(key)
+
+            if episodes:
+                ep_lines = ["## 떠오르는 기억"]
+                ep_lines.append("이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해.")
+                for ep in episodes:
+                    ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
+                episode_context = "\n".join(ep_lines)
 
         # ── DCI: 메모리 관련성 필터링 (RAG 병합 완료 후) ───────────────
         _orig_all_memories_len = len(all_memories)
@@ -652,7 +848,7 @@ async def generate_reply(
         # ──────────────────────────────────────────────────────────────
 
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
-        system_prompt = build_system_prompt(
+        messages = _build_chat_messages(
             mbti=mbti,
             speech_style=speech_style,
             relationship=relationship,
@@ -664,64 +860,24 @@ async def generate_reply(
             persona_summary=persona_summary,
             dialogue_prompt=dialogue_prompt,
             visual_prompt=visual_prompt,
-            memories=memory_dicts if memory_dicts else None,
-            memory_context=mem_ctx,
+            memory_dicts=memory_dicts,
+            mem_ctx=mem_ctx,
             episode_context=episode_context,
+            mood=mood,
+            conversation_history=conversation_history,
+            message=message,
         )
-        # 메시지 구성 (시스템 + safety 인라인 + 히스토리 + 현재 메시지)
-        # safety_prompt는 거의 변하지 않으므로 정적 system_prompt에 인라인하여 prefix caching 효율 극대화
-        safety_prompt = get_safety_system_prompt()
-        combined_prompt = f"{system_prompt}\n\n{safety_prompt}" if safety_prompt else system_prompt
-        messages = [
-            {"role": "system", "content": combined_prompt}
-        ]
-        # mood만 별도 system 메시지로 분리 (동적 블록)
-        if mood:
-            messages.append({"role": "system", "content": f"[사용자 오늘 기분: {mood}]"})
-
-        # 대화 히스토리 추가 (DCI에서 이미 최근 10개로 제한됨)
-        for hist in conversation_history:
-            role = hist.role if hist.role in ("user", "assistant") else "user"
-            if hist.content.strip():
-                messages.append({"role": role, "content": hist.content})
-
-        # 현재 메시지 (prompt injection 방어를 위한 명시적 경계)
-        messages.append({"role": "user", "content": f"[사용자 메시지]\n{message}\n[/사용자 메시지]"})
 
         # 모델 선택 (Phase 5: 복잡도 기반 라우팅 + A/B 테스트 overlay)
-        finetuned_model = get_model_for_character(character_id) if character_id else None
-        _ab_variant: Optional[str] = None  # 기록용
-        if finetuned_model and finetuned_model != "gpt-4o":
-            model_id = finetuned_model  # 파인튜닝 모델 우선
-        else:
-            try:
-                # A/B 테스트: character_id 기반으로 variant 배정
-                # character_id 없으면 기존 복잡도 라우팅 유지
-                if character_id:
-                    from .ab_test import get_ab_manager, EXPERIMENTS
-                    _ab_manager = get_ab_manager()
-                    _ab_variant = _ab_manager.assign_variant(
-                        user_id=character_id,
-                        experiment_id="model_routing",
-                    )
-                    model_id = _ab_variant
-                    logger.info(
-                        "[AB] model_routing: character_id=%s → variant=%s",
-                        character_id, model_id,
-                    )
-                else:
-                    # character_id 없으면 기존 복잡도 기반 라우팅 유지
-                    complexity = _classify_message_complexity(message, len(conversation_history))
-                    model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
-            except Exception as _ab_err:
-                # A/B 배정 실패 → graceful fallback
-                logger.warning("[AB] variant 배정 실패, 복잡도 라우팅으로 fallback: %s", _ab_err)
-                complexity = _classify_message_complexity(message, len(conversation_history))
-                model_id = "gpt-4o" if complexity == "complex" else "gpt-4o-mini"
+        model_id, _ab_variant = _route_model(
+            character_id, message, len(conversation_history)
+        )
 
         # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
-        from .routers.chat import _resolve_model as _resolve_lora
-        _resolved_model_id, _lora_base_url = _resolve_lora(model_id, _ab_variant or "")
+        _resolved_model_id, _lora_base_url = await resolve_model_endpoint(
+            model_id,
+            _ab_variant or "",
+        )
         if _lora_base_url and TOGETHER_API_KEY:
             _active_client = AsyncOpenAI(
                 api_key=TOGETHER_API_KEY,
@@ -741,6 +897,7 @@ async def generate_reply(
                     messages=messages,
                     temperature=0.85,
                     max_tokens=1200,
+                    timeout=45,
                 )
             )
         except CircuitOpenError as _cb_err:
@@ -768,47 +925,78 @@ async def generate_reply(
         total_completion_tokens = response.usage.completion_tokens if response.usage else 0
         llm_call_count = 1
 
-        # 품질 게이트: 매우 저품질 시 1회 재생성, 점수 비교 후 교체
+        # 품질 게이트: 매우 저품질 시 1회 재생성, 점수 비교 후 더 좋은 쪽 채택
         if replies:
             score = quick_score(message, content, mbti)
             if score < QUALITY_GATE_THRESHOLD:
+                quality_issues = classify_quality_issues(message, content)
+                record_event(
+                    event_type="quality_gate_triggered",
+                    room_id=room_id,
+                    character_id=character_id,
+                    payload={
+                        "score": score,
+                        "issues": quality_issues,
+                        "model_id": model_id,
+                    },
+                )
                 logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
+
+                # 첫 응답이 JSON 파싱 깨짐(매우 낮은 점수)이면 형식 강제 보강.
+                # response_format=json_object는 배열 형식과 호환 깨지므로 사용 X.
+                # prefix caching 유지를 위해 기존 messages는 그대로 두고,
+                # 트레일링 user 메시지만 추가해 형식만 다시 환기시킨다.
+                retry_messages = messages
+                if score <= 0.2:  # 형식 자체가 깨진 경우만
+                    retry_messages = messages + [{
+                        "role": "user",
+                        "content": (
+                            "직전 응답 형식이 올바르지 않았어. 반드시 "
+                            '[{"text":"...","emotion":"EMOTION_CODE"}] '
+                            "형태의 JSON 배열로만 다시 답해줘. "
+                            "코드블록·설명·다른 텍스트는 절대 붙이지 마."
+                        ),
+                    }]
+
                 try:
                     retry_response = await _openai_cb.call(
                         _active_client.chat.completions.create(
                             model=model_id,
-                            messages=messages,
+                            messages=retry_messages,
                             temperature=0.9,
                             max_tokens=1200,
+                            timeout=45,
                         )
                     )
                 except CircuitOpenError:
                     logger.warning("[CB] openai circuit OPEN — 품질 게이트 재시도 스킵")
                     retry_response = None
+
                 if retry_response:
                     retry_content = retry_response.choices[0].message.content or ""
                     retry_replies = _parse_reply(retry_content)
                     if retry_replies:
-                        replies = retry_replies
-                        content = retry_content
+                        retry_score = quick_score(message, retry_content, mbti)
+                        # 원본과 재시도 중 점수가 더 높은 쪽 채택.
+                        # 동점이면 재시도(더 최신·형식 보강 반영)를 선호.
+                        if retry_score >= score:
+                            logger.info(
+                                f"재생성 채택 (retry={retry_score} >= orig={score})"
+                            )
+                            replies = retry_replies
+                            content = retry_content
+                        else:
+                            logger.info(
+                                f"원본 유지 (orig={score} > retry={retry_score})"
+                            )
 
-        # AI 응답 안전성 필터
+        # AI 응답 안전성 필터 (H-1)
         filtered_replies = []
         for reply in replies:
             is_safe, _ = check_content(reply.text)
             if is_safe:
                 filtered_replies.append(reply)
         result = filtered_replies if filtered_replies else [
-            ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
-        ]
-
-        # AI 응답 필터링 복원 (H-1)
-        filtered = []
-        for reply in result:
-            safe, _ = check_content(reply.text)
-            if safe:
-                filtered.append(reply)
-        result = filtered if filtered else [
             ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
         ]
 
@@ -827,25 +1015,25 @@ async def generate_reply(
         # H-3: 비용 메트릭 백그라운드 기록
         usage = getattr(response, "usage", None)
         if usage:
-            asyncio.create_task(_record_usage(
-                room_id="",  # main.py에서 room_id 주입 불가, chat_service 레벨에서는 빈값
+            create_tracked_task(_record_usage(
+                room_id=room_id,
                 character_id=character_id,
                 model_id=model_id,
                 prompt_tokens=getattr(usage, "prompt_tokens", 0),
                 completion_tokens=getattr(usage, "completion_tokens", 0),
-            ))
+            ), name="record-usage")
 
         # A/B 테스트 결과 기록 (백그라운드)
         if _ab_variant and character_id:
             _total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
-            asyncio.create_task(_record_ab_result(
+            create_tracked_task(_record_ab_result(
                 experiment_id="model_routing",
                 variant=_ab_variant,
                 user_id=character_id,
                 character_id=character_id,
                 tokens=float(_total_tokens),
                 response_time_ms=_elapsed_ms,
-            ))
+            ), name="record-ab-result")
 
         # 백그라운드 품질 평가 (사용자 지연 0)
         full_response = " ".join(r.text for r in result)
@@ -867,12 +1055,286 @@ async def generate_reply(
         # 병렬 호감도 분석 태스크가 남아있으면 정리
         if affinity_task is not None and not affinity_task.done():
             affinity_task.cancel()
+        if rag_task is not None and not rag_task.done():
+            rag_task.cancel()
         logger.error(f"LLM 호출 실패: {e}")
         return [ReplyPart(
             text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?",
             emotion="SURPRISED",
             delay=2000
         )], 0
+
+
+@dataclass
+class StreamDone:
+    """스트리밍 종료 마커. 말풍선 방출이 끝난 뒤 최종 메타데이터 전달."""
+    affinity_delta: int
+    full_text: str
+
+
+async def stream_reply(
+    message: str,
+    mbti: str,
+    speech_style: str,
+    relationship: str,
+    nickname: str,
+    affinity_level: int = 1,
+    conversation_history: List[HistoryMessage] = None,
+    user_mbti: Optional[str] = None,
+    character_name: str = "",
+    character_id: str = "",
+    persona_raw: str = "",
+    persona_summary: str = "",
+    dialogue_prompt: str = "",
+    visual_prompt: str = "",
+    memories: List[MemoryItem] = None,
+    mood: Optional[str] = None,
+    room_id: str = "",
+    owner_uid: str = "",
+) -> AsyncGenerator[Union[ReplyPart, StreamDone], None]:
+    """말풍선 점진 스트리밍 생성기.
+
+    OpenAI 경로를 stream=True 로 호출하고 IncrementalReplyParser 로 완결된
+    말풍선을 즉시 yield 한다(TTFB 단축). 마지막에 StreamDone(affinity_delta,
+    full_text) 을 yield 한다. 콘텐츠 안전/파싱 폴백/서킷 오픈을 모두 처리해
+    항상 최소 1개 말풍선 + StreamDone 을 보장한다.
+
+    설계 노트: 준비 로직(기억·RAG·프롬프트·라우팅)은 generate_reply 와
+    같은 공유 헬퍼(_build_chat_messages, _route_model, _rag_search_sync,
+    resolve_model_endpoint)를 사용한다. 품질 게이트 재생성은 스트리밍과
+    양립 불가하므로 여기서는 수행하지 않는다(quick_score 는 텔레메트리로만).
+    """
+    if conversation_history is None:
+        conversation_history = []
+
+    # 1. 히스토리 서버사이드 제한 (DCI) — 트리거 판정은 트림 전 원본 길이로
+    _orig_history_len = len(conversation_history)
+    _MAX_HISTORY = 10
+    if len(conversation_history) > _MAX_HISTORY:
+        _trim_to = _MAX_HISTORY if _MAX_HISTORY % 2 == 0 else _MAX_HISTORY - 1
+        conversation_history = conversation_history[-_trim_to:]
+
+    # 2. 콘텐츠 안전 필터
+    is_safe, _reason = check_content(message)
+    if not is_safe:
+        yield ReplyPart(
+            text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요?",
+            emotion="SAD",
+            delay=2000,
+        )
+        yield StreamDone(affinity_delta=-2, full_text="")
+        return
+
+    # 3. 선행 memory_context (호감도 분석 입력)
+    _pre_mem_ctx = ""
+    if character_name and nickname:
+        _pre_mem_ctx = await build_memory_context(
+            character_name, nickname, room_id=room_id, character_id=character_id,
+        )
+
+    # 4. 클라이언트 부재 → 목업 (스트리밍 흉내)
+    if not client:
+        affinity_delta = calculate_affinity_delta(
+            message, affinity_level, conversation_history, user_mbti, mbti
+        )
+        for part in _mock_reply(message, mbti, nickname, affinity_level):
+            yield part
+        yield StreamDone(affinity_delta=affinity_delta, full_text="")
+        return
+
+    # 5. 호감도 분석 + RAG 병렬 시작
+    recent_context = ""
+    if conversation_history and len(conversation_history) >= 2:
+        recent_msgs = conversation_history[-8:]
+        recent_context = "\n".join(
+            f"{'사용자' if h.role == 'user' else '캐릭터'}: {h.content}"
+            for h in recent_msgs if h.content.strip()
+        )
+    affinity_task = asyncio.create_task(
+        analyze_affinity_with_llm(
+            message, affinity_level, mbti, recent_context, memory_context=_pre_mem_ctx,
+        )
+    )
+    _rag_scope_id = _storage_scope_id(room_id, character_id)
+    if _rag_scope_id and get_store():
+        rag_task = asyncio.create_task(
+            asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
+        )
+    else:
+        rag_task = None
+
+    affinity_delta = 0
+    full_text = ""
+    try:
+        # 6. 기억 컨텍스트 (N턴 백그라운드 갱신 + 조회)
+        mem_ctx = _pre_mem_ctx
+        if character_name and nickname and conversation_history:
+            if _should_extract_memory(_orig_history_len):
+                create_tracked_task(
+                    _background_memory_extraction(
+                        character_name, nickname, conversation_history,
+                        character_id, room_id,
+                    ),
+                    name="memory-extraction",
+                )
+            if not mem_ctx:
+                mem_ctx = await build_memory_context(
+                    character_name, nickname, room_id=room_id, character_id=character_id,
+                )
+
+        # 7. RAG 수집 + 병합
+        all_memories = list(memories or [])
+        episode_context = ""
+        if rag_task is not None:
+            try:
+                rag_docs, episodes = await rag_task
+            except Exception as e:
+                logger.warning(f"[RAG] 스트리밍 검색 실패, 스킵: {e}")
+                rag_docs, episodes = [], []
+            existing_keys = {m.key for m in all_memories}
+            for doc in rag_docs:
+                if ": " in doc:
+                    key, value = doc.split(": ", 1)
+                    if key not in existing_keys:
+                        all_memories.append(MemoryItem(key=key, value=value))
+                        existing_keys.add(key)
+            if episodes:
+                ep_lines = ["## 떠오르는 기억", "이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해."]
+                for ep in episodes:
+                    ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
+                episode_context = "\n".join(ep_lines)
+
+        all_memories = _filter_relevant_memories(message, all_memories, top_k=3)
+        memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
+
+        # 8. 프롬프트 + 모델 라우팅 (공유 헬퍼)
+        messages = _build_chat_messages(
+            mbti=mbti, speech_style=speech_style, relationship=relationship,
+            nickname=nickname, character_name=character_name, affinity_level=affinity_level,
+            user_mbti=user_mbti or "", persona_raw=persona_raw, persona_summary=persona_summary,
+            dialogue_prompt=dialogue_prompt, visual_prompt=visual_prompt,
+            memory_dicts=memory_dicts, mem_ctx=mem_ctx, episode_context=episode_context,
+            mood=mood, conversation_history=conversation_history, message=message,
+        )
+        model_id, _ab_variant = _route_model(character_id, message, len(conversation_history))
+        _resolved_model_id, _lora_base_url = await resolve_model_endpoint(model_id, _ab_variant or "")
+        if _lora_base_url and TOGETHER_API_KEY:
+            active_client = AsyncOpenAI(api_key=TOGETHER_API_KEY, base_url=_lora_base_url)
+            model_id = _resolved_model_id
+        else:
+            active_client = client
+
+        # 9. 스트리밍 호출 + 증분 파싱
+        # A/B(P0-3): 논스트림 경로와 동일하게 토큰 사용량·응답시간을 기록하기 위해
+        # 가능하면 usage 청크를 요청한다(Together AI LoRA 엔드포인트는 미지원일 수 있어 제외).
+        _stream_kwargs: dict = dict(
+            model=model_id,
+            messages=messages,
+            temperature=0.85,
+            max_tokens=1200,
+            timeout=45,
+            stream=True,
+        )
+        if not (_lora_base_url and TOGETHER_API_KEY):
+            _stream_kwargs["stream_options"] = {"include_usage": True}
+
+        parser = IncrementalReplyParser()
+        _t_start = time.monotonic()
+        _stream_total_tokens = 0.0
+        stream = await active_client.chat.completions.create(**_stream_kwargs)
+        async for chunk in stream:
+            _chunk_usage = getattr(chunk, "usage", None)
+            if _chunk_usage is not None:
+                _stream_total_tokens = float(getattr(_chunk_usage, "total_tokens", 0) or 0)
+            try:
+                delta = chunk.choices[0].delta.content
+            except (IndexError, AttributeError):
+                delta = None
+            if not delta:
+                continue
+            for part in parser.feed(delta):
+                is_safe_part, _ = check_content(part.text)
+                if is_safe_part:
+                    full_text += (" " if full_text else "") + part.text
+                    yield part
+        _elapsed_ms = (time.monotonic() - _t_start) * 1000
+
+        # 10. 폴백: 형식 파괴로 아무 것도 방출 못한 경우 raw 로 재파싱
+        if parser.emitted_count == 0:
+            for part in _parse_reply(parser.raw):
+                is_safe_part, _ = check_content(part.text)
+                if is_safe_part:
+                    full_text += (" " if full_text else "") + part.text
+                    yield part
+
+        # 11. 그래도 비었으면 안전 기본 응답
+        if not full_text:
+            yield ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
+
+        # 12. 저품질 텔레메트리 (재생성 없음)
+        if full_text:
+            _score = quick_score(message, parser.raw or full_text, mbti)
+            if _score < QUALITY_GATE_THRESHOLD:
+                record_event(
+                    event_type="quality_gate_triggered",
+                    room_id=room_id,
+                    character_id=character_id,
+                    payload={
+                        "score": _score,
+                        "issues": classify_quality_issues(message, parser.raw or full_text),
+                        "model_id": model_id,
+                        "streaming": True,
+                    },
+                )
+
+        # 13. 호감도 수집 (병렬 태스크)
+        try:
+            affinity_delta = await affinity_task
+        except Exception as e:
+            logger.warning(f"[stream] 호감도 분석 실패, 키워드 폴백: {e}")
+            affinity_delta = 0
+        if affinity_delta == 0:
+            affinity_delta = calculate_affinity_delta(
+                message, affinity_level, conversation_history, user_mbti, mbti
+            )
+
+        # 14. 백그라운드 품질 평가
+        if full_text:
+            create_tracked_task(
+                _post_response_quality_check(
+                    message, full_text, mbti, affinity_level,
+                    room_id=room_id, character_id=character_id,
+                ),
+                name="quality-check",
+            )
+
+        # 15. A/B 테스트 결과 기록 (P0-3, 백그라운드) — 논스트림 경로(generate_reply)와
+        # 동일 컨벤션: assign_variant 시 character_id 기준으로 배정했으므로 결과도
+        # character_id를 user_id로 사용해 기록한다.
+        if _ab_variant and character_id:
+            create_tracked_task(_record_ab_result(
+                experiment_id="model_routing",
+                variant=_ab_variant,
+                user_id=character_id,
+                character_id=character_id,
+                tokens=_stream_total_tokens,
+                response_time_ms=_elapsed_ms,
+            ), name="record-ab-result")
+
+    except Exception as e:
+        if not affinity_task.done():
+            affinity_task.cancel()
+        if rag_task is not None and not rag_task.done():
+            rag_task.cancel()
+        logger.error(f"스트리밍 생성 실패: {e}")
+        if not full_text:
+            yield ReplyPart(
+                text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?",
+                emotion="SURPRISED",
+                delay=2000,
+            )
+
+    yield StreamDone(affinity_delta=affinity_delta, full_text=full_text)
 
 
 async def stream_lora_response(messages: list, model_id: str, base_url: str):
@@ -885,6 +1347,7 @@ async def stream_lora_response(messages: list, model_id: str, base_url: str):
         stream=True,
         max_tokens=MAX_TOKENS,
         temperature=0.85,
+        timeout=45,
     )
     async for chunk in response:
         delta = chunk.choices[0].delta.content
@@ -1009,7 +1472,8 @@ async def generate_diary(
             model=LLM_MODEL_SIMPLE,
             messages=messages,
             temperature=0.9,
-            max_tokens=600
+            max_tokens=600,
+            timeout=30,
         )
 
         content = response.choices[0].message.content or ""
@@ -1082,6 +1546,7 @@ async def generate_night_diary(
             messages=messages,
             temperature=0.85,
             max_tokens=700,
+            timeout=30,
         )
 
         content = response.choices[0].message.content or ""
@@ -1234,6 +1699,99 @@ def _parse_reply(content: str) -> List[ReplyPart]:
         ReplyPart(text=s, emotion="NEUTRAL", delay=_calculate_delay(s))
         for s in sentences if s
     ]
+
+
+class IncrementalReplyParser:
+    """스트리밍 토큰에서 완성된 {"text","emotion"} 말풍선을 순차 방출.
+
+    LLM 응답 형식 `[{"text":"...","emotion":"CODE"}, ...]` 를 가정하되,
+    객체 하나가 완결될 때마다 즉시 ReplyPart 로 방출한다. 전체 생성이
+    끝나기 전에 첫 말풍선을 내보내 체감 지연(TTFB)을 줄이는 것이 목적.
+
+    형식이 깨져 아무 것도 방출하지 못한 경우, 호출측은 raw 원문으로
+    기존 _parse_reply() 폴백을 수행한다 (emitted_count == 0 판단).
+    """
+
+    _VALID_EMOTIONS = {
+        "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
+        "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",
+    }
+
+    def __init__(self) -> None:
+        self._buf = ""          # 아직 객체로 확정되지 않은 미소비 버퍼
+        self.raw = ""           # 전체 원문 축적 (폴백용)
+        self.emitted_count = 0  # 방출한 말풍선 수
+
+    def feed(self, chunk: Optional[str]) -> List[ReplyPart]:
+        """토큰 청크를 받아 이번 청크로 새로 완결된 말풍선들을 반환."""
+        if not chunk:
+            return []
+        # 스트리밍 중 등장할 수 있는 코드펜스 마커 제거 (부분 토큰 안전)
+        cleaned = chunk.replace("```json", "").replace("```", "")
+        self._buf += cleaned
+        self.raw += chunk
+        return self._drain()
+
+    def _drain(self) -> List[ReplyPart]:
+        out: List[ReplyPart] = []
+        while True:
+            obj_str, rest = self._next_object(self._buf)
+            if obj_str is None:
+                break
+            self._buf = rest
+            part = self._to_part(obj_str)
+            if part is not None:
+                out.append(part)
+                self.emitted_count += 1
+        return out
+
+    @staticmethod
+    def _next_object(s: str) -> Tuple[Optional[str], str]:
+        """버퍼에서 첫 번째 균형 잡힌 {...} 객체를 추출.
+
+        문자열 리터럴/이스케이프를 존중해 brace depth 를 센다.
+        완결 객체가 없으면 (None, 원본 버퍼) 반환.
+        """
+        start = s.find("{")
+        if start < 0:
+            return None, s
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(s)):
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            else:
+                if c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return s[start:i + 1], s[i + 1:]
+        return None, s  # 아직 미완결
+
+    def _to_part(self, obj_str: str) -> Optional[ReplyPart]:
+        try:
+            d = json.loads(obj_str)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(d, dict):
+            return None
+        text = str(d.get("text", "")).strip()
+        if not text:
+            return None
+        emotion = d.get("emotion", "NEUTRAL")
+        if emotion not in self._VALID_EMOTIONS:
+            emotion = "NEUTRAL"
+        return ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text))
 
 
 # ── MBTI 그룹별 목업 응답 ──────────────────────────────────────

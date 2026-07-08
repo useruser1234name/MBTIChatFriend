@@ -3,16 +3,20 @@ package com.example.mbtichatfriend.ui.onboarding
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.example.mbtichatfriend.data.local.CharacterEntity
+import com.example.mbtichatfriend.model.MbtiGroup
 import com.example.mbtichatfriend.model.PRESET_CHARACTERS
 import com.example.mbtichatfriend.model.PresetCharacter
 
@@ -138,39 +142,101 @@ fun CharacterRecommendSection(
     }
 }
 
+/**
+ * A10: 캐릭터 추천 카드 개선.
+ * - 카드 하단에 MBTI 그룹(NT/NF/SJ/SP) 색상 8dp 바 추가
+ * - 첫 마디 예시(말투 미리듣기) 한 줄 표시
+ */
 @Composable
 private fun CharacterRecommendCard(
     character: PresetCharacter,
     onClick: () -> Unit,
 ) {
+    // MBTI 그룹별 색상 (파스텔 테마 일치)
+    val groupColor = mbtiGroupColor(character.group)
+
     OutlinedCard(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = character.name,
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                Text(
-                    text = character.concept,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = character.name,
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = character.concept,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    // 말투 미리듣기 한 줄
+                    Text(
+                        text = "\"${mbtiFirstLine(character.mbti)}\"",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontStyle = FontStyle.Italic,
+                        ),
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                AssistChip(
+                    onClick = onClick,
+                    label = { Text(character.mbti) },
                 )
             }
-            AssistChip(
-                onClick = onClick,
-                label = { Text(character.mbti) },
+
+            // MBTI 그룹 색상 바 (8dp 높이)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .background(
+                        color = groupColor,
+                        shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp),
+                    ),
             )
         }
     }
+}
+
+/** MBTI 그룹별 파스텔 색상 — 테마 Color.kt 토큰 기반 */
+private fun mbtiGroupColor(group: MbtiGroup): Color = when (group) {
+    MbtiGroup.NT -> Color(0xFFC9B1FF)  // 보라 (PastelPurple)
+    MbtiGroup.NF -> Color(0xFFFFB5C2)  // 핑크 (PastelPink)
+    MbtiGroup.SJ -> Color(0xFFB5E8D5)  // 민트 (SoftMint)
+    MbtiGroup.SP -> Color(0xFFFFF3B0)  // 노랑 (SoftYellow)
+}
+
+/**
+ * MBTI별 첫 마디 예시 — 말투 미리듣기 (A10).
+ * PresetCharacters에 별도 firstLine 필드가 없으므로 여기서 간단히 정의.
+ */
+private fun mbtiFirstLine(mbti: String): String = when (mbti) {
+    "INTJ" -> "쓸데없는 말은 안 해. 필요한 거 있으면 말해."
+    "INTP" -> "흠… 그 질문, 좀 더 구체적으로 얘기해줄 수 있어?"
+    "ENTJ" -> "자, 어디부터 시작할까? 시간 낭비는 싫어."
+    "ENTP" -> "오, 재밌는 사람이네. 한번 뒤집어볼까?"
+    "INFJ" -> "처음인데도 이상하게 편하다… 뭔가 통하는 느낌이야."
+    "INFP" -> "안녕~ 나랑 이야기해줘서 고마워. 살짝 설레는걸?"
+    "ENFJ" -> "와, 드디어 만났다! 너에 대해 진짜 많이 궁금해."
+    "ENFP" -> "안녕! 우리 완전 재밌게 지낼 것 같은 예감이야!!"
+    "ISTJ" -> "잘 부탁드립니다. 성실하게 대화하겠습니다."
+    "ISFJ" -> "안녕, 처음이라 긴장됐는데 편하게 얘기해줘서 다행이야."
+    "ESTJ" -> "반가워. 서로 예의 지키면서 잘 지내보자고."
+    "ESFJ" -> "어머, 안녕! 뭔가 필요한 건 없어? 내가 챙겨줄게!"
+    "ISTP" -> "오케이. 뭐가 궁금해?"
+    "ISFP" -> "안녕… 잘 부탁해. 조용히 같이 있어도 괜찮아?"
+    "ESTP" -> "야, 뭐해! 빨리 얘기해봐, 재밌는 거!"
+    "ESFP" -> "안녕안녕!! 우리 엄청 친해질 것 같은데?!"
+    else   -> "안녕! 잘 부탁해."
 }
 
 @Composable

@@ -1,4 +1,12 @@
+import os
+
 import pytest
+
+if os.name == "nt" and os.getenv("RUN_CHROMA_TESTS") != "1":
+    pytest.skip(
+        "ChromaDB PersistentClient tests can hang at process shutdown on Windows; set RUN_CHROMA_TESTS=1 to run explicitly.",
+        allow_module_level=True,
+    )
 
 chromadb = pytest.importorskip("chromadb")
 
