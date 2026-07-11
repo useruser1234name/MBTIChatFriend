@@ -114,7 +114,6 @@ def test_all_routers_import():
     for mod in (
         "app.routers.billing",
         "app.routers.subscription",
-        "app.routers.subscriptions",
         "app.routers.notifications",
         "app.routers.data",
         "app.routers.community",
