@@ -56,6 +56,12 @@ class ChatRequest(BaseModel):
         return v.strip()
 
 
+VALID_EMOTIONS: frozenset = frozenset({
+    "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
+    "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",
+})
+
+
 class ReplyPart(BaseModel):
     text: str
     emotion: str = "NEUTRAL"

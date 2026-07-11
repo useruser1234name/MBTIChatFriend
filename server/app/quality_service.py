@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 
 from .config import OPENAI_API_KEY, LLM_MODEL_SIMPLE, MAX_MESSAGE_LENGTH
 from .metrics_service import record_event
+from .models import VALID_EMOTIONS
 from .postgres import fetchall, fetchone, postgres_enabled
 
 logger = logging.getLogger(__name__)
@@ -102,10 +103,7 @@ async def score_response_async(
 # ── 빠른 품질 체크 (응답 전 게이트) ──────────────────────────────
 
 
-_VALID_EMOTIONS = {
-    "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
-    "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",
-}
+_VALID_EMOTIONS = VALID_EMOTIONS
 
 
 def classify_quality_issues(user_msg: str, ai_response: str) -> List[str]:

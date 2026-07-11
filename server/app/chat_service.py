@@ -22,7 +22,7 @@ from .config import (
 )
 from .content_filter import check_content, detect_crisis, get_safety_system_prompt
 from .background_tasks import create_tracked_task
-from .models import HistoryMessage, MemoryItem, ReplyPart
+from .models import HistoryMessage, MemoryItem, ReplyPart, VALID_EMOTIONS
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
 from .user_preference import derive_user_style, render_preference_section
 from .vector_store import get_store
@@ -1436,7 +1436,7 @@ async def generate_diary(
                 data = json.loads(content[start:end])
                 diary = data.get("diary", "").strip() or content.strip()
                 emotion = data.get("emotion", "NEUTRAL")
-                valid_emotions = {"NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY", "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED"}
+                valid_emotions = VALID_EMOTIONS
                 if emotion not in valid_emotions:
                     emotion = "NEUTRAL"
                 return diary, emotion
@@ -1501,10 +1501,7 @@ async def generate_night_diary(
         )
 
         content = response.choices[0].message.content or ""
-        valid_emotions = {
-            "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
-            "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",
-        }
+        valid_emotions = VALID_EMOTIONS
 
         start = content.find("{")
         end = content.rfind("}") + 1
@@ -1574,7 +1571,7 @@ def _calculate_delay(text: str) -> int:
 
 def _parse_reply(content: str) -> List[ReplyPart]:
     """LLM 응답을 ReplyPart 리스트로 파싱 (강화된 버전)"""
-    valid_emotions = {"NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY", "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED"}
+    valid_emotions = VALID_EMOTIONS
 
     # 1. markdown 코드블록 제거
     content = re.sub(r'```json?\s*', '', content)
@@ -1663,10 +1660,7 @@ class IncrementalReplyParser:
     기존 _parse_reply() 폴백을 수행한다 (emitted_count == 0 판단).
     """
 
-    _VALID_EMOTIONS = {
-        "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
-        "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",
-    }
+    _VALID_EMOTIONS = VALID_EMOTIONS
 
     def __init__(self) -> None:
         self._buf = ""          # 아직 객체로 확정되지 않은 미소비 버퍼
