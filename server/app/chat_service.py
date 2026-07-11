@@ -864,6 +864,197 @@ def _trim_history(
     return conversation_history, orig_len
 
 
+def _safety_check_input(message: str) -> Optional[Tuple[List[ReplyPart], int]]:
+    """사용자 입력 콘텐츠 안전 필터 (H-1).
+
+    generate_reply 전용(잔여 본문 분할, S13). 차단되면 즉시 반환할
+    (blocked_reply, -2) 튜플을, 안전하면 None을 반환한다.
+    """
+    is_safe, _reason = check_content(message)
+    if not is_safe:
+        return [ReplyPart(
+            text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요?",
+            emotion="SAD",
+            delay=2000
+        )], -2
+    return None
+
+
+async def _spawn_parallel_analysis(
+    message: str,
+    mbti: str,
+    affinity_level: int,
+    conversation_history: List[HistoryMessage],
+    user_mbti: Optional[str],
+    character_name: str,
+    nickname: str,
+    character_id: str,
+    room_id: str,
+) -> Tuple[Optional[asyncio.Task], Optional[asyncio.Task], int, str]:
+    """호감도 분석 태스크 + RAG 검색 태스크를 병렬로 시작(클라이언트 있을 때만).
+
+    클라이언트가 없으면 즉시 키워드 기반 호감도를 계산한다.
+
+    generate_reply 전용(잔여 본문 분할, S13). 태스크 소유권은 호출부가
+    유지해야 하므로(예외 시 취소 처리) 생성한 Task 객체를 그대로 반환한다
+    — 헬퍼 안에서 await/취소하지 않는다.
+    Returns (affinity_task, rag_task, affinity_delta, pre_mem_ctx).
+    """
+    affinity_delta = 0
+    # 선행 memory_context 조회 (호감도 분석에 활용)
+    pre_mem_ctx = ""
+    if character_name and nickname:
+        pre_mem_ctx = await build_memory_context(
+            character_name,
+            nickname,
+            room_id=room_id,
+            character_id=character_id,
+        )
+
+    if client:
+        recent_context = _build_recent_context(conversation_history)
+        # 호감도 분석을 비동기 태스크로 시작 (메인 LLM 호출과 병렬 실행)
+        affinity_task = asyncio.create_task(
+            analyze_affinity_with_llm(
+                message, affinity_level, mbti, recent_context,
+                memory_context=pre_mem_ctx,
+            )
+        )
+        # RAG(Chroma) 검색도 스레드에서 병렬 시작 — 호감도 분석과 동시 실행되어
+        # LLM 프롬프트 조립 전까지 지연을 흡수한다.
+        _rag_scope_id = _storage_scope_id(room_id, character_id)
+        if _rag_scope_id and get_store():
+            rag_task = asyncio.create_task(
+                asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
+            )
+        else:
+            rag_task = None
+    else:
+        affinity_task = None
+        rag_task = None
+        affinity_delta = calculate_affinity_delta(
+            message, affinity_level, conversation_history, user_mbti, mbti
+        )
+
+    return affinity_task, rag_task, affinity_delta, pre_mem_ctx
+
+
+async def _assemble_prompt_and_model(
+    mbti: str,
+    speech_style: str,
+    relationship: str,
+    nickname: str,
+    character_name: str,
+    affinity_level: int,
+    user_mbti: Optional[str],
+    persona_raw: str,
+    persona_summary: str,
+    dialogue_prompt: str,
+    visual_prompt: str,
+    memory_dicts: List[dict],
+    mem_ctx: str,
+    episode_context: str,
+    mood: Optional[str],
+    conversation_history: List[HistoryMessage],
+    message: str,
+    character_id: str,
+) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI]:
+    """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/AB/복잡도) + LoRA 클라이언트 해석.
+
+    generate_reply 전용(잔여 본문 분할, S13). 논스트림 경로만 라우팅 성공
+    시 info 로그를 남기므로 _resolve_reply_client(S11)를
+    log_lora_routing=True로 호출한다.
+    Returns (messages, model_id, ab_variant, active_client).
+    """
+    messages = _build_chat_messages(
+        mbti=mbti,
+        speech_style=speech_style,
+        relationship=relationship,
+        nickname=nickname,
+        character_name=character_name,
+        affinity_level=affinity_level,
+        user_mbti=user_mbti or "",
+        persona_raw=persona_raw,
+        persona_summary=persona_summary,
+        dialogue_prompt=dialogue_prompt,
+        visual_prompt=visual_prompt,
+        memory_dicts=memory_dicts,
+        mem_ctx=mem_ctx,
+        episode_context=episode_context,
+        mood=mood,
+        conversation_history=conversation_history,
+        message=message,
+    )
+
+    # 모델 선택 (Phase 5: 복잡도 기반 라우팅 + A/B 테스트 overlay)
+    model_id, ab_variant = _route_model(
+        character_id, message, len(conversation_history)
+    )
+
+    # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
+    active_client, model_id, _lora_base_url = await _resolve_reply_client(
+        model_id, ab_variant, log_lora_routing=True
+    )
+
+    return messages, model_id, ab_variant, active_client
+
+
+def _emit_background_metrics(
+    response,
+    model_id: str,
+    room_id: str,
+    character_id: str,
+    ab_variant: Optional[str],
+    elapsed_ms: float,
+    message: str,
+    result: List[ReplyPart],
+    mbti: str,
+    affinity_level: int,
+) -> None:
+    """LLM 응답 후 비용/AB 테스트/품질 평가를 백그라운드(fire-and-forget)로 기록.
+
+    generate_reply 전용(잔여 본문 분할, S13). 모든 부수효과는
+    create_tracked_task로 스케줄링되며 태스크 소유권은 background_tasks
+    모듈이 관리하므로 본문이 별도로 정리할 필요가 없다(반환값 없음).
+    """
+    # H-3: 비용 메트릭 백그라운드 기록
+    usage = getattr(response, "usage", None)
+    if usage:
+        create_tracked_task(_record_usage(
+            room_id=room_id,
+            character_id=character_id,
+            model_id=model_id,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0),
+            completion_tokens=getattr(usage, "completion_tokens", 0),
+        ), name="record-usage")
+
+    # A/B 테스트 결과 기록 (백그라운드)
+    if ab_variant and character_id:
+        total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
+        create_tracked_task(_record_ab_result(
+            experiment_id="model_routing",
+            variant=ab_variant,
+            user_id=character_id,
+            character_id=character_id,
+            tokens=float(total_tokens),
+            response_time_ms=elapsed_ms,
+        ), name="record-ab-result")
+
+    # 백그라운드 품질 평가 (사용자 지연 0)
+    full_response = " ".join(r.text for r in result)
+    create_tracked_task(
+        _post_response_quality_check(
+            message,
+            full_response,
+            mbti,
+            affinity_level,
+            room_id=room_id,
+            character_id=character_id,
+        ),
+        name="quality-check",
+    )
+
+
 async def generate_reply(
     message: str,
     mbti: str,
@@ -898,50 +1089,15 @@ async def generate_reply(
     # ──────────────────────────────────────────────────────────────────
 
     # 1. 사용자 입력 필터링 (H-1 활성화)
-    is_safe, reason = check_content(message)
-    if not is_safe:
-        return [ReplyPart(
-            text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요?",
-            emotion="SAD",
-            delay=2000
-        )], -2
+    _blocked = _safety_check_input(message)
+    if _blocked is not None:
+        return _blocked
 
     # 2. 호감도 변화 계산 (LLM 우선, 실패 시 키워드 fallback)
-    affinity_delta = 0
-    # 선행 memory_context 조회 (호감도 분석에 활용)
-    _pre_mem_ctx = ""
-    if character_name and nickname:
-        _pre_mem_ctx = await build_memory_context(
-            character_name,
-            nickname,
-            room_id=room_id,
-            character_id=character_id,
-        )
-
-    if client:
-        recent_context = _build_recent_context(conversation_history)
-        # 호감도 분석을 비동기 태스크로 시작 (메인 LLM 호출과 병렬 실행)
-        affinity_task = asyncio.create_task(
-            analyze_affinity_with_llm(
-                message, affinity_level, mbti, recent_context,
-                memory_context=_pre_mem_ctx,
-            )
-        )
-        # RAG(Chroma) 검색도 스레드에서 병렬 시작 — 호감도 분석과 동시 실행되어
-        # LLM 프롬프트 조립 전까지 지연을 흡수한다.
-        _rag_scope_id = _storage_scope_id(room_id, character_id)
-        if _rag_scope_id and get_store():
-            rag_task = asyncio.create_task(
-                asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
-            )
-        else:
-            rag_task = None
-    else:
-        affinity_task = None
-        rag_task = None
-        affinity_delta = calculate_affinity_delta(
-            message, affinity_level, conversation_history, user_mbti, mbti
-        )
+    affinity_task, rag_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
+        message, mbti, affinity_level, conversation_history, user_mbti,
+        character_name, nickname, character_id, room_id,
+    )
 
     # 3. API 키가 없으면 목업 응답
     if not client:
@@ -982,34 +1138,11 @@ async def generate_reply(
         # ──────────────────────────────────────────────────────────────
 
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
-        messages = _build_chat_messages(
-            mbti=mbti,
-            speech_style=speech_style,
-            relationship=relationship,
-            nickname=nickname,
-            character_name=character_name,
-            affinity_level=affinity_level,
-            user_mbti=user_mbti or "",
-            persona_raw=persona_raw,
-            persona_summary=persona_summary,
-            dialogue_prompt=dialogue_prompt,
-            visual_prompt=visual_prompt,
-            memory_dicts=memory_dicts,
-            mem_ctx=mem_ctx,
-            episode_context=episode_context,
-            mood=mood,
-            conversation_history=conversation_history,
-            message=message,
-        )
-
-        # 모델 선택 (Phase 5: 복잡도 기반 라우팅 + A/B 테스트 overlay)
-        model_id, _ab_variant = _route_model(
-            character_id, message, len(conversation_history)
-        )
-
-        # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
-        _active_client, model_id, _lora_base_url = await _resolve_reply_client(
-            model_id, _ab_variant, log_lora_routing=True
+        messages, model_id, _ab_variant, _active_client = await _assemble_prompt_and_model(
+            mbti, speech_style, relationship, nickname, character_name, affinity_level,
+            user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
+            memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
+            character_id,
         )
 
         _t_start = time.monotonic()
@@ -1074,41 +1207,9 @@ async def generate_reply(
         )
         # ─────────────────────────────────────────────────────────────
 
-        # H-3: 비용 메트릭 백그라운드 기록
-        usage = getattr(response, "usage", None)
-        if usage:
-            create_tracked_task(_record_usage(
-                room_id=room_id,
-                character_id=character_id,
-                model_id=model_id,
-                prompt_tokens=getattr(usage, "prompt_tokens", 0),
-                completion_tokens=getattr(usage, "completion_tokens", 0),
-            ), name="record-usage")
-
-        # A/B 테스트 결과 기록 (백그라운드)
-        if _ab_variant and character_id:
-            _total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
-            create_tracked_task(_record_ab_result(
-                experiment_id="model_routing",
-                variant=_ab_variant,
-                user_id=character_id,
-                character_id=character_id,
-                tokens=float(_total_tokens),
-                response_time_ms=_elapsed_ms,
-            ), name="record-ab-result")
-
-        # 백그라운드 품질 평가 (사용자 지연 0)
-        full_response = " ".join(r.text for r in result)
-        create_tracked_task(
-            _post_response_quality_check(
-                message,
-                full_response,
-                mbti,
-                affinity_level,
-                room_id=room_id,
-                character_id=character_id,
-            ),
-            name="quality-check",
+        _emit_background_metrics(
+            response, model_id, room_id, character_id, _ab_variant, _elapsed_ms,
+            message, result, mbti, affinity_level,
         )
 
         return result, affinity_delta
