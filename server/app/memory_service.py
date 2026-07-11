@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 from openai import AsyncOpenAI
 
 from .config import OPENAI_API_KEY, LLM_MODEL_SIMPLE
+from .json_utils import extract_json_array
 from .models import HistoryMessage
 from .postgres import fetchone, execute, postgres_enabled, to_jsonb
 from .scopes import build_legacy_memory_key, build_memory_key
@@ -371,10 +372,9 @@ async def extract_facts(
         content = response.choices[0].message.content or ""
 
         # JSON 배열 파싱 시도
-        start = content.find("[")
-        end = content.rfind("]") + 1
-        if start >= 0 and end > start:
-            data = json.loads(content[start:end])
+        json_str = extract_json_array(content)
+        if json_str is not None:
+            data = json.loads(json_str)
             new_facts = [
                 {"key": item["key"], "value": item["value"]}
                 for item in data
@@ -453,12 +453,11 @@ async def extract_episodes(
         )
         content = response.choices[0].message.content or ""
 
-        start = content.find("[")
-        end = content.rfind("]") + 1
-        if start < 0 or end <= start:
+        json_str = extract_json_array(content)
+        if json_str is None:
             return []
 
-        episodes = json.loads(content[start:end])
+        episodes = json.loads(json_str)
         valid_episodes = [
             ep for ep in episodes
             if isinstance(ep, dict) and ep.get("text")

@@ -22,6 +22,7 @@ from .config import (
 )
 from .content_filter import check_content, detect_crisis, get_safety_system_prompt
 from .background_tasks import create_tracked_task
+from .json_utils import extract_json_array, extract_json_object
 from .models import HistoryMessage, MemoryItem, ReplyPart, VALID_EMOTIONS
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
 from .user_preference import derive_user_style, render_preference_section
@@ -373,10 +374,9 @@ JSON만 출력: {{"delta": 정수, "reason": "이유"}}"""
             timeout=30,
         )
         content = response.choices[0].message.content or ""
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
-            data = json.loads(content[start:end])
+        json_str = extract_json_object(content)
+        if json_str is not None:
+            data = json.loads(json_str)
             delta = int(data.get("delta", 0))
             delta = max(-3, min(5, delta))
             logger.info(f"LLM 호감도 분석: delta={delta}, reason={data.get('reason', '')}")
@@ -424,10 +424,9 @@ async def extract_memories(
         )
 
         content = response.choices[0].message.content or ""
-        start = content.find("[")
-        end = content.rfind("]") + 1
-        if start >= 0 and end > start:
-            data = json.loads(content[start:end])
+        json_str = extract_json_array(content)
+        if json_str is not None:
+            data = json.loads(json_str)
             memories = [
                 MemoryItem(key=item["key"], value=item["value"])
                 for item in data
@@ -1430,10 +1429,9 @@ async def generate_diary(
         content = response.choices[0].message.content or ""
 
         try:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                data = json.loads(content[start:end])
+            json_str = extract_json_object(content)
+            if json_str is not None:
+                data = json.loads(json_str)
                 diary = data.get("diary", "").strip() or content.strip()
                 emotion = data.get("emotion", "NEUTRAL")
                 valid_emotions = VALID_EMOTIONS
@@ -1503,11 +1501,10 @@ async def generate_night_diary(
         content = response.choices[0].message.content or ""
         valid_emotions = VALID_EMOTIONS
 
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start >= 0 and end > start:
+        json_str = extract_json_object(content)
+        if json_str is not None:
             try:
-                data = json.loads(content[start:end])
+                data = json.loads(json_str)
                 diary = str(data.get("diary", "")).strip() or content.strip()
                 emotion = str(data.get("emotion", "NEUTRAL")).strip().upper()
                 next_hook = str(data.get("next_hook", "")).strip()
@@ -1580,10 +1577,8 @@ def _parse_reply(content: str) -> List[ReplyPart]:
 
     # 2. JSON 배열 추출 시도
     try:
-        start = content.find("[")
-        end = content.rfind("]") + 1
-        if start >= 0 and end > start:
-            json_str = content[start:end]
+        json_str = extract_json_array(content)
+        if json_str is not None:
             data = json.loads(json_str)
             replies = []
             for item in data:

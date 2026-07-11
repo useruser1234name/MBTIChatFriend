@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from openai import AsyncOpenAI
 
 from .config import OPENAI_API_KEY, LLM_MODEL_SIMPLE, MAX_MESSAGE_LENGTH
+from .json_utils import extract_json_array
 from .metrics_service import record_event
 from .models import VALID_EMOTIONS
 from .postgres import fetchall, fetchone, postgres_enabled
@@ -112,12 +113,11 @@ def classify_quality_issues(user_msg: str, ai_response: str) -> List[str]:
     try:
         clean = re.sub(r'```json?\s*', '', ai_response)
         clean = re.sub(r'```\s*', '', clean).strip()
-        start = clean.find("[")
-        end = clean.rfind("]") + 1
-        if start < 0 or end <= start:
+        json_str = extract_json_array(clean)
+        if json_str is None:
             return ["JSON_INVALID"]
 
-        data = json.loads(clean[start:end])
+        data = json.loads(json_str)
         if not isinstance(data, list) or len(data) == 0:
             return ["EMPTY_REPLY"]
 
@@ -188,12 +188,11 @@ def quick_score(user_msg: str, ai_response: str, mbti: str) -> float:
     try:
         clean = re.sub(r'```json?\s*', '', ai_response)
         clean = re.sub(r'```\s*', '', clean).strip()
-        start = clean.find("[")
-        end = clean.rfind("]") + 1
-        if start < 0 or end <= start:
+        json_str = extract_json_array(clean)
+        if json_str is None:
             return 0.1
 
-        data = json.loads(clean[start:end])
+        data = json.loads(json_str)
         if not isinstance(data, list) or len(data) == 0:
             return 0.2
 
