@@ -6,28 +6,13 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from typing import Any, Iterable, Optional
 import logging
-from contextlib import asynccontextmanager, contextmanager
-from typing import Any, Iterable, Optional
 
-import asyncio
-
-from .config import DATABASE_URL, DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE
+from .config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
-
-# ── asyncpg (비동기, 프로덕션 권장) ──────────────────────────
-
-_pool = None
-
-try:
-    import asyncpg
-    _ASYNCPG_AVAILABLE = True
-except ImportError:
-    asyncpg = None
-    _ASYNCPG_AVAILABLE = False
 
 # ── psycopg (동기, 폴백) ────────────────────────────────────
 
@@ -44,118 +29,7 @@ except ImportError:
 
 
 def postgres_enabled() -> bool:
-    return bool(DATABASE_URL and (_ASYNCPG_AVAILABLE or _PSYCOPG_AVAILABLE))
-
-
-# ── 비동기 커넥션 풀 관리 ────────────────────────────────────
-
-async def init_async_pool(min_size: int | None = None, max_size: int | None = None) -> None:
-    """asyncpg 커넥션 풀 초기화. 서버 시작 시 호출."""
-    global _pool
-    if not DATABASE_URL or not _ASYNCPG_AVAILABLE:
-        logger.info("asyncpg not available, will use sync psycopg fallback.")
-        return
-
-    _min = min_size if min_size is not None else DB_POOL_MIN_SIZE
-    _max = max_size if max_size is not None else DB_POOL_MAX_SIZE
-    try:
-        _pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=_min,
-            max_size=_max,
-            command_timeout=30,
-        )
-        logger.info(f"asyncpg pool created (min={_min}, max={_max})")
-    except Exception as e:
-        logger.error(f"Failed to create asyncpg pool: {e}")
-        _pool = None
-
-
-async def close_async_pool() -> None:
-    """asyncpg 커넥션 풀 종료. 서버 종료 시 호출."""
-    global _pool
-    if _pool:
-        await _pool.close()
-        _pool = None
-        logger.info("asyncpg pool closed")
-
-
-def _async_pool_ready() -> bool:
-    return _pool is not None
-
-
-def get_postgres_health() -> dict[str, Any]:
-    if not DATABASE_URL:
-        return {"status": "disabled", "mode": "none", "drivers": {"asyncpg": _ASYNCPG_AVAILABLE, "psycopg": _PSYCOPG_AVAILABLE}}
-
-    if _async_pool_ready():
-        return {"status": "ready", "mode": "async_pool", "drivers": {"asyncpg": _ASYNCPG_AVAILABLE, "psycopg": _PSYCOPG_AVAILABLE}}
-
-    if _PSYCOPG_AVAILABLE:
-        return {"status": "degraded", "mode": "sync_fallback", "drivers": {"asyncpg": _ASYNCPG_AVAILABLE, "psycopg": _PSYCOPG_AVAILABLE}}
-
-    return {"status": "error", "mode": "unavailable", "drivers": {"asyncpg": _ASYNCPG_AVAILABLE, "psycopg": _PSYCOPG_AVAILABLE}}
-
-
-# ── 쿼리 형식 변환 ────────────────────────────────────────────
-
-
-import re as _re
-
-_PG_PLACEHOLDER_RE = _re.compile(r"\$(\d+)")
-
-
-def _asyncpg_to_psycopg(query: str) -> str:
-    """asyncpg 플레이스홀더($1, $2, ...) → psycopg 플레이스홀더(%s)로 변환."""
-    return _PG_PLACEHOLDER_RE.sub("%s", query)
-
-
-# ── 비동기 쿼리 API ──────────────────────────────────────────
-
-async def async_execute(query: str, *args: Any) -> str:
-    """비동기 쿼리 실행 (INSERT/UPDATE/DELETE). asyncpg → psycopg 폴백.
-
-    쿼리는 asyncpg 형식($1, $2)으로 작성하고, psycopg 폴백 시 자동 변환.
-    """
-    if not postgres_enabled():
-        return ""
-
-    if _async_pool_ready():
-        async with _pool.acquire() as conn:
-            return await conn.execute(query, *args)
-
-    # 폴백: asyncpg($1) → psycopg(%s) 변환 후 동기 실행
-    converted = _asyncpg_to_psycopg(query)
-    await asyncio.to_thread(execute, converted, args if args else None)
-    return ""
-
-
-async def async_fetchone(query: str, *args: Any) -> Optional[dict]:
-    """비동기 단일 행 조회."""
-    if not postgres_enabled():
-        return None
-
-    if _async_pool_ready():
-        async with _pool.acquire() as conn:
-            row = await conn.fetchrow(query, *args)
-            return dict(row) if row else None
-
-    converted = _asyncpg_to_psycopg(query)
-    return await asyncio.to_thread(fetchone, converted, args if args else None)
-
-
-async def async_fetchall(query: str, *args: Any) -> list[dict]:
-    """비동기 다중 행 조회."""
-    if not postgres_enabled():
-        return []
-
-    if _async_pool_ready():
-        async with _pool.acquire() as conn:
-            rows = await conn.fetch(query, *args)
-            return [dict(r) for r in rows]
-
-    converted = _asyncpg_to_psycopg(query)
-    return await asyncio.to_thread(fetchall, converted, args if args else None)
+    return bool(DATABASE_URL and _PSYCOPG_AVAILABLE)
 
 
 # ── 동기 API (기존 호환, 스키마 초기화 등) ────────────────────
@@ -181,7 +55,7 @@ def get_conn():
 def init_postgres_schema() -> None:
     """Create required tables if PostgreSQL is configured."""
     if not postgres_enabled():
-        if DATABASE_URL and not (_PSYCOPG_AVAILABLE or _ASYNCPG_AVAILABLE):
+        if DATABASE_URL and not _PSYCOPG_AVAILABLE:
             logger.warning("DATABASE_URL is set but no PostgreSQL driver installed.")
         else:
             logger.info("DATABASE_URL not set. PostgreSQL stores are disabled.")
