@@ -4,7 +4,7 @@ import json
 import logging
 import random
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from slowapi import Limiter
@@ -136,32 +136,120 @@ def _prepare_chat_turn(req: ChatRequest, user: Optional[dict]) -> dict:
     }
 
 
-async def _finalize_chat_turn(
-    req: ChatRequest,
-    user: Optional[dict],
+async def _record_affinity_level_up(
     *,
+    event_type: str,
     room_id: str,
-    state,
-    effective_character_id: str,
-    callback_key,
-    replies: list,
-    affinity_delta: int,
-) -> dict:
-    """응답 생성 이후 후처리: 콜백 마킹, 야간 일기, hook/goal, 이벤트, 영속화.
+    from_level: int,
+    to_level: int,
+    turn_count: int,
+    character_id: str,
+    user_id: str,
+) -> None:
+    """affinity_level_up 이벤트를 fire-and-forget으로 기록한다.
 
-    논스트림/스트림 두 경로가 동일하게 호출한다.
+    _finalize_chat_turn 전용(잔여 본문 분할, S15). 원래 중첩 함수였으며
+    room_id/event_type(AFFINITY_LEVEL_UP)은 클로저로 캡처하던 값을
+    명시적 파라미터로 전환했다. record_event는 반드시 모듈 전역 이름으로
+    호출해야 tests/test_chat_turn_events_user_id.py의 monkeypatch가 적용된다.
     """
-    # P0-1: 이 턴에서 기록하는 모든 metric_events에 user_id를 채운다.
-    # (라이브 chat_turn 이벤트에 user_id가 비어 있던 결함 수정 — 검증관 실측 기반)
-    _uid = (user or {}).get("uid", "") if user else ""
+    try:
+        record_event(
+            event_type=event_type,
+            room_id=room_id,
+            character_id=character_id,
+            user_id=user_id,
+            payload={
+                "from_level": from_level,
+                "to_level": to_level,
+                "turn_count": turn_count,
+                "character_id": character_id,
+            },
+        )
+    except Exception as _e:
+        logger.warning("affinity_level_up 이벤트 기록 실패: %s", _e)
 
-    if callback_key:
-        mark_callback_used(room_id, callback_key, state.turn_count)
 
+async def _persist_chat_data(
+    uid: str,
+    character_mbti: str,
+    user_message: str,
+    assistant_text: str,
+) -> None:
+    """scheduler D+3/D+5 리텐션 알림을 위해 users/messages 테이블에 데이터 적재.
+
+    _finalize_chat_turn 전용(잔여 본문 분할, S15). 원래도 필요한 값을 모두
+    파라미터로 받고 있어 클로저 캡처가 없었다(그대로 모듈 레벨로 승격).
+    fire-and-forget: DB 미연결 환경에서도 메인 응답을 블로킹하지 않는다.
+    """
+    if not uid:
+        return
+    from ..postgres_async import get_async_db as _get_db
+    db = _get_db()
+    if not db.available:
+        return
+    try:
+        # users upsert: 최초 가입 시 created_at 기록, 이후엔 last_active_at만 갱신
+        await db.execute(
+            """
+            INSERT INTO users (user_id, created_at, last_active_at)
+            VALUES ($1, NOW(), NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET last_active_at = NOW()
+            """,
+            uid,
+        )
+    except Exception as _e:
+        logger.warning("users upsert 실패 (uid=%s): %s", uid, _e)
+
+    try:
+        # user 메시지 적재
+        if user_message:
+            await db.execute(
+                """
+                INSERT INTO messages (user_id, character_mbti, role, content)
+                VALUES ($1, $2, 'user', $3)
+                """,
+                uid,
+                character_mbti,
+                user_message[:2000],
+            )
+    except Exception as _e:
+        logger.warning("messages(user) INSERT 실패 (uid=%s): %s", uid, _e)
+
+    try:
+        # assistant 응답 적재
+        if assistant_text:
+            await db.execute(
+                """
+                INSERT INTO messages (user_id, character_mbti, role, content)
+                VALUES ($1, $2, 'assistant', $3)
+                """,
+                uid,
+                character_mbti,
+                assistant_text[:2000],
+            )
+    except Exception as _e:
+        logger.warning("messages(assistant) INSERT 실패 (uid=%s): %s", uid, _e)
+
+
+async def _maybe_generate_night_diary(
+    req: ChatRequest,
+    room_id: str,
+    effective_character_id: str,
+    next_hook: str,
+    next_goal: str,
+    uid: str,
+) -> Tuple[bool, str, str]:
+    """세션 종료 + 야간 시간대(22-23시/0-4시)면 야간 일기를 생성·저장한다.
+
+    _finalize_chat_turn 전용(잔여 본문 분할, S15). 조건 미충족이거나 이미
+    생성돼 있거나 저장에 실패하면 (False, next_hook, next_goal)을 입력값
+    그대로 반환한다. 저장에 성공하면 next_hook/next_goal을 일기가 제안한
+    값으로 갱신하고 night_diary_generated 이벤트를 기록한다.
+    Returns (night_diary_generated, next_hook, next_goal).
+    """
     night_diary_generated = False
-    next_hook = state.next_hook
-    next_goal = state.next_goal
-
     if req.end_of_session and _is_night_window(req.client_local_hour):
         diary_date = night_bucket_date(req.client_local_hour)
         if not has_night_diary(room_id, effective_character_id, diary_date):
@@ -191,7 +279,7 @@ async def _finalize_chat_turn(
                     event_type="night_diary_generated",
                     room_id=room_id,
                     character_id=effective_character_id,
-                    user_id=_uid,
+                    user_id=uid,
                     payload={
                         "diary_date": diary_date.isoformat(),
                         "emotion": diary_emotion,
@@ -199,6 +287,61 @@ async def _finalize_chat_turn(
                         "next_goal": diary_next_goal,
                     },
                 )
+    return night_diary_generated, next_hook, next_goal
+
+
+def _infer_affinity_level_change(affinity_delta: int, old_level: int) -> int:
+    """affinity_delta 부호/크기로 새 호감도 레벨을 추정한다.
+
+    _finalize_chat_turn 전용(잔여 본문 분할, S15). 클라이언트가 실제 score를
+    갖고 있어 서버는 delta 기반으로만 추정한다(단순 근사, 정밀 계산 아님).
+    변동이 없다고 판단되면 old_level을 그대로 반환한다.
+    """
+    new_level = old_level
+    if affinity_delta > 0 and old_level < 5:
+        # 다음 레벨 임계값을 넘을 가능성이 있으면 레벨 +1로 간주
+        # (정확한 score는 클라이언트 관리이므로 delta 양수 = 가능성 있음)
+        next_threshold = AFFINITY_LEVEL_THRESHOLDS.get(old_level + 1, 101)
+        # delta가 충분히 크면(임계값 gap의 50% 이상) 레벨 업 추정
+        cur_threshold = AFFINITY_LEVEL_THRESHOLDS.get(old_level, 0)
+        gap = next_threshold - cur_threshold
+        if affinity_delta >= max(1, gap // 2):
+            new_level = old_level + 1
+    elif affinity_delta < 0 and old_level > 1:
+        prev_threshold = AFFINITY_LEVEL_THRESHOLDS.get(old_level, 0)
+        if abs(affinity_delta) >= max(1, prev_threshold // 4):
+            new_level = old_level - 1
+    return new_level
+
+
+async def _finalize_chat_turn(
+    req: ChatRequest,
+    user: Optional[dict],
+    *,
+    room_id: str,
+    state,
+    effective_character_id: str,
+    callback_key,
+    replies: list,
+    affinity_delta: int,
+) -> dict:
+    """응답 생성 이후 후처리: 콜백 마킹, 야간 일기, hook/goal, 이벤트, 영속화.
+
+    논스트림/스트림 두 경로가 동일하게 호출한다.
+    """
+    # P0-1: 이 턴에서 기록하는 모든 metric_events에 user_id를 채운다.
+    # (라이브 chat_turn 이벤트에 user_id가 비어 있던 결함 수정 — 검증관 실측 기반)
+    _uid = (user or {}).get("uid", "") if user else ""
+
+    if callback_key:
+        mark_callback_used(room_id, callback_key, state.turn_count)
+
+    next_hook = state.next_hook
+    next_goal = state.next_goal
+
+    night_diary_generated, next_hook, next_goal = await _maybe_generate_night_diary(
+        req, room_id, effective_character_id, next_hook, next_goal, _uid,
+    )
 
     if not next_hook or not next_goal:
         latest = get_story_state(room_id, effective_character_id)
@@ -208,50 +351,18 @@ async def _finalize_chat_turn(
     # A2: affinity_level_up 이벤트 기록 — 레벨이 변동된 경우에만 fire-and-forget
     if affinity_delta != 0:
         _old_level = req.affinity_level
-        # 임계값 기반 새 레벨 추정 (클라이언트가 실제 score를 갖고 있어 서버는 추정)
         # affinity_delta > 0 이면 현재 레벨보다 높아질 수 있고,
-        # affinity_delta < 0 이면 낮아질 수 있다.
-        # 단순하게 delta 부호로 레벨 이동을 판정한다.
-        _new_level = _old_level
-        if affinity_delta > 0 and _old_level < 5:
-            # 다음 레벨 임계값을 넘을 가능성이 있으면 레벨 +1로 간주
-            # (정확한 score는 클라이언트 관리이므로 delta 양수 = 가능성 있음)
-            _next_threshold = AFFINITY_LEVEL_THRESHOLDS.get(_old_level + 1, 101)
-            # delta가 충분히 크면(임계값 gap의 50% 이상) 레벨 업 추정
-            _cur_threshold = AFFINITY_LEVEL_THRESHOLDS.get(_old_level, 0)
-            _gap = _next_threshold - _cur_threshold
-            if affinity_delta >= max(1, _gap // 2):
-                _new_level = _old_level + 1
-        elif affinity_delta < 0 and _old_level > 1:
-            _prev_threshold = AFFINITY_LEVEL_THRESHOLDS.get(_old_level, 0)
-            if abs(affinity_delta) >= max(1, _prev_threshold // 4):
-                _new_level = _old_level - 1
+        # affinity_delta < 0 이면 낮아질 수 있다 — delta 부호/크기로 추정.
+        _new_level = _infer_affinity_level_change(affinity_delta, _old_level)
 
         if _new_level != _old_level:
             try:
                 from ..analytics_events import AFFINITY_LEVEL_UP
 
-                async def _record_affinity_level_up(
-                    from_level: int, to_level: int, turn_count: int, character_id: str, user_id: str
-                ) -> None:
-                    try:
-                        record_event(
-                            event_type=AFFINITY_LEVEL_UP,
-                            room_id=room_id,
-                            character_id=character_id,
-                            user_id=user_id,
-                            payload={
-                                "from_level": from_level,
-                                "to_level": to_level,
-                                "turn_count": turn_count,
-                                "character_id": character_id,
-                            },
-                        )
-                    except Exception as _e:
-                        logger.warning("affinity_level_up 이벤트 기록 실패: %s", _e)
-
                 create_tracked_task(
                     _record_affinity_level_up(
+                        event_type=AFFINITY_LEVEL_UP,
+                        room_id=room_id,
                         from_level=_old_level,
                         to_level=_new_level,
                         turn_count=state.turn_count,
@@ -285,62 +396,6 @@ async def _finalize_chat_turn(
     _character_mbti = (req.mbti or "").upper()
     _user_message = req.message or ""
     _assistant_text = replies[0].text if replies else ""
-
-    async def _persist_chat_data(
-        uid: str,
-        character_mbti: str,
-        user_message: str,
-        assistant_text: str,
-    ) -> None:
-        if not uid:
-            return
-        from ..postgres_async import get_async_db as _get_db
-        db = _get_db()
-        if not db.available:
-            return
-        try:
-            # users upsert: 최초 가입 시 created_at 기록, 이후엔 last_active_at만 갱신
-            await db.execute(
-                """
-                INSERT INTO users (user_id, created_at, last_active_at)
-                VALUES ($1, NOW(), NOW())
-                ON CONFLICT (user_id)
-                DO UPDATE SET last_active_at = NOW()
-                """,
-                uid,
-            )
-        except Exception as _e:
-            logger.warning("users upsert 실패 (uid=%s): %s", uid, _e)
-
-        try:
-            # user 메시지 적재
-            if user_message:
-                await db.execute(
-                    """
-                    INSERT INTO messages (user_id, character_mbti, role, content)
-                    VALUES ($1, $2, 'user', $3)
-                    """,
-                    uid,
-                    character_mbti,
-                    user_message[:2000],
-                )
-        except Exception as _e:
-            logger.warning("messages(user) INSERT 실패 (uid=%s): %s", uid, _e)
-
-        try:
-            # assistant 응답 적재
-            if assistant_text:
-                await db.execute(
-                    """
-                    INSERT INTO messages (user_id, character_mbti, role, content)
-                    VALUES ($1, $2, 'assistant', $3)
-                    """,
-                    uid,
-                    character_mbti,
-                    assistant_text[:2000],
-                )
-        except Exception as _e:
-            logger.warning("messages(assistant) INSERT 실패 (uid=%s): %s", uid, _e)
 
     try:
         create_tracked_task(
