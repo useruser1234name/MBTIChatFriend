@@ -177,34 +177,6 @@ class FeedbackRequest(BaseModel):
     feedback_detail: str = Field(default="", max_length=200)
 
 
-class DeleteConversationRequest(BaseModel):
-    room_id: str = Field(default="", max_length=120)
-    character_id: str = Field(default="", max_length=120)
-    character_name: str = Field(default="", max_length=120)
-    nickname: str = Field(default="", max_length=120)
-
-
-class DeleteConversationResponse(BaseModel):
-    deleted_count: int = 0
-    status: str = "ok"
-    deleted_targets: List[str] = Field(default_factory=list)
-    cleanup_warnings: List[str] = Field(default_factory=list)
-
-
-class SessionStartRequest(BaseModel):
-    character_id: str = Field(..., min_length=1)
-    current_affinity_score: int = Field(..., ge=0, le=100)
-    current_affinity_level: int = Field(..., ge=1, le=5)
-    last_chat_iso: Optional[str] = None  # ISO 8601 format
-
-
-class SessionStartResponse(BaseModel):
-    adjusted_score: int = 0
-    return_bonus: int = 0
-    original_score: int = 0
-    days_inactive: int = 0
-
-
 class QualityDashboardResponse(BaseModel):
     avg_quality_score: float = 0.0
     avg_mbti_consistency: float = 0.0
@@ -300,14 +272,3 @@ class RelationshipSummaryResponse(BaseModel):
     first_chat_date: str = ""
 
 
-class MemoryMomentItem(BaseModel):
-    """기억 앨범 단일 항목."""
-
-    id: Optional[int] = None
-    room_id: str = ""
-    character_id: str = ""
-    user_id: str = ""
-    message_text: str = ""
-    moment_type: str = "special"
-    user_note: str = ""
-    created_at: str = ""
