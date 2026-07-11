@@ -636,6 +636,158 @@ def _route_model(
         return (LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE), None
 
 
+def _record_quality_gate_event(
+    score: float,
+    user_msg: str,
+    ai_response: str,
+    model_id: str,
+    room_id: str,
+    character_id: str,
+    extra_payload: Optional[dict] = None,
+) -> None:
+    """저품질 응답 감지 시 quality_gate_triggered 이벤트를 기록한다.
+
+    generate_reply/stream_reply가 공유. extra_payload로 payload 확장
+    필드를 흡수(스트리밍 경로만 기존에 "streaming": True 를 추가로 남겼음).
+    """
+    payload = {
+        "score": score,
+        "issues": classify_quality_issues(user_msg, ai_response),
+        "model_id": model_id,
+    }
+    if extra_payload:
+        payload.update(extra_payload)
+    record_event(
+        event_type="quality_gate_triggered",
+        room_id=room_id,
+        character_id=character_id,
+        payload=payload,
+    )
+
+
+async def _collect_affinity_delta(
+    affinity_task: Optional[asyncio.Task],
+    message: str,
+    affinity_level: int,
+    conversation_history: List[HistoryMessage],
+    user_mbti: Optional[str],
+    mbti: str,
+    warn_message: str,
+) -> int:
+    """호감도 분석 병렬 태스크 결과를 수거하고, 실패하거나 0이면 키워드 폴백.
+
+    generate_reply/stream_reply가 공유. warn_message로 실패 로그 문구를
+    호출부별로 다르게 유지(기존 두 함수의 로그 메시지가 서로 달랐음).
+    """
+    affinity_delta = 0
+    if affinity_task is not None:
+        try:
+            affinity_delta = await affinity_task
+        except Exception as e:
+            logger.warning(f"{warn_message}: {e}")
+            affinity_delta = 0
+        if affinity_delta == 0:
+            affinity_delta = calculate_affinity_delta(
+                message, affinity_level, conversation_history, user_mbti, mbti
+            )
+    return affinity_delta
+
+
+async def _merge_rag_results(
+    rag_task: Optional[asyncio.Task],
+    memories: Optional[List[MemoryItem]],
+    warn_context: str,
+) -> Tuple[List[MemoryItem], str]:
+    """RAG(Chroma) 검색 태스크 결과를 dedupe 병합하고 에피소드 컨텍스트를 만든다.
+
+    generate_reply/stream_reply가 공유. warn_context로 실패 로그 문구를
+    호출부별로 다르게 유지(기존 두 함수의 로그 메시지가 서로 달랐음).
+    Returns (all_memories, episode_context).
+    """
+    all_memories = list(memories or [])
+    episode_context = ""
+    if rag_task is not None:
+        try:
+            rag_docs, episodes = await rag_task
+        except Exception as e:
+            logger.warning(f"[RAG] {warn_context} 실패, 스킵: {e}")
+            rag_docs, episodes = [], []
+
+        existing_keys = {m.key for m in all_memories}
+        for doc in rag_docs:
+            if ": " in doc:
+                key, value = doc.split(": ", 1)
+                if key not in existing_keys:
+                    all_memories.append(MemoryItem(key=key, value=value))
+                    existing_keys.add(key)
+
+        if episodes:
+            ep_lines = ["## 떠오르는 기억"]
+            ep_lines.append("이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해.")
+            for ep in episodes:
+                ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
+            episode_context = "\n".join(ep_lines)
+
+    return all_memories, episode_context
+
+
+async def _resolve_reply_client(
+    model_id: str,
+    ab_variant: Optional[str],
+    log_lora_routing: bool = False,
+) -> Tuple[AsyncOpenAI, str, Optional[str]]:
+    """LoRA 서빙이면 Together AI 클라이언트로 전환.
+
+    generate_reply/stream_reply가 공유. log_lora_routing으로 라우팅 성공
+    시 info 로그 여부를 제어(논스트림 경로만 기존에 로그를 남겼음).
+    Returns (active_client, model_id, lora_base_url).
+    """
+    resolved_model_id, lora_base_url = await resolve_model_endpoint(
+        model_id, ab_variant or ""
+    )
+    if lora_base_url and TOGETHER_API_KEY:
+        active_client = AsyncOpenAI(
+            api_key=TOGETHER_API_KEY,
+            base_url=lora_base_url,
+        )
+        model_id = resolved_model_id
+        if log_lora_routing:
+            logger.info("[LoRA] Together AI 라우팅: model=%s base_url=%s", model_id, lora_base_url)
+    else:
+        active_client = client
+    return active_client, model_id, lora_base_url
+
+
+def _build_recent_context(
+    conversation_history: List[HistoryMessage], limit: int = 8
+) -> str:
+    """최근 limit개 메시지를 "사용자/캐릭터: 내용" 형식으로 조인.
+
+    호감도 분석 프롬프트 입력용. generate_reply/stream_reply가 공유.
+    """
+    if not (conversation_history and len(conversation_history) >= 2):
+        return ""
+    recent_msgs = conversation_history[-limit:]
+    return "\n".join(
+        f"{'사용자' if h.role == 'user' else '캐릭터'}: {h.content}"
+        for h in recent_msgs if h.content.strip()
+    )
+
+
+def _trim_history(
+    conversation_history: List[HistoryMessage], max_history: int = 10
+) -> Tuple[List[HistoryMessage], int]:
+    """대화 히스토리를 최대 max_history개로 짝수(user+assistant 쌍) 트림.
+
+    generate_reply/stream_reply가 공유. (trimmed_history, orig_len) 반환.
+    """
+    orig_len = len(conversation_history)
+    if orig_len > max_history:
+        trim_to = max_history if max_history % 2 == 0 else max_history - 1
+        conversation_history = conversation_history[-trim_to:]
+    return conversation_history, orig_len
+
+
 async def generate_reply(
     message: str,
     mbti: str,
@@ -663,12 +815,7 @@ async def generate_reply(
 
     # ── Dynamic Context Injection (W2-1) ──────────────────────────────
     # 1. 대화 히스토리 서버사이드 제한: 최근 10개 메시지(user+assistant 쌍 유지)
-    _orig_history_len = len(conversation_history)
-    _MAX_HISTORY = 10  # 최대 10개 = 5턴(user+assistant)
-    if len(conversation_history) > _MAX_HISTORY:
-        # 짝수 단위로 자르기: 항상 user+assistant 쌍 유지
-        _trim_to = _MAX_HISTORY if _MAX_HISTORY % 2 == 0 else _MAX_HISTORY - 1
-        conversation_history = conversation_history[-_trim_to:]
+    conversation_history, _orig_history_len = _trim_history(conversation_history)
 
     # 2. 메모리 관련성 필터링은 RAG 병합 후 적용 (LLM 호출 직전)
     _orig_memories_len = len(memories) if memories else 0
@@ -696,13 +843,7 @@ async def generate_reply(
         )
 
     if client:
-        recent_context = ""
-        if conversation_history and len(conversation_history) >= 2:
-            recent_msgs = conversation_history[-8:]
-            recent_context = "\n".join(
-                f"{'사용자' if h.role == 'user' else '캐릭터'}: {h.content}"
-                for h in recent_msgs if h.content.strip()
-            )
+        recent_context = _build_recent_context(conversation_history)
         # 호감도 분석을 비동기 태스크로 시작 (메인 LLM 호출과 병렬 실행)
         affinity_task = asyncio.create_task(
             analyze_affinity_with_llm(
@@ -755,29 +896,9 @@ async def generate_reply(
                 )
 
         # RAG: Chroma 검색 결과 수집 (이미 스레드에서 병렬 실행 중인 rag_task await)
-        all_memories = list(memories or [])
-        episode_context = ""
-        if rag_task is not None:
-            try:
-                rag_docs, episodes = await rag_task
-            except Exception as e:
-                logger.warning(f"[RAG] 검색 태스크 실패, 스킵: {e}")
-                rag_docs, episodes = [], []
-
-            existing_keys = {m.key for m in all_memories}
-            for doc in rag_docs:
-                if ": " in doc:
-                    key, value = doc.split(": ", 1)
-                    if key not in existing_keys:
-                        all_memories.append(MemoryItem(key=key, value=value))
-                        existing_keys.add(key)
-
-            if episodes:
-                ep_lines = ["## 떠오르는 기억"]
-                ep_lines.append("이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해.")
-                for ep in episodes:
-                    ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
-                episode_context = "\n".join(ep_lines)
+        all_memories, episode_context = await _merge_rag_results(
+            rag_task, memories, warn_context="검색 태스크"
+        )
 
         # ── DCI: 메모리 관련성 필터링 (RAG 병합 완료 후) ───────────────
         _orig_all_memories_len = len(all_memories)
@@ -811,19 +932,9 @@ async def generate_reply(
         )
 
         # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
-        _resolved_model_id, _lora_base_url = await resolve_model_endpoint(
-            model_id,
-            _ab_variant or "",
+        _active_client, model_id, _lora_base_url = await _resolve_reply_client(
+            model_id, _ab_variant, log_lora_routing=True
         )
-        if _lora_base_url and TOGETHER_API_KEY:
-            _active_client = AsyncOpenAI(
-                api_key=TOGETHER_API_KEY,
-                base_url=_lora_base_url,
-            )
-            model_id = _resolved_model_id
-            logger.info("[LoRA] Together AI 라우팅: model=%s base_url=%s", model_id, _lora_base_url)
-        else:
-            _active_client = client
 
         _t_start = time.monotonic()
         _openai_cb = get_openai_circuit()
@@ -846,16 +957,10 @@ async def generate_reply(
         replies = _parse_reply(content)
 
         # 호감도 분석 태스크 결과 수집 (메인 LLM과 병렬 실행됨)
-        if affinity_task is not None:
-            try:
-                affinity_delta = await affinity_task
-            except Exception as e:
-                logger.warning(f"호감도 분석 태스크 실패, 키워드 폴백 사용: {e}")
-                affinity_delta = 0
-            if affinity_delta == 0:
-                affinity_delta = calculate_affinity_delta(
-                    message, affinity_level, conversation_history, user_mbti, mbti
-                )
+        affinity_delta = await _collect_affinity_delta(
+            affinity_task, message, affinity_level, conversation_history, user_mbti, mbti,
+            warn_message="호감도 분석 태스크 실패, 키워드 폴백 사용",
+        )
 
         # 토큰 사용량 추적
         total_prompt_tokens = response.usage.prompt_tokens if response.usage else 0
@@ -866,17 +971,7 @@ async def generate_reply(
         if replies:
             score = quick_score(message, content, mbti)
             if score < QUALITY_GATE_THRESHOLD:
-                quality_issues = classify_quality_issues(message, content)
-                record_event(
-                    event_type="quality_gate_triggered",
-                    room_id=room_id,
-                    character_id=character_id,
-                    payload={
-                        "score": score,
-                        "issues": quality_issues,
-                        "model_id": model_id,
-                    },
-                )
+                _record_quality_gate_event(score, message, content, model_id, room_id, character_id)
                 logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
 
                 # 첫 응답이 JSON 파싱 깨짐(매우 낮은 점수)이면 형식 강제 보강.
@@ -1045,11 +1140,7 @@ async def stream_reply(
         conversation_history = []
 
     # 1. 히스토리 서버사이드 제한 (DCI) — 트리거 판정은 트림 전 원본 길이로
-    _orig_history_len = len(conversation_history)
-    _MAX_HISTORY = 10
-    if len(conversation_history) > _MAX_HISTORY:
-        _trim_to = _MAX_HISTORY if _MAX_HISTORY % 2 == 0 else _MAX_HISTORY - 1
-        conversation_history = conversation_history[-_trim_to:]
+    conversation_history, _orig_history_len = _trim_history(conversation_history)
 
     # 2. 콘텐츠 안전 필터
     is_safe, _reason = check_content(message)
@@ -1080,13 +1171,7 @@ async def stream_reply(
         return
 
     # 5. 호감도 분석 + RAG 병렬 시작
-    recent_context = ""
-    if conversation_history and len(conversation_history) >= 2:
-        recent_msgs = conversation_history[-8:]
-        recent_context = "\n".join(
-            f"{'사용자' if h.role == 'user' else '캐릭터'}: {h.content}"
-            for h in recent_msgs if h.content.strip()
-        )
+    recent_context = _build_recent_context(conversation_history)
     affinity_task = asyncio.create_task(
         analyze_affinity_with_llm(
             message, affinity_level, mbti, recent_context, memory_context=_pre_mem_ctx,
@@ -1120,26 +1205,9 @@ async def stream_reply(
                 )
 
         # 7. RAG 수집 + 병합
-        all_memories = list(memories or [])
-        episode_context = ""
-        if rag_task is not None:
-            try:
-                rag_docs, episodes = await rag_task
-            except Exception as e:
-                logger.warning(f"[RAG] 스트리밍 검색 실패, 스킵: {e}")
-                rag_docs, episodes = [], []
-            existing_keys = {m.key for m in all_memories}
-            for doc in rag_docs:
-                if ": " in doc:
-                    key, value = doc.split(": ", 1)
-                    if key not in existing_keys:
-                        all_memories.append(MemoryItem(key=key, value=value))
-                        existing_keys.add(key)
-            if episodes:
-                ep_lines = ["## 떠오르는 기억", "이 기억들을 대화에서 자연스럽게 활용할 수 있으면 활용해."]
-                for ep in episodes:
-                    ep_lines.append(f"- {ep['text']} (감정: {ep['emotion']})")
-                episode_context = "\n".join(ep_lines)
+        all_memories, episode_context = await _merge_rag_results(
+            rag_task, memories, warn_context="스트리밍 검색"
+        )
 
         all_memories = _filter_relevant_memories(message, all_memories, top_k=3)
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
@@ -1154,12 +1222,9 @@ async def stream_reply(
             mood=mood, conversation_history=conversation_history, message=message,
         )
         model_id, _ab_variant = _route_model(character_id, message, len(conversation_history))
-        _resolved_model_id, _lora_base_url = await resolve_model_endpoint(model_id, _ab_variant or "")
-        if _lora_base_url and TOGETHER_API_KEY:
-            active_client = AsyncOpenAI(api_key=TOGETHER_API_KEY, base_url=_lora_base_url)
-            model_id = _resolved_model_id
-        else:
-            active_client = client
+        active_client, model_id, _lora_base_url = await _resolve_reply_client(
+            model_id, _ab_variant, log_lora_routing=False
+        )
 
         # 9. 스트리밍 호출 + 증분 파싱
         # A/B(P0-3): 논스트림 경로와 동일하게 토큰 사용량·응답시간을 기록하기 위해
@@ -1212,28 +1277,16 @@ async def stream_reply(
         if full_text:
             _score = quick_score(message, parser.raw or full_text, mbti)
             if _score < QUALITY_GATE_THRESHOLD:
-                record_event(
-                    event_type="quality_gate_triggered",
-                    room_id=room_id,
-                    character_id=character_id,
-                    payload={
-                        "score": _score,
-                        "issues": classify_quality_issues(message, parser.raw or full_text),
-                        "model_id": model_id,
-                        "streaming": True,
-                    },
+                _record_quality_gate_event(
+                    _score, message, parser.raw or full_text, model_id, room_id, character_id,
+                    extra_payload={"streaming": True},
                 )
 
         # 13. 호감도 수집 (병렬 태스크)
-        try:
-            affinity_delta = await affinity_task
-        except Exception as e:
-            logger.warning(f"[stream] 호감도 분석 실패, 키워드 폴백: {e}")
-            affinity_delta = 0
-        if affinity_delta == 0:
-            affinity_delta = calculate_affinity_delta(
-                message, affinity_level, conversation_history, user_mbti, mbti
-            )
+        affinity_delta = await _collect_affinity_delta(
+            affinity_task, message, affinity_level, conversation_history, user_mbti, mbti,
+            warn_message="[stream] 호감도 분석 실패, 키워드 폴백",
+        )
 
         # 14. 백그라운드 품질 평가
         if full_text:
