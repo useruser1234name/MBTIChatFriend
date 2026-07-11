@@ -4,7 +4,7 @@ import json
 import logging
 import random
 import openai
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -381,7 +381,7 @@ async def _finalize_chat_turn(
         character_id=effective_character_id,
         user_id=_uid,
         payload={
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "turn_count": state.turn_count,
             "affinity_delta": affinity_delta,
             "callback_used": bool(callback_key),

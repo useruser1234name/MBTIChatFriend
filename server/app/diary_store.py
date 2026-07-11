@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from .postgres import fetchone, postgres_enabled
@@ -10,7 +10,7 @@ from .postgres import fetchone, postgres_enabled
 
 def night_bucket_date(client_local_hour: Optional[int], now_utc: Optional[datetime] = None) -> date:
     """Map night time (22:00~04:59) into one logical diary day bucket."""
-    now = now_utc or datetime.utcnow()
+    now = now_utc or datetime.now(timezone.utc).replace(tzinfo=None)
     bucket = now.date()
 
     if client_local_hour is None:
