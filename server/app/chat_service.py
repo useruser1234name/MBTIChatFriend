@@ -867,8 +867,11 @@ def _trim_history(
 def _safety_check_input(message: str) -> Optional[Tuple[List[ReplyPart], int]]:
     """사용자 입력 콘텐츠 안전 필터 (H-1).
 
-    generate_reply 전용(잔여 본문 분할, S13). 차단되면 즉시 반환할
-    (blocked_reply, -2) 튜플을, 안전하면 None을 반환한다.
+    generate_reply/stream_reply가 공유(S13/S14 잔여 본문 분할). 차단되면
+    즉시 반환할 (blocked_reply, -2) 튜플을, 안전하면 None을 반환한다.
+    stream_reply는 반환된 튜플을 그대로 return하지 않고 개별 ReplyPart를
+    yield한 뒤 StreamDone을 yield하고 return하는 형태로 변환해 사용한다
+    (yield 페이로드는 이 함수가 만드는 ReplyPart와 바이트 동일).
     """
     is_safe, _reason = check_content(message)
     if not is_safe:
@@ -895,9 +898,13 @@ async def _spawn_parallel_analysis(
 
     클라이언트가 없으면 즉시 키워드 기반 호감도를 계산한다.
 
-    generate_reply 전용(잔여 본문 분할, S13). 태스크 소유권은 호출부가
-    유지해야 하므로(예외 시 취소 처리) 생성한 Task 객체를 그대로 반환한다
-    — 헬퍼 안에서 await/취소하지 않는다.
+    generate_reply/stream_reply가 공유(S13/S14 잔여 본문 분할). 태스크
+    소유권은 호출부가 유지해야 하므로(예외 시 취소 처리) 생성한 Task
+    객체를 그대로 반환한다 — 헬퍼 안에서 await/취소하지 않는다.
+    클라이언트가 없을 때의 처리(목업 응답 생성)는 두 호출부가 서로 다르므로
+    (generate_reply는 return, stream_reply는 yield 후 return) 호출부에서
+    각자 담당한다 — 이 헬퍼는 pre_mem_ctx 계산과 task 생성/폴백 delta
+    계산까지만 책임진다.
     Returns (affinity_task, rag_task, affinity_delta, pre_mem_ctx).
     """
     affinity_delta = 0
@@ -958,13 +965,17 @@ async def _assemble_prompt_and_model(
     conversation_history: List[HistoryMessage],
     message: str,
     character_id: str,
-) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI]:
+    log_lora_routing: bool = True,
+) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, Optional[str]]:
     """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/AB/복잡도) + LoRA 클라이언트 해석.
 
-    generate_reply 전용(잔여 본문 분할, S13). 논스트림 경로만 라우팅 성공
-    시 info 로그를 남기므로 _resolve_reply_client(S11)를
-    log_lora_routing=True로 호출한다.
-    Returns (messages, model_id, ab_variant, active_client).
+    generate_reply/stream_reply가 공유(S13/S14 잔여 본문 분할). 논스트림
+    경로만 라우팅 성공 시 info 로그를 남기므로(기존 동작) log_lora_routing
+    으로 _resolve_reply_client(S11) 호출 시 로그 여부를 제어한다
+    (generate_reply=True, stream_reply=False).
+    Returns (messages, model_id, ab_variant, active_client, lora_base_url).
+    lora_base_url은 stream_reply가 stream_options 분기에 사용한다
+    (generate_reply는 사용하지 않지만 반환값 형태는 통일한다).
     """
     messages = _build_chat_messages(
         mbti=mbti,
@@ -992,11 +1003,11 @@ async def _assemble_prompt_and_model(
     )
 
     # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
-    active_client, model_id, _lora_base_url = await _resolve_reply_client(
-        model_id, ab_variant, log_lora_routing=True
+    active_client, model_id, lora_base_url = await _resolve_reply_client(
+        model_id, ab_variant, log_lora_routing=log_lora_routing
     )
 
-    return messages, model_id, ab_variant, active_client
+    return messages, model_id, ab_variant, active_client, lora_base_url
 
 
 def _emit_background_metrics(
@@ -1013,9 +1024,14 @@ def _emit_background_metrics(
 ) -> None:
     """LLM 응답 후 비용/AB 테스트/품질 평가를 백그라운드(fire-and-forget)로 기록.
 
-    generate_reply 전용(잔여 본문 분할, S13). 모든 부수효과는
-    create_tracked_task로 스케줄링되며 태스크 소유권은 background_tasks
-    모듈이 관리하므로 본문이 별도로 정리할 필요가 없다(반환값 없음).
+    generate_reply 전용(잔여 본문 분할, S13). stream_reply(S14 검토 결과)는
+    이 헬퍼를 재사용하지 않는다 — usage 소스가 다르고(response.usage 객체
+    vs 스트리밍 청크에서 누적한 _stream_total_tokens float), _record_usage
+    호출 자체가 없으며, quality-check 조건(if full_text:)과 3개 블록의
+    실행 순서(quality-check→AB, generate_reply는 usage→AB→quality-check)도
+    다르다. 모든 부수효과는 create_tracked_task로 스케줄링되며 태스크
+    소유권은 background_tasks 모듈이 관리하므로 본문이 별도로 정리할
+    필요가 없다(반환값 없음).
     """
     # H-3: 비용 메트릭 백그라운드 기록
     usage = getattr(response, "usage", None)
@@ -1138,7 +1154,7 @@ async def generate_reply(
         # ──────────────────────────────────────────────────────────────
 
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
-        messages, model_id, _ab_variant, _active_client = await _assemble_prompt_and_model(
+        messages, model_id, _ab_variant, _active_client, _lora_base_url = await _assemble_prompt_and_model(
             mbti, speech_style, relationship, nickname, character_name, affinity_level,
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
@@ -1262,10 +1278,14 @@ async def stream_reply(
     full_text) 을 yield 한다. 콘텐츠 안전/파싱 폴백/서킷 오픈을 모두 처리해
     항상 최소 1개 말풍선 + StreamDone 을 보장한다.
 
-    설계 노트: 준비 로직(기억·RAG·프롬프트·라우팅)은 generate_reply 와
-    같은 공유 헬퍼(_build_chat_messages, _route_model, _rag_search_sync,
-    resolve_model_endpoint)를 사용한다. 품질 게이트 재생성은 스트리밍과
-    양립 불가하므로 여기서는 수행하지 않는다(quick_score 는 텔레메트리로만).
+    설계 노트: 준비 로직(안전필터·기억·RAG·프롬프트·라우팅)은 generate_reply 와
+    같은 공유 헬퍼(_safety_check_input, _spawn_parallel_analysis,
+    _assemble_prompt_and_model — S13/S14, 그리고 _build_chat_messages,
+    _route_model, _rag_search_sync, resolve_model_endpoint)를 사용한다.
+    품질 게이트 재생성은 스트리밍과 양립 불가하므로 여기서는 수행하지
+    않는다(quick_score 는 텔레메트리로만). 백그라운드 메트릭 기록은
+    generate_reply의 _emit_background_metrics와 usage 소스·조건·순서가
+    달라(S14에서 검토 후 보류) 공유하지 않고 자체 인라인 블록을 유지한다.
     """
     if conversation_history is None:
         conversation_history = []
@@ -1273,48 +1293,30 @@ async def stream_reply(
     # 1. 히스토리 서버사이드 제한 (DCI) — 트리거 판정은 트림 전 원본 길이로
     conversation_history, _orig_history_len = _trim_history(conversation_history)
 
-    # 2. 콘텐츠 안전 필터
-    is_safe, _reason = check_content(message)
-    if not is_safe:
-        yield ReplyPart(
-            text="그런 표현은 사용하지 말아줘요... 다른 이야기 해볼까요?",
-            emotion="SAD",
-            delay=2000,
-        )
-        yield StreamDone(affinity_delta=-2, full_text="")
+    # 2. 콘텐츠 안전 필터 (공유 헬퍼, S13/S14)
+    _blocked = _safety_check_input(message)
+    if _blocked is not None:
+        _blocked_replies, _blocked_delta = _blocked
+        for part in _blocked_replies:
+            yield part
+        yield StreamDone(affinity_delta=_blocked_delta, full_text="")
         return
 
-    # 3. 선행 memory_context (호감도 분석 입력)
-    _pre_mem_ctx = ""
-    if character_name and nickname:
-        _pre_mem_ctx = await build_memory_context(
-            character_name, nickname, room_id=room_id, character_id=character_id,
-        )
+    # 3+5. 선행 memory_context + 호감도 분석/RAG 병렬 시작 (공유 헬퍼, S13/S14)
+    # 클라이언트가 없으면 헬퍼가 즉시 키워드 기반 호감도(affinity_delta)만
+    # 계산하고 태스크는 만들지 않는다 — 아래 "4. 클라이언트 부재" 분기에서
+    # 그 값을 그대로 사용한다(원본 stream_reply의 동일 계산과 동치).
+    affinity_task, rag_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
+        message, mbti, affinity_level, conversation_history, user_mbti,
+        character_name, nickname, character_id, room_id,
+    )
 
     # 4. 클라이언트 부재 → 목업 (스트리밍 흉내)
     if not client:
-        affinity_delta = calculate_affinity_delta(
-            message, affinity_level, conversation_history, user_mbti, mbti
-        )
         for part in _mock_reply(message, mbti, nickname, affinity_level):
             yield part
         yield StreamDone(affinity_delta=affinity_delta, full_text="")
         return
-
-    # 5. 호감도 분석 + RAG 병렬 시작
-    recent_context = _build_recent_context(conversation_history)
-    affinity_task = asyncio.create_task(
-        analyze_affinity_with_llm(
-            message, affinity_level, mbti, recent_context, memory_context=_pre_mem_ctx,
-        )
-    )
-    _rag_scope_id = _storage_scope_id(room_id, character_id)
-    if _rag_scope_id and get_store():
-        rag_task = asyncio.create_task(
-            asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
-        )
-    else:
-        rag_task = None
 
     affinity_delta = 0
     full_text = ""
@@ -1343,18 +1345,13 @@ async def stream_reply(
         all_memories = _filter_relevant_memories(message, all_memories, top_k=3)
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
 
-        # 8. 프롬프트 + 모델 라우팅 (공유 헬퍼)
-        messages = _build_chat_messages(
-            mbti=mbti, speech_style=speech_style, relationship=relationship,
-            nickname=nickname, character_name=character_name, affinity_level=affinity_level,
-            user_mbti=user_mbti or "", persona_raw=persona_raw, persona_summary=persona_summary,
-            dialogue_prompt=dialogue_prompt, visual_prompt=visual_prompt,
-            memory_dicts=memory_dicts, mem_ctx=mem_ctx, episode_context=episode_context,
-            mood=mood, conversation_history=conversation_history, message=message,
-        )
-        model_id, _ab_variant = _route_model(character_id, message, len(conversation_history))
-        active_client, model_id, _lora_base_url = await _resolve_reply_client(
-            model_id, _ab_variant, log_lora_routing=False
+        # 8. 프롬프트 + 모델 라우팅 (공유 헬퍼, S13/S14) — 스트리밍은 LoRA 라우팅
+        # info 로그를 남기지 않는 기존 동작 유지(log_lora_routing=False).
+        messages, model_id, _ab_variant, active_client, _lora_base_url = await _assemble_prompt_and_model(
+            mbti, speech_style, relationship, nickname, character_name, affinity_level,
+            user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
+            memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
+            character_id, log_lora_routing=False,
         )
 
         # 9. 스트리밍 호출 + 증분 파싱
