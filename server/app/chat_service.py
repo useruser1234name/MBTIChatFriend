@@ -665,6 +665,82 @@ def _record_quality_gate_event(
     )
 
 
+async def _quality_gate_regenerate(
+    replies: List[ReplyPart],
+    content: str,
+    score: float,
+    message: str,
+    mbti: str,
+    model_id: str,
+    messages: List[dict],
+    active_client: AsyncOpenAI,
+    openai_cb,
+    room_id: str,
+    character_id: str,
+) -> Tuple[List[ReplyPart], str]:
+    """품질 게이트: 저품질 응답(score < QUALITY_GATE_THRESHOLD) 감지 시 1회 재생성,
+    점수 비교 후 더 좋은 쪽을 채택한다.
+
+    generate_reply 전용 헬퍼(stream_reply의 저품질 처리는 재생성 없이 텔레메트리만
+    남기므로 별개 — 이 함수의 대상이 아님). 호출부에서 이미
+    `score < QUALITY_GATE_THRESHOLD` 판정을 마친 뒤 호출됨을 전제로 한다.
+
+    Returns (replies, content) — 재시도가 원본보다 낫지 않으면 입력을 그대로 반환.
+    """
+    _record_quality_gate_event(score, message, content, model_id, room_id, character_id)
+    logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
+
+    # 첫 응답이 JSON 파싱 깨짐(매우 낮은 점수)이면 형식 강제 보강.
+    # response_format=json_object는 배열 형식과 호환 깨지므로 사용 X.
+    # prefix caching 유지를 위해 기존 messages는 그대로 두고,
+    # 트레일링 user 메시지만 추가해 형식만 다시 환기시킨다.
+    retry_messages = messages
+    if score <= 0.2:  # 형식 자체가 깨진 경우만
+        retry_messages = messages + [{
+            "role": "user",
+            "content": (
+                "직전 응답 형식이 올바르지 않았어. 반드시 "
+                '[{"text":"...","emotion":"EMOTION_CODE"}] '
+                "형태의 JSON 배열로만 다시 답해줘. "
+                "코드블록·설명·다른 텍스트는 절대 붙이지 마."
+            ),
+        }]
+
+    try:
+        retry_response = await openai_cb.call(
+            active_client.chat.completions.create(
+                model=model_id,
+                messages=retry_messages,
+                temperature=0.9,
+                max_tokens=1200,
+                timeout=45,
+            )
+        )
+    except CircuitOpenError:
+        logger.warning("[CB] openai circuit OPEN — 품질 게이트 재시도 스킵")
+        retry_response = None
+
+    if retry_response:
+        retry_content = retry_response.choices[0].message.content or ""
+        retry_replies = _parse_reply(retry_content)
+        if retry_replies:
+            retry_score = quick_score(message, retry_content, mbti)
+            # 원본과 재시도 중 점수가 더 높은 쪽 채택.
+            # 동점이면 재시도(더 최신·형식 보강 반영)를 선호.
+            if retry_score >= score:
+                logger.info(
+                    f"재생성 채택 (retry={retry_score} >= orig={score})"
+                )
+                replies = retry_replies
+                content = retry_content
+            else:
+                logger.info(
+                    f"원본 유지 (orig={score} > retry={retry_score})"
+                )
+
+    return replies, content
+
+
 async def _collect_affinity_delta(
     affinity_task: Optional[asyncio.Task],
     message: str,
@@ -971,56 +1047,10 @@ async def generate_reply(
         if replies:
             score = quick_score(message, content, mbti)
             if score < QUALITY_GATE_THRESHOLD:
-                _record_quality_gate_event(score, message, content, model_id, room_id, character_id)
-                logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
-
-                # 첫 응답이 JSON 파싱 깨짐(매우 낮은 점수)이면 형식 강제 보강.
-                # response_format=json_object는 배열 형식과 호환 깨지므로 사용 X.
-                # prefix caching 유지를 위해 기존 messages는 그대로 두고,
-                # 트레일링 user 메시지만 추가해 형식만 다시 환기시킨다.
-                retry_messages = messages
-                if score <= 0.2:  # 형식 자체가 깨진 경우만
-                    retry_messages = messages + [{
-                        "role": "user",
-                        "content": (
-                            "직전 응답 형식이 올바르지 않았어. 반드시 "
-                            '[{"text":"...","emotion":"EMOTION_CODE"}] '
-                            "형태의 JSON 배열로만 다시 답해줘. "
-                            "코드블록·설명·다른 텍스트는 절대 붙이지 마."
-                        ),
-                    }]
-
-                try:
-                    retry_response = await _openai_cb.call(
-                        _active_client.chat.completions.create(
-                            model=model_id,
-                            messages=retry_messages,
-                            temperature=0.9,
-                            max_tokens=1200,
-                            timeout=45,
-                        )
-                    )
-                except CircuitOpenError:
-                    logger.warning("[CB] openai circuit OPEN — 품질 게이트 재시도 스킵")
-                    retry_response = None
-
-                if retry_response:
-                    retry_content = retry_response.choices[0].message.content or ""
-                    retry_replies = _parse_reply(retry_content)
-                    if retry_replies:
-                        retry_score = quick_score(message, retry_content, mbti)
-                        # 원본과 재시도 중 점수가 더 높은 쪽 채택.
-                        # 동점이면 재시도(더 최신·형식 보강 반영)를 선호.
-                        if retry_score >= score:
-                            logger.info(
-                                f"재생성 채택 (retry={retry_score} >= orig={score})"
-                            )
-                            replies = retry_replies
-                            content = retry_content
-                        else:
-                            logger.info(
-                                f"원본 유지 (orig={score} > retry={retry_score})"
-                            )
+                replies, content = await _quality_gate_regenerate(
+                    replies, content, score, message, mbti, model_id, messages,
+                    _active_client, _openai_cb, room_id, character_id,
+                )
 
         # AI 응답 안전성 필터 (H-1)
         filtered_replies = []
