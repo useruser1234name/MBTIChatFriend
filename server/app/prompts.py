@@ -3,6 +3,8 @@
 import json
 import logging
 
+from .mbti import get_mbti_group as _get_mbti_group
+
 logger = logging.getLogger(__name__)
 
 MBTI_PERSONALITIES = {
@@ -801,13 +803,6 @@ FEW_SHOT_EXAMPLES = {
 }
 
 
-def _get_mbti_group(mbti: str) -> str:
-    """MBTI를 4개 기능 그룹으로 분류 (NT/NF/ST/SF)"""
-    if len(mbti) == 4:
-        return mbti[1] + mbti[2]  # "NT", "NF", "ST", "SF"
-    return "NF"  # 기본값
-
-
 def _build_few_shot_section(mbti: str, affinity_level: int) -> str:
     """MBTI 그룹 + 호감도 기반 few-shot 예시 생성"""
     group = _get_mbti_group(mbti)
@@ -868,23 +863,13 @@ def get_compatibility_description(char_mbti: str, user_mbti: str) -> str:
     if not user_mbti:
         return ""
 
-    def get_group(mbti: str) -> str:
-        if mbti[1] == "N" and mbti[2] == "T":
-            return "NT"
-        elif mbti[1] == "N" and mbti[2] == "F":
-            return "NF"
-        elif mbti[1] == "S" and mbti[2] == "T":
-            return "ST"
-        else:
-            return "SF"
-
     def get_jp_desc(mbti: str) -> str:
         if mbti[3] == "J":
             return "계획적이고 체계적인"
         return "유연하고 즉흥적인"
 
-    cg = get_group(char_mbti)
-    ug = get_group(user_mbti)
+    cg = _get_mbti_group(char_mbti)
+    ug = _get_mbti_group(user_mbti)
 
     # J/P 차원 보충 설명
     jp_same = char_mbti[3] == user_mbti[3]

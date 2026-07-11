@@ -23,6 +23,7 @@ from .config import (
 from .content_filter import check_content, detect_crisis, get_safety_system_prompt
 from .background_tasks import create_tracked_task
 from .json_utils import extract_json_array, extract_json_object
+from .mbti import get_mbti_group as _get_mbti_group
 from .models import HistoryMessage, MemoryItem, ReplyPart, VALID_EMOTIONS
 from .prompts import build_system_prompt, build_diary_prompt, build_memory_extract_prompt
 from .user_preference import derive_user_style, render_preference_section
@@ -114,20 +115,6 @@ _EMOTICON_NEGATIVE = ["ㅠㅠㅠ", "ㅜㅜㅜ", ";;;", "..."]
 
 # 키워드/LLM 스케일 보정 계수
 KEYWORD_SCALE = 0.4
-
-
-def _get_mbti_group(mbti: str) -> str:
-    """MBTI를 4개 기능 그룹으로 분류"""
-    if len(mbti) != 4:
-        return "NF"
-    if mbti[1] == "N" and mbti[2] == "T":
-        return "NT"
-    elif mbti[1] == "N" and mbti[2] == "F":
-        return "NF"
-    elif mbti[1] == "S" and mbti[2:4] in ("TJ", "TP"):
-        return "ST"
-    else:
-        return "SF"
 
 
 def _classify_message_complexity(message: str, history_len: int) -> str:
