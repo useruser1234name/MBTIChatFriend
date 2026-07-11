@@ -527,6 +527,160 @@ async def send_message(
     )
 
 
+def _build_crisis_hint(message: str, mbti: str, is_crisis: bool, crisis_tier: int) -> str:
+    """위기 유형을 분류해 시스템 프롬프트에 덧붙일 추가 지침 문자열을 만든다.
+
+    stream_message 전용(잔여 본문 분할, S16). is_crisis가 False이거나
+    crisis_tier<=0이면 빈 문자열을 반환한다(기존 동작과 동일).
+    """
+    crisis_type_hint: str = ""
+    if is_crisis and crisis_tier > 0:
+        crisis_type = classify_crisis_type(message)
+        logger.info(f"[CrisisType] tier={crisis_tier}, type={crisis_type}")
+        if crisis_type == "self_criticism":
+            _mbti_key = (mbti or "").upper()
+            _micro_pool = MICRO_ACTIONS.get(_mbti_key) or MICRO_ACTIONS["default"]
+            _micro_example = random.choice(_micro_pool)
+            crisis_type_hint = (
+                "\n\n[위기 응답 지침 - 자기비판 유형]\n"
+                "1. 검증: 사용자의 감정을 정상화하세요. \"그런 기분이 드는 게 당연해\"\n"
+                "2. 마음챙김: 현재 순간으로 데려오세요. \"지금 몸에서 뭘 느끼고 있어?\"\n"
+                "3. 작은 행동: 압도적이지 않은 한 가지를 제안하세요.\n"
+                "\n[마이크로 행동 제안] 아주 작은 행동 하나를 자연스럽게 제안하세요.\n"
+                f"예시: {_micro_example}\n"
+                "반드시 '하기 싫으면 안 해도 돼' 또는 '부담 없이 해도 좋아' 같은 표현을 함께 쓰세요."
+            )
+        elif crisis_type == "interpersonal":
+            crisis_type_hint = (
+                "\n\n[위기 응답 지침 - 대인관계 유형]\n"
+                "1. 감정 공감: 상처받은 감정을 먼저 충분히 인정하세요.\n"
+                "2. 관계 맥락 탐색: 어떤 상황인지 조심스럽게 물어보세요.\n"
+                "3. 판단 없이 듣기: 상대방을 평가하지 말고 사용자 편에서 공감하세요."
+            )
+        # acute_crisis 유형: 기존 tier2 응급 대응 유지 (변경 없음)
+    return crisis_type_hint
+
+
+async def _lora_event_generator(
+    req: ChatRequest,
+    crisis_type_hint: str,
+    lora_model_id: str,
+    lora_base_url: str,
+    replies: list,
+    result: dict,
+    message_event,
+    done_event,
+):
+    """LoRA 서빙 경로 SSE 제너레이터: 전체 파이프라인으로 확보한 replies/메타를
+    바탕으로 토큰 단위 스트리밍하고, 실패 시 기존 replies로 폴백한다.
+
+    stream_message 전용(잔여 본문 분할, S16). 원래 중첩 함수였으며
+    req/crisis_type_hint/lora_model_id(_lora_model_id)/lora_base_url(_lora_base_url)/
+    replies/result/message_event(_message_event)/done_event(_done_event)는
+    전부 클로저로 캡처하던 값을 명시적 파라미터로 전환했다. SSE 이벤트
+    이름("token"/"message"/"done")·data JSON 구조·yield 순서는 원본과 동일.
+    """
+    from ..prompts import build_system_prompt as _build_sys
+    sys_prompt = _build_sys(
+        mbti=req.mbti or "",
+        speech_style=req.speech_style or "",
+        relationship=req.relationship or "",
+        nickname=req.nickname or "",
+        affinity_level=req.affinity_level or 0,
+        user_mbti=req.user_mbti or "",
+        character_name=req.character_name or "",
+    )
+    if crisis_type_hint:
+        sys_prompt += crisis_type_hint
+
+    lora_messages = [{"role": "system", "content": sys_prompt}]
+    if req.conversation_history:
+        for hist in req.conversation_history[-20:]:
+            role = hist.role if hist.role in ("user", "assistant") else "user"
+            if hist.content.strip():
+                lora_messages.append({"role": role, "content": hist.content})
+    lora_messages.append({"role": "user", "content": req.message})
+
+    try:
+        async for token in stream_lora_response(lora_messages, lora_model_id, lora_base_url):
+            yield {
+                "event": "token",
+                "data": json.dumps({"content": token}, ensure_ascii=False),
+            }
+    except Exception as _lora_err:
+        logger.warning(f"[LoRA] 스트리밍 실패, 기존 replies 사용: {_lora_err}")
+        for reply in replies:
+            yield message_event(reply)
+    yield done_event(result)
+
+
+async def _openai_event_generator(
+    req: ChatRequest,
+    user: Optional[dict],
+    crisis_reply,
+    record_crisis,
+    message_event,
+    done_event,
+):
+    """OpenAI 경로 SSE 제너레이터: 말풍선이 완결되는 즉시 전송해 TTFB를 단축한다.
+
+    stream_message 전용(잔여 본문 분할, S16). req/user/crisis_reply(_crisis_reply)/
+    record_crisis(_record_crisis)/message_event(_message_event)/
+    done_event(_done_event)는 클로저로 캡처하던 값을 명시적 파라미터로
+    전환했다. SSE 이벤트 이름("message"/"done")·data JSON 구조·예외 시
+    폴백 이벤트·yield 순서는 원본과 동일.
+    """
+    prep = _prepare_chat_turn(req, user)
+    room_id = prep["room_id"]
+    record_crisis(room_id)
+
+    # 위기 문구를 가장 먼저 전송 (persistence/finalize 대상에는 미포함 — 기존 동작 유지)
+    if crisis_reply is not None:
+        yield message_event(crisis_reply)
+
+    collected = []
+    affinity_delta = 0
+    try:
+        async for item in stream_reply(
+            message=req.message,
+            mbti=req.mbti,
+            speech_style=req.speech_style,
+            relationship=req.relationship,
+            nickname=req.nickname,
+            affinity_level=req.affinity_level,
+            conversation_history=req.conversation_history,
+            user_mbti=req.user_mbti,
+            character_name=req.character_name,
+            character_id=prep["effective_character_id"],
+            memories=prep["merged_memories"],
+            room_id=room_id,
+        ):
+            if isinstance(item, StreamDone):
+                affinity_delta = item.affinity_delta
+            else:
+                collected.append(item)
+                yield message_event(item)
+    except Exception as _stream_err:
+        logger.error(f"[stream] OpenAI 스트리밍 실패: {_stream_err}")
+        if not collected:
+            from ..models import ReplyPart as _ReplyPart
+            _fb = _ReplyPart(text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?", emotion="SURPRISED", delay=2000)
+            collected.append(_fb)
+            yield message_event(_fb)
+
+    meta = await _finalize_chat_turn(
+        req,
+        user,
+        room_id=room_id,
+        state=prep["state"],
+        effective_character_id=prep["effective_character_id"],
+        callback_key=prep["callback_key"],
+        replies=collected,
+        affinity_delta=affinity_delta,
+    )
+    yield done_event(meta)
+
+
 @router.post("/chat/stream")
 @limiter.limit("30/minute")
 async def stream_message(
@@ -553,32 +707,8 @@ async def stream_message(
     selected_model = select_model_for_crisis(crisis_result)
     logger.info(f"[ModelRouting] crisis_level={crisis_result['level']}, model={selected_model}")
 
-    # 위기 유형 분류 및 시스템 프롬프트 추가 지침 생성
-    crisis_type_hint: str = ""
-    if is_crisis and crisis_tier > 0:
-        crisis_type = classify_crisis_type(req.message)
-        logger.info(f"[CrisisType] tier={crisis_tier}, type={crisis_type}")
-        if crisis_type == "self_criticism":
-            _mbti_key = (req.mbti or "").upper()
-            _micro_pool = MICRO_ACTIONS.get(_mbti_key) or MICRO_ACTIONS["default"]
-            _micro_example = random.choice(_micro_pool)
-            crisis_type_hint = (
-                "\n\n[위기 응답 지침 - 자기비판 유형]\n"
-                "1. 검증: 사용자의 감정을 정상화하세요. \"그런 기분이 드는 게 당연해\"\n"
-                "2. 마음챙김: 현재 순간으로 데려오세요. \"지금 몸에서 뭘 느끼고 있어?\"\n"
-                "3. 작은 행동: 압도적이지 않은 한 가지를 제안하세요.\n"
-                "\n[마이크로 행동 제안] 아주 작은 행동 하나를 자연스럽게 제안하세요.\n"
-                f"예시: {_micro_example}\n"
-                "반드시 '하기 싫으면 안 해도 돼' 또는 '부담 없이 해도 좋아' 같은 표현을 함께 쓰세요."
-            )
-        elif crisis_type == "interpersonal":
-            crisis_type_hint = (
-                "\n\n[위기 응답 지침 - 대인관계 유형]\n"
-                "1. 감정 공감: 상처받은 감정을 먼저 충분히 인정하세요.\n"
-                "2. 관계 맥락 탐색: 어떤 상황인지 조심스럽게 물어보세요.\n"
-                "3. 판단 없이 듣기: 상대방을 평가하지 말고 사용자 편에서 공감하세요."
-            )
-        # acute_crisis 유형: 기존 tier2 응급 대응 유지 (변경 없음)
+    # 위기 유형 분류 및 시스템 프롬프트 추가 지침 생성 (공유 헬퍼, S16)
+    crisis_type_hint = _build_crisis_hint(req.message, req.mbti, is_crisis, crisis_tier)
 
     # 위기 개입 문구: 세션당 1회 (히스토리에 이미 권유 문구 있으면 생략)
     _insert_crisis = is_crisis and not _crisis_referral_already_shown(req.conversation_history)
@@ -638,95 +768,15 @@ async def stream_message(
             replies = [_crisis_reply] + replies
         _record_crisis(result["room_id"])
 
-        async def event_generator():
-            from ..prompts import build_system_prompt as _build_sys
-            sys_prompt = _build_sys(
-                mbti=req.mbti or "",
-                speech_style=req.speech_style or "",
-                relationship=req.relationship or "",
-                nickname=req.nickname or "",
-                affinity_level=req.affinity_level or 0,
-                user_mbti=req.user_mbti or "",
-                character_name=req.character_name or "",
-            )
-            if crisis_type_hint:
-                sys_prompt += crisis_type_hint
-
-            lora_messages = [{"role": "system", "content": sys_prompt}]
-            if req.conversation_history:
-                for hist in req.conversation_history[-20:]:
-                    role = hist.role if hist.role in ("user", "assistant") else "user"
-                    if hist.content.strip():
-                        lora_messages.append({"role": role, "content": hist.content})
-            lora_messages.append({"role": "user", "content": req.message})
-
-            try:
-                async for token in stream_lora_response(lora_messages, _lora_model_id, _lora_base_url):
-                    yield {
-                        "event": "token",
-                        "data": json.dumps({"content": token}, ensure_ascii=False),
-                    }
-            except Exception as _lora_err:
-                logger.warning(f"[LoRA] 스트리밍 실패, 기존 replies 사용: {_lora_err}")
-                for reply in replies:
-                    yield _message_event(reply)
-            yield _done_event(result)
-
-        return EventSourceResponse(event_generator())
+        return EventSourceResponse(_lora_event_generator(
+            req, crisis_type_hint, _lora_model_id, _lora_base_url, replies, result,
+            _message_event, _done_event,
+        ))
 
     # OpenAI 경로: 말풍선 점진 스트리밍 (완결되는 즉시 전송해 TTFB 단축)
-    async def event_generator():
-        prep = _prepare_chat_turn(req, user)
-        room_id = prep["room_id"]
-        _record_crisis(room_id)
-
-        # 위기 문구를 가장 먼저 전송 (persistence/finalize 대상에는 미포함 — 기존 동작 유지)
-        if _crisis_reply is not None:
-            yield _message_event(_crisis_reply)
-
-        collected = []
-        affinity_delta = 0
-        try:
-            async for item in stream_reply(
-                message=req.message,
-                mbti=req.mbti,
-                speech_style=req.speech_style,
-                relationship=req.relationship,
-                nickname=req.nickname,
-                affinity_level=req.affinity_level,
-                conversation_history=req.conversation_history,
-                user_mbti=req.user_mbti,
-                character_name=req.character_name,
-                character_id=prep["effective_character_id"],
-                memories=prep["merged_memories"],
-                room_id=room_id,
-            ):
-                if isinstance(item, StreamDone):
-                    affinity_delta = item.affinity_delta
-                else:
-                    collected.append(item)
-                    yield _message_event(item)
-        except Exception as _stream_err:
-            logger.error(f"[stream] OpenAI 스트리밍 실패: {_stream_err}")
-            if not collected:
-                from ..models import ReplyPart as _ReplyPart
-                _fb = _ReplyPart(text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?", emotion="SURPRISED", delay=2000)
-                collected.append(_fb)
-                yield _message_event(_fb)
-
-        meta = await _finalize_chat_turn(
-            req,
-            user,
-            room_id=room_id,
-            state=prep["state"],
-            effective_character_id=prep["effective_character_id"],
-            callback_key=prep["callback_key"],
-            replies=collected,
-            affinity_delta=affinity_delta,
-        )
-        yield _done_event(meta)
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(_openai_event_generator(
+        req, user, _crisis_reply, _record_crisis, _message_event, _done_event,
+    ))
 
 
 # === 메모리 엔드포인트 ===
