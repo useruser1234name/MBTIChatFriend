@@ -65,3 +65,10 @@ BILLING_ALLOW_MOCK = os.getenv("BILLING_ALLOW_MOCK", "true").lower() == "true"
 
 # 내부/배치/관리자 엔드포인트 보호용 토큰 (스케줄러·크론이 호출 시 헤더로 전달)
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+
+# 읽기 복제본 DB (postgres_async.py의 replica 전용 풀). 미설정 시 replica 없음.
+DATABASE_REPLICA_URL = os.getenv("DATABASE_REPLICA_URL", "")
+
+# 커뮤니티 트렌딩 캐시 (routers/community.py)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+TRENDING_CACHE_TTL = 600  # 10분

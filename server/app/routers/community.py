@@ -2,9 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 import json
-import os
 import random
 from app.auth_middleware import require_auth_always
+from app.config import REDIS_URL, TRENDING_CACHE_TTL
 from app.postgres_async import get_async_db
 
 router = APIRouter(prefix="/api/v1/community", tags=["community"])
@@ -99,8 +99,8 @@ async def list_posts(mbti: Optional[str] = None, limit: int = 20, offset: int = 
     return [dict(r) for r in rows]
 
 
-_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-_TRENDING_TTL = 600  # 10분
+_REDIS_URL = REDIS_URL
+_TRENDING_TTL = TRENDING_CACHE_TTL
 
 # 스키마 정합성: community_posts 컬럼은 mbti(=mbti_type 아님), 공감 테이블은
 # community_empathies(복합 PK post_id+user_id, id 컬럼 없음). 클라이언트 TrendingPostUi가

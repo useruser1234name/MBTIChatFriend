@@ -14,12 +14,11 @@ CTO-C 이서연 설계, ARCH-A 조성현 검증.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from .config import DATABASE_URL
+from .config import DATABASE_URL, DATABASE_REPLICA_URL
 from .circuit_breaker import CircuitOpenError, get_db_circuit
 
 logger = logging.getLogger(__name__)
@@ -420,7 +419,7 @@ _read_pool: Optional[AsyncConnectionPool] = None
 async def initialize_read_pool(dsn: str = None) -> None:
     """읽기 복제본 연결 풀 초기화. DATABASE_REPLICA_URL 없으면 스킵."""
     global _read_pool
-    read_dsn = dsn or os.getenv("DATABASE_REPLICA_URL", "")
+    read_dsn = dsn or DATABASE_REPLICA_URL
     if not read_dsn:
         return
     _read_pool = AsyncConnectionPool(
