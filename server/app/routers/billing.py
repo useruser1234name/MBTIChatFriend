@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from ..auth_middleware import require_auth_always
+from ..auth_middleware import require_auth_always, _assert_owner
 from ..play_billing import verify_rtdn_token, verify_subscription_purchase
 from ..postgres_async import get_async_db
 
@@ -100,9 +100,7 @@ async def verify_purchase(
     - 영수증은 Google Play Developer API로 서버측 검증(play_billing). 미구성 시
       production에서는 프리미엄 부여를 거부한다.
     """
-    token_uid = user.get("uid")
-    if not token_uid or token_uid != req.user_id:
-        raise HTTPException(status_code=403, detail="user_id가 인증 토큰과 일치하지 않습니다")
+    _assert_owner(user, req.user_id, detail="user_id가 인증 토큰과 일치하지 않습니다")
 
     result = verify_subscription_purchase(req.product_id, req.purchase_token)
     if not result.ok:

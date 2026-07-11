@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..auth_middleware import require_auth_always, verify_firebase_token
+from ..auth_middleware import require_auth_always, verify_firebase_token, _assert_owner
 from ..models import SubscriptionStatusResponse, SubscriptionUpgradeRequest
 from ..postgres_async import get_async_db
 from ..subscription import get_subscription_manager
@@ -105,9 +105,7 @@ async def upgrade_subscription(
     """
     from ..postgres import execute as pg_exec_sub, postgres_enabled
 
-    token_uid = user.get("uid")
-    if not token_uid or token_uid != req.user_id:
-        raise HTTPException(status_code=403, detail="user_id가 인증 토큰과 일치하지 않습니다")
+    _assert_owner(user, req.user_id, detail="user_id가 인증 토큰과 일치하지 않습니다")
 
     # 유료 플랜 업그레이드는 결제 검증 경로(billing/verify-purchase)로만 허용
     if str(req.plan).lower() not in ("free", "basic"):

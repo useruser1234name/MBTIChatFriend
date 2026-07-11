@@ -3,18 +3,11 @@ from pydantic import BaseModel, Field
 from typing import Optional
 import json
 import random
-from app.auth_middleware import require_auth_always
+from app.auth_middleware import require_auth_always, _assert_owner
 from app.config import REDIS_URL, TRENDING_CACHE_TTL
 from app.postgres_async import get_async_db
 
 router = APIRouter(prefix="/api/v1/community", tags=["community"])
-
-
-def _assert_owner(user: dict, user_id: str) -> None:
-    """인증 토큰의 uid가 요청의 user_id와 일치하는지 검증 (IDOR 방지)."""
-    token_uid = user.get("uid")
-    if not token_uid or token_uid != user_id:
-        raise HTTPException(status_code=403, detail="본인 계정으로만 수행할 수 있습니다.")
 
 # 익명 닉네임 생성용 풀
 _MBTI_ANIMALS = {

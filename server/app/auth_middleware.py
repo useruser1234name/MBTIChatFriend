@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 
 from .config import ENVIRONMENT, INTERNAL_API_TOKEN, REQUIRE_AUTH
 
@@ -93,3 +93,29 @@ async def verify_firebase_token(
         if REQUIRE_AUTH:
             raise HTTPException(status_code=401, detail="유효하지 않은 인증 토큰입니다.")
         return None
+
+
+# ── 소유권 검사 idiom 단일화 (S18) ────────────────────────────────
+# 과거 community.py/referral.py/billing.py/subscription.py에 각기 다른
+# 형태("토큰 uid == 대상 user_id" 검사)로 산재해 있던 것을 이 두 함수로 통일.
+# 각 호출부의 기존 상태코드(403/401)와 detail 문구는 그대로 재현한다
+# (billing.py/subscription.py는 community.py와 detail 문구가 달라 detail
+# 파라미터로 흡수).
+
+
+def _assert_owner(
+    user: dict,
+    user_id: str,
+    detail: str = "본인 계정으로만 수행할 수 있습니다.",
+) -> None:
+    """인증 토큰의 uid가 요청의 user_id와 일치하는지 검증 (IDOR 방지)."""
+    token_uid = user.get("uid")
+    if not token_uid or token_uid != user_id:
+        raise HTTPException(status_code=403, detail=detail)
+
+
+async def get_uid(user: Optional[dict] = Depends(verify_firebase_token)) -> str:
+    """Firebase 인증 토큰에서 uid 추출. 인증 실패 시 401."""
+    if not user or not user.get("uid"):
+        raise HTTPException(status_code=401, detail="인증이 필요합니다.")
+    return user["uid"]

@@ -1,21 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Optional
 import asyncio
 import secrets
 import string
 import time
 from pydantic import BaseModel, Field
 from ..postgres_async import get_async_db
-from ..auth_middleware import require_internal_token, verify_firebase_token
+from ..auth_middleware import require_internal_token, get_uid
 
 router = APIRouter(prefix="/api/v1/referral", tags=["referral"])
-
-
-async def get_uid(user: Optional[dict] = Depends(verify_firebase_token)) -> str:
-    """Firebase 인증 토큰에서 uid 추출. 인증 실패 시 401."""
-    if not user or not user.get("uid"):
-        raise HTTPException(status_code=401, detail="인증이 필요합니다.")
-    return user["uid"]
 
 
 class RedeemRequest(BaseModel):
