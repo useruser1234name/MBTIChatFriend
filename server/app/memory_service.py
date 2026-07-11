@@ -436,6 +436,7 @@ async def extract_episodes(
     if not client or len(conversation_history) < 4:
         return []
 
+    # 지연 임포트: 순환/기동 순서 회피
     from .vector_store import get_store
 
     conv_text = _build_conversation_text(conversation_history[-20:])

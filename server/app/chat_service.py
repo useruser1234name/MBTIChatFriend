@@ -618,6 +618,7 @@ def _route_model(
 
     try:
         if character_id:
+            # 지연 임포트: 순환/기동 순서 회피
             from .ab_test import get_ab_manager
             ab_variant = get_ab_manager().assign_variant(
                 user_id=character_id,
@@ -1457,7 +1458,6 @@ async def stream_reply(
 
 async def stream_lora_response(messages: list, model_id: str, base_url: str):
     """Together AI LoRA 모델 스트리밍 응답 제너레이터"""
-    from openai import AsyncOpenAI
     client = AsyncOpenAI(api_key=TOGETHER_API_KEY, base_url=base_url)
     response = await client.chat.completions.create(
         model=model_id,
@@ -1482,6 +1482,7 @@ async def _record_usage(
 ) -> None:
     """OpenAI API 사용량 비동기 기록 (H-3)."""
     try:
+        # 지연 임포트: 순환/기동 순서 회피
         from .postgres_async import get_async_db
         db = get_async_db()
         if db.available:
@@ -1506,6 +1507,7 @@ async def _record_ab_result(
 ) -> None:
     """A/B 테스트 메트릭(토큰 수·응답시간)을 백그라운드에서 기록 (DATA-B 신예린)."""
     try:
+        # 지연 임포트: 순환/기동 순서 회피
         from .ab_test import get_ab_manager
         ab = get_ab_manager()
         ab.record_result(

@@ -19,6 +19,7 @@ KST = pytz.timezone("Asia/Seoul")
 
 async def flush_empathy_notifications():
     """30분마다 pending 공감 알림을 묶음 발송"""
+    # 지연 임포트: 순환/기동 순서 회피 (tests/test_scheduler_jobs.py가 이 패턴에 의존 — 이동 금지)
     from app.postgres_async import get_async_db
     from app.firebase_service import send_notification_with_record
 
@@ -76,6 +77,7 @@ async def send_night_diary_push():
     diary_entries(room_id, character_id, diary_date) 기준. room_id는 '{uid}:...' 형식이라
     앞부분을 user_id로 사용한다. (PM 로드맵 — 밤 일기 D7 훅 FCM 연결)
     """
+    # 지연 임포트: 순환/기동 순서 회피 (tests/test_scheduler_jobs.py가 이 패턴에 의존 — 이동 금지)
     from app.postgres_async import get_async_db
     from app.firebase_service import send_notification_with_record
 
@@ -118,6 +120,7 @@ async def send_d3_personalized_notifications():
     프라이버시: 유저 원문 대화 내용(content)은 요약/키워드를 포함해 어떤 형태로도
     알림 본문에 노출하지 않는다 (crisis_detected message_snippet 제거와 동일 원칙).
     """
+    # 지연 임포트: 순환/기동 순서 회피 (tests/test_scheduler_jobs.py가 이 패턴에 의존 — 이동 금지)
     from app.postgres_async import get_async_db
     from app.firebase_service import send_notification_with_record
 
@@ -178,6 +181,7 @@ async def send_d3_personalized_notifications():
 
 async def send_d5_character_messages():
     """D+5 미접속 사용자에게 캐릭터 그리움 메시지 발송 (매일 10:30 KST)."""
+    # 지연 임포트: 순환/기동 순서 회피 (tests/test_scheduler_jobs.py가 이 패턴에 의존 — 이동 금지)
     from app.postgres_async import get_async_db
     from app.firebase_service import send_notification_with_record
 
@@ -253,6 +257,7 @@ async def send_weekly_summary():
 
     metric_events(event_type='chat_turn', user_id)로 집계한다.
     """
+    # 지연 임포트: 순환/기동 순서 회피 (tests/test_scheduler_jobs.py가 이 패턴에 의존 — 이동 금지)
     from app.postgres_async import get_async_db
     from app.firebase_service import send_notification_with_record
 
@@ -298,6 +303,7 @@ async def send_weekly_summary():
 
 async def send_gratitude_day_push():
     """가정의 달 릴리즈 당일 전체 푸시 (4/24 09:00 KST 단발)."""
+    # 지연 임포트: 순환/기동 순서 회피 (tests/test_scheduler_jobs.py가 이 패턴에 의존 — 이동 금지)
     from app.postgres_async import get_async_db
     from app.firebase_service import send_notification_with_record
 

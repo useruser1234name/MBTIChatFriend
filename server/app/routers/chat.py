@@ -3,6 +3,7 @@
 import json
 import logging
 import random
+import openai
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -42,6 +43,7 @@ from ..models import (
     MemoryItem,
     MemoryExtractRequest,
     MemoryExtractResponse,
+    ReplyPart,
 )
 from ..chat_service import extract_memories
 from ..postgres_async import get_async_db
@@ -184,8 +186,7 @@ async def _persist_chat_data(
     """
     if not uid:
         return
-    from ..postgres_async import get_async_db as _get_db
-    db = _get_db()
+    db = get_async_db()
     if not db.available:
         return
     try:
@@ -504,11 +505,10 @@ async def send_message(
 
     replies = result["replies"]
     if is_crisis:
-        from ..models import ReplyPart as _ReplyPart
         # 세션당 1회 제한: 히스토리에 이미 전문가 권유 문구가 있으면 삽입 생략
         if not _crisis_referral_already_shown(req.conversation_history):
             crisis_msg = get_crisis_response(crisis_tier)
-            crisis_reply = _ReplyPart(text=crisis_msg, emotion="SAD", delay=0)
+            crisis_reply = ReplyPart(text=crisis_msg, emotion="SAD", delay=0)
             replies = [crisis_reply] + list(replies)
         record_event(
             event_type="crisis_detected",
@@ -663,8 +663,7 @@ async def _openai_event_generator(
     except Exception as _stream_err:
         logger.error(f"[stream] OpenAI 스트리밍 실패: {_stream_err}")
         if not collected:
-            from ..models import ReplyPart as _ReplyPart
-            _fb = _ReplyPart(text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?", emotion="SURPRISED", delay=2000)
+            _fb = ReplyPart(text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?", emotion="SURPRISED", delay=2000)
             collected.append(_fb)
             yield message_event(_fb)
 
@@ -714,8 +713,7 @@ async def stream_message(
     _insert_crisis = is_crisis and not _crisis_referral_already_shown(req.conversation_history)
     _crisis_reply = None
     if _insert_crisis:
-        from ..models import ReplyPart as _ReplyPart
-        _crisis_reply = _ReplyPart(text=get_crisis_response(crisis_tier), emotion="SAD", delay=0)
+        _crisis_reply = ReplyPart(text=get_crisis_response(crisis_tier), emotion="SAD", delay=0)
 
     def _message_event(part) -> dict:
         return {
@@ -815,8 +813,6 @@ async def get_conversation_starters(
     Quality Session 70% 달성 전략 — 스타터 선택률 38% → 60% 목표.
     (8차 회의 합의 — AI-B 류다은 + DATA-B 신예린)
     """
-    import openai
-
     if not OPENAI_API_KEY:
         # API 키 없으면 기본 스타터 반환
         return {
@@ -846,9 +842,8 @@ async def get_conversation_starters(
             temperature=0.8,
             timeout=20,
         )
-        import json as _json
         content = resp.choices[0].message.content.strip()
-        starters = _json.loads(content)
+        starters = json.loads(content)
         if not isinstance(starters, list) or len(starters) < 1:
             raise ValueError("invalid format")
         return {"starters": starters[:3], "generated": True}
@@ -873,7 +868,6 @@ class StarterUsedRequest(BaseModel):
 async def record_starter_used(req: StarterUsedRequest):
     """대화 스타터 선택 이벤트 기록 — QS 스타터 선택률 측정용."""
     db = get_async_db()
-    import json as _json
     await db.execute(
         """
         INSERT INTO metric_events (event_type, room_id, character_id, payload)
@@ -881,7 +875,7 @@ async def record_starter_used(req: StarterUsedRequest):
         """,
         req.room_id,
         req.character_id,
-        _json.dumps({"starter_text": req.starter_text[:100]}),
+        json.dumps({"starter_text": req.starter_text[:100]}),
     )
     return {"status": "recorded"}
 
@@ -908,8 +902,6 @@ async def send_greeting(
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
     """신규 채팅방 첫 진입 시 캐릭터 첫 인사 생성"""
-    import openai as _openai
-
     mbti_upper = character_mbti.upper()
     prompt = _MBTI_GREETING_PROMPTS.get(
         mbti_upper,
@@ -924,7 +916,7 @@ async def send_greeting(
         }
 
     try:
-        _client = _openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        _client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
         resp = await _client.chat.completions.create(
             model=LLM_MODEL_SIMPLE,
             messages=[{"role": "user", "content": prompt}],
