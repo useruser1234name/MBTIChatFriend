@@ -61,7 +61,7 @@ server/tests/            # pytest 5개 파일, 72 tests
 ### 호감도 시스템
 - 0-100 점수, 5단계 (1=낯선 사이 → 5=연인)
 - LLM 호감도 분석은 메인 응답과 `asyncio.create_task`로 병렬 실행
-- 시간 기반 감쇠 (7일 이후), 복귀 보너스
+- 시간 기반 감쇠 (7일 이후), 복귀 보너스 (서버 미배선 — 스펙은 tests/test_affinity.py에 보존)
 
 ### 채팅 파이프라인
 - 복잡도 분류 → 모델 선택 (complex=gpt-4.1, simple=gpt-4.1-mini)

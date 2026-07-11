@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import math
 import random
 import re
 import time
@@ -319,54 +318,6 @@ AFFINITY_LEVEL_THRESHOLDS = {1: 0, 2: 20, 3: 40, 4: 60, 5: 80}
 FREEZE_DAYS = 7            # 동결 기간 (일)
 DECAY_PER_WEEK = 2         # 주당 하락 점수
 RETURN_RECOVERY_RATE = 0.5 # 복귀 시 하락분 회복률
-
-
-def calculate_affinity_decay(
-    current_score: int,
-    current_level: int,
-    last_chat_time: Optional[datetime],
-) -> int:
-    """
-    미접속 기간에 따른 호감도 감쇠 계산.
-
-    규칙 (전문가 합의):
-    - 7일 이하: 동결 (변화 없음)
-    - 7일 초과: 주당 -2점
-    - 하한: 현재 레벨 -1의 최소 점수 (Level 1 이하로 떨어지지 않음)
-
-    Returns: 감쇠 후 점수
-    """
-    if last_chat_time is None:
-        return current_score
-
-    now = datetime.now(timezone.utc)
-    if last_chat_time.tzinfo is None:
-        last_chat_time = last_chat_time.replace(tzinfo=timezone.utc)
-
-    days_inactive = (now - last_chat_time).days
-
-    if days_inactive <= FREEZE_DAYS:
-        return current_score
-
-    weeks_after_freeze = (days_inactive - FREEZE_DAYS) / 7
-    decay = int(weeks_after_freeze * DECAY_PER_WEEK)
-
-    # 하한: 현재 레벨 -1 최소 점수 (최소 Level 1 = 0점)
-    lower_level = max(1, current_level - 1)
-    min_score = AFFINITY_LEVEL_THRESHOLDS.get(lower_level, 0)
-
-    return max(current_score - decay, min_score)
-
-
-def calculate_return_bonus(original_score: int, current_score: int) -> int:
-    """
-    복귀 시 하락분의 50% 회복.
-    Returns: 보너스 점수
-    """
-    lost = original_score - current_score
-    if lost <= 0:
-        return 0
-    return int(lost * RETURN_RECOVERY_RATE)
 
 
 def _storage_scope_id(room_id: str = "", character_id: str = "") -> str:
