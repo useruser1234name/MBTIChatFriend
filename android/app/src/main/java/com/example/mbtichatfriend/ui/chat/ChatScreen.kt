@@ -95,6 +95,7 @@ import com.example.mbtichatfriend.model.ChatMessage
 import com.example.mbtichatfriend.ui.components.CharacterFace
 import com.example.mbtichatfriend.ui.components.LiveCharacter
 import com.example.mbtichatfriend.ui.components.LottieOneShot
+import com.example.mbtichatfriend.ui.components.motionProfileForMbti
 import com.example.mbtichatfriend.ui.components.TypingIndicatorBubble
 import com.example.mbtichatfriend.ui.components.affinityLevelName
 import com.example.mbtichatfriend.ui.components.ConfirmDialog
@@ -212,7 +213,8 @@ fun ChatScreen(
                 avatar = avatar,
                 affinityLevel = character?.affinityLevel ?: 1,
                 expressionUrls = viewModel.expressionUrls,
-                isTalking = viewModel.isTalking
+                isTalking = viewModel.isTalking,
+                mbti = character?.mbti ?: ""
             )
 
             // 채팅 영역
@@ -592,8 +594,11 @@ private fun CharacterAnimationArea(
     avatar: CharacterAvatar? = null,
     affinityLevel: Int = 1,
     expressionUrls: Map<String, String>? = null,
-    isTalking: Boolean = false
+    isTalking: Boolean = false,
+    mbti: String = ""
 ) {
+    // C7: MBTI별 유휴 모션 프로파일 (mbti가 비어있거나 인식 불가면 기존 동작과 동일한 기본값)
+    val motionProfile = remember(mbti) { motionProfileForMbti(mbti) }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -630,7 +635,8 @@ private fun CharacterAnimationArea(
             LiveCharacter(
                 emotion = emotion,
                 characterSize = 100.dp,
-                enableSensor = true
+                enableSensor = true,
+                motionProfile = motionProfile
             ) {
                 if (avatarId.startsWith("img:") || avatarId.startsWith("v2:")) {
                     CharacterFace(
