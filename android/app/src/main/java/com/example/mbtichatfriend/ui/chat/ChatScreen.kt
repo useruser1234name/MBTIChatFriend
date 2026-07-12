@@ -18,6 +18,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -86,6 +87,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.model.CharacterAvatar
 import com.example.mbtichatfriend.model.CharacterEmotion
@@ -181,120 +183,26 @@ fun ChatScreen(
                 .background(MaterialTheme.colorScheme.background)
                 .systemBarsPadding()
         ) {
-            // 상단바
-            TopAppBar(
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { character?.let { onProfile(it.id) } }
-                    ) {
-                        if (avatar != null) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(avatar.colorHex).copy(alpha = 0.3f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(avatar.emoji, fontSize = 20.sp)
-                            }
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = character?.name ?: "...",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            if (viewModel.isTyping) {
-                                Text(
-                                    text = "입력 중...",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
-                                character?.let {
-                                    val levelName = affinityLevelName(it.affinityLevel)
-                                    Text(
-                                        text = "${emotionEmoji(viewModel.currentEmotion)} $levelName",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로가기")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { character?.let { onVoiceCall(it.id) } }) {
-                        Icon(Icons.Default.Phone, contentDescription = "음성 대화")
-                    }
-                    IconButton(onClick = onNavigateToCompatibility) {
-                        Icon(Icons.Default.Favorite, contentDescription = "궁합 보기")
-                    }
-                    IconButton(onClick = { character?.let { onProfile(it.id) } }) {
-                        Icon(Icons.Default.Person, contentDescription = "프로필")
-                    }
-                    Box {
-                        IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "메뉴")
-                        }
-                        DropdownMenu(
-                            expanded = showMenu,
-                            onDismissRequest = { showMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("대화 초기화") },
-                                onClick = {
-                                    showMenu = false
-                                    showClearDialog = true
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.DeleteOutline, contentDescription = null)
-                                }
-                            )
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
+            ChatTopBar(
+                character = character,
+                avatar = avatar,
+                isTyping = viewModel.isTyping,
+                currentEmotion = viewModel.currentEmotion,
+                showMenu = showMenu,
+                onBack = onBack,
+                onProfile = onProfile,
+                onVoiceCall = onVoiceCall,
+                onNavigateToCompatibility = onNavigateToCompatibility,
+                onMenuExpandedChange = { showMenu = it },
+                onClearChatRequest = {
+                    showMenu = false
+                    showClearDialog = true
+                }
             )
 
-            // 호감도 진행바
-            character?.let { ch ->
-                LinearProgressIndicator(
-                    progress = { ch.affinityScore / 100f },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(3.dp),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.outlineVariant,
-                )
-            }
+            AffinityProgressBar(affinityScore = character?.affinityScore)
 
-            // 오프라인 배너
-            AnimatedVisibility(visible = !isOnline) {
-                Surface(
-                    color = AccentRed.copy(alpha = 0.9f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "오프라인 - 메시지는 연결 시 자동 전송됩니다",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.White,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp)
-                    )
-                }
-            }
+            OfflineBanner(isOnline = isOnline)
 
             // 캐릭터 애니메이션 영역
             CharacterAnimationArea(
@@ -309,27 +217,7 @@ fun ChatScreen(
 
             // 채팅 영역
             if (messages.isEmpty() && !viewModel.isTyping) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        LottieOneShot(
-                            assetName = "lottie/empty_chat.json",
-                            modifier = Modifier.size(120.dp),
-                            iterations = Int.MAX_VALUE
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            text = "${character?.name ?: "캐릭터"}에게\n첫 인사를 건네보세요!",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
+                EmptyChatPlaceholder(characterName = character?.name)
             } else {
                 LazyColumn(
                     modifier = Modifier
@@ -390,90 +278,19 @@ fun ChatScreen(
 
     // 호감도 레벨업 축하 팝업 + Lottie 오버레이
     viewModel.levelUpEvent?.let { newLevel ->
-        val levelName = affinityLevelName(newLevel)
-        val levelLabel = when (newLevel) {
-            2 -> "Lv.2"; 3 -> "Lv.3"; 4 -> "Lv.4"; 5 -> "Lv.5"
-            else -> ""
-        }
-        // 축하 Lottie 오버레이
-        Box(modifier = Modifier.fillMaxSize().zIndex(10f)) {
-            LottieOneShot(
-                assetName = "lottie/levelup.json",
-                modifier = Modifier.fillMaxSize(),
-                onFinished = { /* 애니메이션 종료 후 자동 사라짐 */ }
-            )
-        }
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissLevelUp() },
-            title = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text(levelLabel, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.height(8.dp))
-                    Text("관계가 발전했어요!", fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "${character?.name ?: "캐릭터"}와(과) '$levelName'이 되었어요!",
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "앞으로 더 다양한 반응을 보여줄 거예요",
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { viewModel.dismissLevelUp() }) {
-                    Text("좋아요!")
-                }
-            }
+        LevelUpDialog(
+            newLevel = newLevel,
+            characterName = character?.name,
+            onDismiss = { viewModel.dismissLevelUp() }
         )
     }
 
     // 호감도 레벨다운 알림
     viewModel.levelDownEvent?.let { newLevel ->
-        val levelName = affinityLevelName(newLevel)
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissLevelDown() },
-            title = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "...",
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text("관계가 변했어요...", fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "${character?.name ?: "캐릭터"}와(과)의 관계가 '$levelName'으로 변했어요",
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "다정하게 대화하면 다시 가까워질 수 있어요",
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { viewModel.dismissLevelDown() }) {
-                    Text("알겠어요")
-                }
-            }
+        LevelDownDialog(
+            newLevel = newLevel,
+            characterName = character?.name,
+            onDismiss = { viewModel.dismissLevelDown() }
         )
     }
 
@@ -512,6 +329,259 @@ fun ChatScreen(
             onDismiss = { shareTargetIndex = null }
         )
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatTopBar(
+    character: CharacterEntity?,
+    avatar: CharacterAvatar?,
+    isTyping: Boolean,
+    currentEmotion: CharacterEmotion,
+    showMenu: Boolean,
+    onBack: () -> Unit,
+    onProfile: (Long) -> Unit,
+    onVoiceCall: (Long) -> Unit,
+    onNavigateToCompatibility: () -> Unit,
+    onMenuExpandedChange: (Boolean) -> Unit,
+    onClearChatRequest: () -> Unit,
+) {
+    TopAppBar(
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clickable { character?.let { onProfile(it.id) } }
+            ) {
+                if (avatar != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(avatar.colorHex).copy(alpha = 0.3f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(avatar.emoji, fontSize = 20.sp)
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = character?.name ?: "...",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (isTyping) {
+                        Text(
+                            text = "입력 중...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        character?.let {
+                            val levelName = affinityLevelName(it.affinityLevel)
+                            Text(
+                                text = "${emotionEmoji(currentEmotion)} $levelName",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        navigationIcon = {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로가기")
+            }
+        },
+        actions = {
+            IconButton(onClick = { character?.let { onVoiceCall(it.id) } }) {
+                Icon(Icons.Default.Phone, contentDescription = "음성 대화")
+            }
+            IconButton(onClick = onNavigateToCompatibility) {
+                Icon(Icons.Default.Favorite, contentDescription = "궁합 보기")
+            }
+            IconButton(onClick = { character?.let { onProfile(it.id) } }) {
+                Icon(Icons.Default.Person, contentDescription = "프로필")
+            }
+            Box {
+                IconButton(onClick = { onMenuExpandedChange(true) }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "메뉴")
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { onMenuExpandedChange(false) }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("대화 초기화") },
+                        onClick = onClearChatRequest,
+                        leadingIcon = {
+                            Icon(Icons.Default.DeleteOutline, contentDescription = null)
+                        }
+                    )
+                }
+            }
+        },
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    )
+}
+
+@Composable
+private fun AffinityProgressBar(affinityScore: Int?) {
+    if (affinityScore != null) {
+        LinearProgressIndicator(
+            progress = { affinityScore / 100f },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(3.dp),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = MaterialTheme.colorScheme.outlineVariant,
+        )
+    }
+}
+
+@Composable
+private fun OfflineBanner(isOnline: Boolean) {
+    AnimatedVisibility(visible = !isOnline) {
+        Surface(
+            color = AccentRed.copy(alpha = 0.9f),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "오프라인 - 메시지는 연결 시 자동 전송됩니다",
+                style = MaterialTheme.typography.labelMedium,
+                color = Color.White,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ColumnScope.EmptyChatPlaceholder(characterName: String?) {
+    Box(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            LottieOneShot(
+                assetName = "lottie/empty_chat.json",
+                modifier = Modifier.size(120.dp),
+                iterations = Int.MAX_VALUE
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "${characterName ?: "캐릭터"}에게\n첫 인사를 건네보세요!",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+private fun LevelUpDialog(
+    newLevel: Int,
+    characterName: String?,
+    onDismiss: () -> Unit,
+) {
+    val levelName = affinityLevelName(newLevel)
+    val levelLabel = when (newLevel) {
+        2 -> "Lv.2"; 3 -> "Lv.3"; 4 -> "Lv.4"; 5 -> "Lv.5"
+        else -> ""
+    }
+    // 축하 Lottie 오버레이
+    Box(modifier = Modifier.fillMaxSize().zIndex(10f)) {
+        LottieOneShot(
+            assetName = "lottie/levelup.json",
+            modifier = Modifier.fillMaxSize(),
+            onFinished = { /* 애니메이션 종료 후 자동 사라짐 */ }
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                Text(levelLabel, fontSize = 32.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.height(8.dp))
+                Text("관계가 발전했어요!", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "${characterName ?: "캐릭터"}와(과) '$levelName'이 되었어요!",
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "앞으로 더 다양한 반응을 보여줄 거예요",
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("좋아요!")
+            }
+        }
+    )
+}
+
+@Composable
+private fun LevelDownDialog(
+    newLevel: Int,
+    characterName: String?,
+    onDismiss: () -> Unit,
+) {
+    val levelName = affinityLevelName(newLevel)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "...",
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                Text("관계가 변했어요...", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "${characterName ?: "캐릭터"}와(과)의 관계가 '$levelName'으로 변했어요",
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "다정하게 대화하면 다시 가까워질 수 있어요",
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("알겠어요")
+            }
+        }
+    )
 }
 
 @Composable
