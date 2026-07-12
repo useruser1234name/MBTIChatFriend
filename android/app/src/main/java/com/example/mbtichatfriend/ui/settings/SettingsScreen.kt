@@ -64,6 +64,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.mbtichatfriend.BuildConfig
+import com.example.mbtichatfriend.data.remote.ReferralStatsResponse
 import com.example.mbtichatfriend.ui.components.ConfirmDialog
 import androidx.hilt.navigation.compose.hiltViewModel
 
@@ -134,61 +135,11 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 프로필 섹션 - 아바타 포함
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                )
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(20.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // 유저 아바타
-                    androidx.compose.material3.Surface(
-                        modifier = Modifier.size(56.dp),
-                        shape = androidx.compose.foundation.shape.CircleShape,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                    ) {
-                        androidx.compose.foundation.layout.Box(
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = nickname.take(1).uppercase(),
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                    Spacer(Modifier.width(16.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = nickname.ifEmpty { "사용자" },
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = when (authProvider) {
-                                "google" -> "Google 계정"
-                                else -> "비회원"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(onClick = { showNicknameDialog = true }) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = "닉네임 수정",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            }
+            ProfileCard(
+                nickname = nickname,
+                authProvider = authProvider,
+                onEditClick = { showNicknameDialog = true }
+            )
 
             Spacer(Modifier.height(8.dp))
 
@@ -227,216 +178,30 @@ fun SettingsScreen(
             Spacer(Modifier.height(8.dp))
 
             // 테마 섹션
-            SectionTitle("테마")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                ThemeOption(
-                    icon = Icons.Default.PhoneAndroid,
-                    label = "시스템",
-                    isSelected = darkMode == "system",
-                    onClick = { viewModel.updateDarkMode("system") },
-                    modifier = Modifier.weight(1f)
-                )
-                ThemeOption(
-                    icon = Icons.Default.LightMode,
-                    label = "라이트",
-                    isSelected = darkMode == "light",
-                    onClick = { viewModel.updateDarkMode("light") },
-                    modifier = Modifier.weight(1f)
-                )
-                ThemeOption(
-                    icon = Icons.Default.DarkMode,
-                    label = "다크",
-                    isSelected = darkMode == "dark",
-                    onClick = { viewModel.updateDarkMode("dark") },
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            ThemeSection(
+                darkMode = darkMode,
+                onDarkModeChange = { viewModel.updateDarkMode(it) }
+            )
 
             Spacer(Modifier.height(8.dp))
 
             // 레퍼럴 섹션 (27차 스프린트 / 30차 A/B)
-            SectionTitle(referralCtaText)
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    // 레퍼럴 통계
-                    referralStats?.let { stats ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = "${stats.invitedCount}명",
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Text(
-                                    text = "내가 초대한 친구",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = "+${stats.rewardDays}일",
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.tertiary
-                                )
-                                Text(
-                                    text = "리워드",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(12.dp))
-                    }
-                    // 초대 코드 표시
-                    if (referralCode.isNotEmpty()) {
-                        Text(
-                            text = "내 초대 코드: $referralCode",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                        Spacer(Modifier.height(8.dp))
-                    }
-                    // 공유 버튼들 (V3: 딥링크 URL 우선, 폴백 코드 텍스트)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        // 일반 공유 버튼 — 딥링크 URL 우선 공유 (A/B CTA 텍스트 적용, 30차 스프린트)
-                        FilledTonalButton(
-                            onClick = {
-                                viewModel.generateReferralLink { shareContent ->
-                                    val intent = Intent(Intent.ACTION_SEND).apply {
-                                        type = "text/plain"
-                                        putExtra(Intent.EXTRA_TEXT, shareContent)
-                                    }
-                                    context.startActivity(Intent.createChooser(intent, referralCtaText))
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Share,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(referralCtaText)
-                        }
-                        // 카카오톡 공유 버튼 — 딥링크 URL 우선, 미설치 시 일반 공유 폴백
-                        OutlinedButton(
-                            onClick = {
-                                viewModel.generateReferralLink { shareContent ->
-                                    val intent = Intent(Intent.ACTION_SEND).apply {
-                                        type = "text/plain"
-                                        putExtra(Intent.EXTRA_TEXT, shareContent)
-                                        setPackage("com.kakao.talk")
-                                    }
-                                    runCatching {
-                                        context.startActivity(intent)
-                                    }.onFailure {
-                                        val fallback = Intent(Intent.ACTION_SEND).apply {
-                                            type = "text/plain"
-                                            putExtra(Intent.EXTRA_TEXT, shareContent)
-                                        }
-                                        context.startActivity(Intent.createChooser(fallback, "친구 초대"))
-                                    }
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("카카오톡", color = Color(0xFFFFE812))
-                        }
-                    }
-                }
-            }
+            ReferralCard(
+                referralCtaText = referralCtaText,
+                referralStats = referralStats,
+                referralCode = referralCode,
+                onGenerateReferralLink = { onSuccess -> viewModel.generateReferralLink(onSuccess) }
+            )
 
             Spacer(Modifier.height(8.dp))
 
             // 초대 코드 입력 섹션 (A8 이후 Settings 이동)
-            SectionTitle("초대 코드 입력")
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "친구에게 받은 초대 코드를 입력하면 보너스 이용일을 받을 수 있어요.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = inviteCodeInput,
-                        onValueChange = { if (it.length <= 16) inviteCodeInput = it.uppercase() },
-                        label = { Text("초대 코드") },
-                        placeholder = { Text("예: ABC12345") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.tertiary
-                        ),
-                        leadingIcon = {
-                            Icon(
-                                Icons.Default.CardGiftcard,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.tertiary
-                            )
-                        },
-                        enabled = redeemState !is SettingsViewModel.RedeemState.Loading
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    FilledTonalButton(
-                        onClick = { viewModel.redeemInviteCode(inviteCodeInput) },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        enabled = inviteCodeInput.trim().isNotEmpty() &&
-                                redeemState !is SettingsViewModel.RedeemState.Loading,
-                        colors = androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
-                            containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                        )
-                    ) {
-                        if (redeemState is SettingsViewModel.RedeemState.Loading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "적용 중...",
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
-                            )
-                        } else {
-                            Text(
-                                "적용하기",
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
-                            )
-                        }
-                    }
-                }
-            }
+            InviteCodeCard(
+                inviteCodeInput = inviteCodeInput,
+                onInviteCodeInputChange = { inviteCodeInput = it },
+                redeemState = redeemState,
+                onRedeemClick = { viewModel.redeemInviteCode(inviteCodeInput) }
+            )
 
             Spacer(Modifier.height(8.dp))
 
@@ -487,30 +252,12 @@ fun SettingsScreen(
 
     // 계정 연동 에러 Snackbar
     linkError?.let { error ->
-        Snackbar(
-            modifier = Modifier.padding(16.dp),
-            action = {
-                TextButton(onClick = { viewModel.clearLinkError() }) {
-                    Text("확인")
-                }
-            }
-        ) {
-            Text(error)
-        }
+        MessageSnackbar(message = error, onDismiss = { viewModel.clearLinkError() })
     }
 
     // 초대 코드 리딤 결과 Snackbar
     redeemSnackbarMessage?.let { msg ->
-        Snackbar(
-            modifier = Modifier.padding(16.dp),
-            action = {
-                TextButton(onClick = { redeemSnackbarMessage = null }) {
-                    Text("확인")
-                }
-            }
-        ) {
-            Text(msg)
-        }
+        MessageSnackbar(message = msg, onDismiss = { redeemSnackbarMessage = null })
     }
 
     // 닉네임 변경 다이얼로그
@@ -539,6 +286,311 @@ fun SettingsScreen(
             },
             onDismiss = { showLogoutDialog = false }
         )
+    }
+}
+
+@Composable
+private fun ProfileCard(
+    nickname: String,
+    authProvider: String,
+    onEditClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // 유저 아바타
+            androidx.compose.material3.Surface(
+                modifier = Modifier.size(56.dp),
+                shape = androidx.compose.foundation.shape.CircleShape,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+            ) {
+                androidx.compose.foundation.layout.Box(
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = nickname.take(1).uppercase(),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = nickname.ifEmpty { "사용자" },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = when (authProvider) {
+                        "google" -> "Google 계정"
+                        else -> "비회원"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onEditClick) {
+                Icon(
+                    Icons.Default.Edit,
+                    contentDescription = "닉네임 수정",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThemeSection(
+    darkMode: String,
+    onDarkModeChange: (String) -> Unit
+) {
+    SectionTitle("테마")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        ThemeOption(
+            icon = Icons.Default.PhoneAndroid,
+            label = "시스템",
+            isSelected = darkMode == "system",
+            onClick = { onDarkModeChange("system") },
+            modifier = Modifier.weight(1f)
+        )
+        ThemeOption(
+            icon = Icons.Default.LightMode,
+            label = "라이트",
+            isSelected = darkMode == "light",
+            onClick = { onDarkModeChange("light") },
+            modifier = Modifier.weight(1f)
+        )
+        ThemeOption(
+            icon = Icons.Default.DarkMode,
+            label = "다크",
+            isSelected = darkMode == "dark",
+            onClick = { onDarkModeChange("dark") },
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun ReferralCard(
+    referralCtaText: String,
+    referralStats: ReferralStatsResponse?,
+    referralCode: String,
+    onGenerateReferralLink: ((String) -> Unit) -> Unit
+) {
+    val context = LocalContext.current
+    SectionTitle(referralCtaText)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // 레퍼럴 통계
+            referralStats?.let { stats ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "${stats.invitedCount}명",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "내가 초대한 친구",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "+${stats.rewardDays}일",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                        Text(
+                            text = "리워드",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+            // 초대 코드 표시
+            if (referralCode.isNotEmpty()) {
+                Text(
+                    text = "내 초대 코드: $referralCode",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            // 공유 버튼들 (V3: 딥링크 URL 우선, 폴백 코드 텍스트)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 일반 공유 버튼 — 딥링크 URL 우선 공유 (A/B CTA 텍스트 적용, 30차 스프린트)
+                FilledTonalButton(
+                    onClick = {
+                        onGenerateReferralLink { shareContent ->
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, shareContent)
+                            }
+                            context.startActivity(Intent.createChooser(intent, referralCtaText))
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Share,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(referralCtaText)
+                }
+                // 카카오톡 공유 버튼 — 딥링크 URL 우선, 미설치 시 일반 공유 폴백
+                OutlinedButton(
+                    onClick = {
+                        onGenerateReferralLink { shareContent ->
+                            val intent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, shareContent)
+                                setPackage("com.kakao.talk")
+                            }
+                            runCatching {
+                                context.startActivity(intent)
+                            }.onFailure {
+                                val fallback = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, shareContent)
+                                }
+                                context.startActivity(Intent.createChooser(fallback, "친구 초대"))
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("카카오톡", color = Color(0xFFFFE812))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InviteCodeCard(
+    inviteCodeInput: String,
+    onInviteCodeInputChange: (String) -> Unit,
+    redeemState: SettingsViewModel.RedeemState,
+    onRedeemClick: () -> Unit
+) {
+    SectionTitle("초대 코드 입력")
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "친구에게 받은 초대 코드를 입력하면 보너스 이용일을 받을 수 있어요.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = inviteCodeInput,
+                onValueChange = { if (it.length <= 16) onInviteCodeInputChange(it.uppercase()) },
+                label = { Text("초대 코드") },
+                placeholder = { Text("예: ABC12345") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.tertiary
+                ),
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.CardGiftcard,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.tertiary
+                    )
+                },
+                enabled = redeemState !is SettingsViewModel.RedeemState.Loading
+            )
+            Spacer(Modifier.height(10.dp))
+            FilledTonalButton(
+                onClick = onRedeemClick,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                enabled = inviteCodeInput.trim().isNotEmpty() &&
+                        redeemState !is SettingsViewModel.RedeemState.Loading,
+                colors = androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                )
+            ) {
+                if (redeemState is SettingsViewModel.RedeemState.Loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "적용 중...",
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                } else {
+                    Text(
+                        "적용하기",
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageSnackbar(message: String, onDismiss: () -> Unit) {
+    Snackbar(
+        modifier = Modifier.padding(16.dp),
+        action = {
+            TextButton(onClick = onDismiss) {
+                Text("확인")
+            }
+        }
+    ) {
+        Text(message)
     }
 }
 
