@@ -937,30 +937,61 @@ async def _spawn_parallel_analysis(
     nickname: str,
     character_id: str,
     room_id: str,
-) -> Tuple[Optional[asyncio.Task], Optional[asyncio.Task], int, str]:
-    """호감도 분석 태스크 + RAG 검색 태스크를 병렬로 시작(클라이언트 있을 때만).
+) -> Tuple[Optional[asyncio.Task], int, str]:
+    """메모리 컨텍스트 태스크 + 호감도 분석 태스크를 관리(클라이언트 있을 때만).
 
     클라이언트가 없으면 즉시 키워드 기반 호감도를 계산한다.
 
-    generate_reply/stream_reply가 공유(S13/S14 잔여 본문 분할). 태스크
-    소유권은 호출부가 유지해야 하므로(예외 시 취소 처리) 생성한 Task
-    객체를 그대로 반환한다 — 헬퍼 안에서 await/취소하지 않는다.
-    클라이언트가 없을 때의 처리(목업 응답 생성)는 두 호출부가 서로 다르므로
-    (generate_reply는 return, stream_reply는 yield 후 return) 호출부에서
-    각자 담당한다 — 이 헬퍼는 pre_mem_ctx 계산과 task 생성/폴백 delta
-    계산까지만 책임진다.
-    Returns (affinity_task, rag_task, affinity_delta, pre_mem_ctx).
+    generate_reply/stream_reply가 공유. P6 변경: RAG 검색 태스크는 더 이상
+    이 함수가 만들지 않는다 — 호출부가 이 함수를 부르기 *전에* 이미 생성해
+    시작해 둔다(TTFT 단축: memory와 RAG 대기를 겹치기 위함, P1 실측
+    memory=1176ms/rag=449ms 완전 직렬 → 이론상 ~449ms 절감). 이 함수는 대신
+    build_memory_context를 태스크로 만들어 그 대기 시간 동안 RAG가 동시에
+    진행되게 하고, 호감도 분석은 memory_context를 입력으로 받으므로(기존
+    의존성 유지) memory task가 끝난 뒤에만 생성한다.
+
+    memory task의 생성·대기·예외 처리·취소는 이 함수가 전부 책임지고
+    끝낸다 — 성공/실패/(외부 취소로 인한) 모든 경로에서 이 함수를 벗어나기
+    전에 반드시 완료되거나 취소되므로, 호출부가 "메모리 task"를 별도로
+    추적·취소할 필요가 없다(고아 태스크 방지를 함수 경계 안에서 보장).
+    실패 시 폴백은 RAG의 _merge_rag_results와 동일한 패턴(빈 컨텍스트로
+    대체 + 경고 로그)을 따른다.
+
+    affinity_task는 기존과 동일하게(예외 시 취소 책임 포함) 호출부가
+    소유한다 — 헬퍼 안에서 await/취소하지 않는다. 클라이언트가 없을 때의
+    처리(목업 응답 생성)는 두 호출부가 서로 다르므로(generate_reply는
+    return, stream_reply는 yield 후 return) 호출부에서 각자 담당한다.
+    Returns (affinity_task, affinity_delta, pre_mem_ctx).
     """
     affinity_delta = 0
-    # 선행 memory_context 조회 (호감도 분석에 활용)
     pre_mem_ctx = ""
+
+    # 메모리 컨텍스트를 태스크로 시작 — 호출부가 이미 만들어 둔 RAG task와
+    # 동시에 진행된다(RAG task는 이 함수 호출 전에 이미 스레드에서 실행 중).
+    mem_task: Optional[asyncio.Task] = None
     if character_name and nickname:
-        pre_mem_ctx = await build_memory_context(
-            character_name,
-            nickname,
-            room_id=room_id,
-            character_id=character_id,
+        mem_task = asyncio.create_task(
+            build_memory_context(
+                character_name,
+                nickname,
+                room_id=room_id,
+                character_id=character_id,
+            )
         )
+
+    try:
+        if mem_task is not None:
+            try:
+                pre_mem_ctx = await mem_task
+            except Exception as e:
+                logger.warning(f"[P6] 메모리 컨텍스트 조회 실패, 빈 컨텍스트로 대체: {e}")
+                pre_mem_ctx = ""
+    finally:
+        # await가 정상 반환/Exception 둘 다에서 mem_task는 이미 done 상태다.
+        # 이 finally는 외부 취소(CancelledError)로 await 자체가 중단된
+        # 극히 드문 경우까지 커버하기 위한 방어적 정리(정상 흐름에서는 no-op).
+        if mem_task is not None and not mem_task.done():
+            mem_task.cancel()
 
     if client:
         recent_context = _build_recent_context(conversation_history)
@@ -971,23 +1002,13 @@ async def _spawn_parallel_analysis(
                 memory_context=pre_mem_ctx,
             )
         )
-        # RAG(Chroma) 검색도 스레드에서 병렬 시작 — 호감도 분석과 동시 실행되어
-        # LLM 프롬프트 조립 전까지 지연을 흡수한다.
-        _rag_scope_id = _storage_scope_id(room_id, character_id)
-        if _rag_scope_id and get_store():
-            rag_task = asyncio.create_task(
-                asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
-            )
-        else:
-            rag_task = None
     else:
         affinity_task = None
-        rag_task = None
         affinity_delta = calculate_affinity_delta(
             message, affinity_level, conversation_history, user_mbti, mbti
         )
 
-    return affinity_task, rag_task, affinity_delta, pre_mem_ctx
+    return affinity_task, affinity_delta, pre_mem_ctx
 
 
 async def _assemble_prompt_and_model(
@@ -1153,10 +1174,25 @@ async def generate_reply(
     if _blocked is not None:
         return _blocked
 
+    # P6: RAG(Chroma) 검색을 memory-context 조회보다 먼저 시작해 두 대기가
+    # 겹치게 한다(P1 실측: memory=1176ms, rag=449ms 완전 직렬 → 이론상 ~449ms
+    # 절감). 안전 필터를 통과한 뒤에만 생성해 위 차단 경로에서 고아 태스크가
+    # 생기지 않도록 한다. client가 없으면(mock 경로) 기존과 동일하게 RAG를
+    # 시작하지 않는다(_rag_scope_id/get_store()는 계산해도 client 체크가
+    # 먼저이므로 실질적으로 무해).
+    rag_task: Optional[asyncio.Task] = None
+    if client:
+        _rag_scope_id = _storage_scope_id(room_id, character_id)
+        if _rag_scope_id and get_store():
+            rag_task = asyncio.create_task(
+                asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
+            )
+
     # 2. 호감도 변화 계산 (LLM 우선, 실패 시 키워드 fallback)
-    # P1 계측: build_memory_context 대기를 포함한 준비 단계 소요(t_memory)
+    # P1 계측: memory task 대기 소요(t_memory) — P6 이후에는 RAG 대기와
+    # 겹치므로 t_memory+t_rag를 더 이상 "직렬 합"으로 해석하면 안 된다.
     _t_memory_start = time.perf_counter()
-    affinity_task, rag_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
+    affinity_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
         message, mbti, affinity_level, conversation_history, user_mbti,
         character_name, nickname, character_id, room_id,
     )
@@ -1367,13 +1403,27 @@ async def stream_reply(
         yield StreamDone(affinity_delta=_blocked_delta, full_text="")
         return
 
-    # 3+5. 선행 memory_context + 호감도 분석/RAG 병렬 시작 (공유 헬퍼, S13/S14)
+    # P6: RAG(Chroma) 검색을 memory-context 조회보다 먼저 시작해 두 대기가
+    # 겹치게 한다(P1 실측: memory=1176ms, rag=449ms 완전 직렬 → 이론상 ~449ms
+    # 절감). 안전 필터를 통과한 뒤에만 생성해 위 차단 경로에서 고아 태스크가
+    # 생기지 않도록 한다. client가 없으면(mock 경로) 기존과 동일하게 RAG를
+    # 시작하지 않는다.
+    rag_task: Optional[asyncio.Task] = None
+    if client:
+        _rag_scope_id = _storage_scope_id(room_id, character_id)
+        if _rag_scope_id and get_store():
+            rag_task = asyncio.create_task(
+                asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
+            )
+
+    # 3+5. 선행 memory_context + 호감도 분석 병렬 시작 (공유 헬퍼)
     # 클라이언트가 없으면 헬퍼가 즉시 키워드 기반 호감도(affinity_delta)만
-    # 계산하고 태스크는 만들지 않는다 — 아래 "4. 클라이언트 부재" 분기에서
-    # 그 값을 그대로 사용한다(원본 stream_reply의 동일 계산과 동치).
-    # P1 계측: build_memory_context 대기를 포함한 준비 단계 소요(t_memory)
+    # 계산한다 — 아래 "4. 클라이언트 부재" 분기에서 그 값을 그대로 사용한다
+    # (원본 stream_reply의 동일 계산과 동치).
+    # P1 계측: memory task 대기 소요(t_memory) — P6 이후에는 RAG 대기와
+    # 겹치므로 t_memory+t_rag를 더 이상 "직렬 합"으로 해석하면 안 된다.
     _t_memory_start = time.perf_counter()
-    affinity_task, rag_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
+    affinity_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
         message, mbti, affinity_level, conversation_history, user_mbti,
         character_name, nickname, character_id, room_id,
     )
