@@ -989,6 +989,7 @@ def build_system_prompt(
     memory_context: str = "",
     episode_context: str = "",
     preference_context: str = "",
+    time_context: str = "",
 ) -> str:
     personality = MBTI_PERSONALITIES.get(mbti, MBTI_PERSONALITIES["ENFP"])
     style = SPEECH_STYLES.get(speech_style, SPEECH_STYLES["CASUAL"])
@@ -1061,6 +1062,10 @@ def build_system_prompt(
 
     # 에피소드 기억 섹션
     episode_section = f"\n{episode_context}\n" if episode_context else ""
+
+    # 시간대 인지 섹션 (C4) — 동적 꼬리, 프리픽스 캐시 영향 없음. hour가 없으면
+    # 라우터가 빈 문자열을 넘기므로 이 블록 자체가 안 들어간다(기존 골든 테스트 불변).
+    time_section = f"\n{time_context}\n" if time_context else ""
 
     # ── 조건부 섹션 ───────────────────────────────────────────────
     # 호감도 1-2: 관계 심화 관련 지침 제외 (대화 중반/후반 흐름, 심화 특수상황)
@@ -1151,7 +1156,7 @@ emotion: NEUTRAL|HAPPY|SHY|SAD|ANGRY|SURPRISED|LOVE|PLAYFUL|WORRIED|TOUCHED
 {rel}
 
 {affinity_section}
-{compat_section}{preference_section}{few_shot_section}{summary_section}{memory_section}{episode_section}
+{compat_section}{preference_section}{few_shot_section}{summary_section}{memory_section}{episode_section}{time_section}
 # 표현 규칙
 - 이모지/이모티콘/유니코드 그림문자 금지. ㅋㅋ, ㅎㅎ, ㅠㅠ, ~, !! 같은 텍스트 표현만 허용.
 - 응답에서 2-3가지 감정을 자연스럽게 섞어. NEUTRAL만 반복 금지.

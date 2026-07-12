@@ -101,6 +101,38 @@ def _is_night_window(client_local_hour: Optional[int]) -> bool:
     return (22 <= client_local_hour <= 23) or (0 <= client_local_hour <= 4)
 
 
+# C4: 시간대 인지 프롬프트 — hour(0-23) → 4구간 라벨.
+# 05-10 아침 / 11-16 낮 / 17-21 저녁 / 22-04 밤(자정 넘어가는 구간 포함).
+_TIME_OF_DAY_LABELS: tuple[tuple[range, str], ...] = (
+    (range(5, 11), "아침"),
+    (range(11, 17), "낮"),
+    (range(17, 22), "저녁"),
+)
+_TIME_OF_DAY_DEFAULT_LABEL = "밤"  # 22-23시, 0-4시
+
+
+def _time_of_day_label(client_local_hour: int) -> str:
+    """0-23시를 아침/낮/저녁/밤 중 하나로 분류한다 (C4, 재사용 가능)."""
+    for hour_range, label in _TIME_OF_DAY_LABELS:
+        if client_local_hour in hour_range:
+            return label
+    return _TIME_OF_DAY_DEFAULT_LABEL
+
+
+def build_time_context(client_local_hour: Optional[int]) -> str:
+    """client_local_hour를 시간대 인지 프롬프트 문구로 변환한다 (C4).
+
+    build_system_prompt의 동적 꼬리 파라미터(time_context)로 그대로
+    전달하도록 설계됨 — 정적 프리픽스에는 영향 없음. hour가 None이면
+    빈 문자열을 반환해 기존 동작과 동일하게 시간 블록 자체가 프롬프트에
+    삽입되지 않는다.
+    """
+    if client_local_hour is None:
+        return ""
+    label = _time_of_day_label(client_local_hour)
+    return f"[현재 시간대: {label}이다. 자연스럽게 반영하되 매번 언급하지는 마라.]"
+
+
 def _merge_memories(base: list[MemoryItem], extra: list[MemoryItem]) -> list[MemoryItem]:
     merged: list[MemoryItem] = []
     seen_keys: set[str] = set()
@@ -443,6 +475,7 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
         character_name=req.character_name,
         character_id=prep["effective_character_id"],
         memories=prep["merged_memories"],
+        time_context=build_time_context(req.client_local_hour),
     )
     return await _finalize_chat_turn(
         req,
@@ -679,6 +712,7 @@ async def _openai_event_generator(
             character_id=prep["effective_character_id"],
             memories=prep["merged_memories"],
             room_id=room_id,
+            time_context=build_time_context(req.client_local_hour),
         ):
             if isinstance(item, StreamDone):
                 affinity_delta = item.affinity_delta

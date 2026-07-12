@@ -559,11 +559,14 @@ def _build_chat_messages(
     mood: Optional[str],
     conversation_history: List[HistoryMessage],
     message: str,
+    time_context: str = "",
 ) -> List[dict]:
     """시스템 프롬프트 + safety + 히스토리 + 현재 메시지로 messages 배열 조립.
 
     generate_reply(논스트림)와 stream_reply(스트림)가 공유하여 프롬프트
-    정합성을 한 곳에서 보장한다.
+    정합성을 한 곳에서 보장한다. time_context(C4, 시간대 인지)는
+    build_system_prompt의 동적 꼬리 파라미터로 그대로 전달한다 — mood와
+    달리 별도 system 메시지가 아니라 프롬프트 본문 안에 들어간다.
     """
     # 유저 발화 스타일 미러링(개인화 되먹임 MVP). 규칙 기반·LLM 미호출.
     # 여기 도달하는 conversation_history는 호출부(generate_reply/stream_reply)에서
@@ -587,6 +590,7 @@ def _build_chat_messages(
         memory_context=mem_ctx,
         episode_context=episode_context,
         preference_context=preference_context,
+        time_context=time_context,
     )
     # safety_prompt는 거의 변하지 않으므로 정적 system_prompt에 인라인하여 prefix caching 효율 극대화
     safety_prompt = get_safety_system_prompt()
@@ -1031,6 +1035,7 @@ async def _assemble_prompt_and_model(
     message: str,
     character_id: str,
     log_lora_routing: bool = True,
+    time_context: str = "",
 ) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, Optional[str]]:
     """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/AB/복잡도) + LoRA 클라이언트 해석.
 
@@ -1041,6 +1046,8 @@ async def _assemble_prompt_and_model(
     Returns (messages, model_id, ab_variant, active_client, lora_base_url).
     lora_base_url은 stream_reply가 stream_options 분기에 사용한다
     (generate_reply는 사용하지 않지만 반환값 형태는 통일한다).
+    time_context(C4)는 그대로 _build_chat_messages → build_system_prompt로
+    전달한다(동적 꼬리 전용 파라미터, 정적 프리픽스 불변).
     """
     messages = _build_chat_messages(
         mbti=mbti,
@@ -1060,6 +1067,7 @@ async def _assemble_prompt_and_model(
         mood=mood,
         conversation_history=conversation_history,
         message=message,
+        time_context=time_context,
     )
 
     # 모델 선택 (Phase 5: 복잡도 기반 라우팅 + A/B 테스트 overlay)
@@ -1155,8 +1163,15 @@ async def generate_reply(
     mood: Optional[str] = None,
     room_id: str = "",
     owner_uid: str = "",
+    time_context: str = "",
 ) -> Tuple[List[ReplyPart], int]:
-    """LLM을 사용하여 대화 응답 생성, (replies, affinity_delta) 반환"""
+    """LLM을 사용하여 대화 응답 생성, (replies, affinity_delta) 반환.
+
+    time_context(C4): 라우터가 client_local_hour를 아침/낮/저녁/밤 구간
+    문구로 미리 변환해 넘긴다("" 이면 시간 블록 자체가 프롬프트에 삽입되지
+    않음, 기존 동작과 동일). build_system_prompt의 동적 꼬리 파라미터로만
+    전달되므로 정적 프리픽스(prefix caching 대상)에는 영향 없다.
+    """
 
     if conversation_history is None:
         conversation_history = []
@@ -1244,7 +1259,7 @@ async def generate_reply(
             mbti, speech_style, relationship, nickname, character_name, affinity_level,
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
-            character_id,
+            character_id, time_context=time_context,
         )
 
         _t_start = time.monotonic()
@@ -1371,6 +1386,7 @@ async def stream_reply(
     mood: Optional[str] = None,
     room_id: str = "",
     owner_uid: str = "",
+    time_context: str = "",
 ) -> AsyncGenerator[Union[ReplyPart, StreamDone], None]:
     """말풍선 점진 스트리밍 생성기.
 
@@ -1387,6 +1403,9 @@ async def stream_reply(
     않는다(quick_score 는 텔레메트리로만). 백그라운드 메트릭 기록은
     generate_reply의 _emit_background_metrics와 usage 소스·조건·순서가
     달라(S14에서 검토 후 보류) 공유하지 않고 자체 인라인 블록을 유지한다.
+
+    time_context(C4): generate_reply와 동일 — 라우터가 미리 변환한 시간대
+    문구를 build_system_prompt 동적 꼬리로만 전달한다.
     """
     if conversation_history is None:
         conversation_history = []
@@ -1472,7 +1491,7 @@ async def stream_reply(
             mbti, speech_style, relationship, nickname, character_name, affinity_level,
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
-            character_id, log_lora_routing=False,
+            character_id, log_lora_routing=False, time_context=time_context,
         )
 
         # 9. 스트리밍 호출 + 증분 파싱
