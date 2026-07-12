@@ -24,7 +24,8 @@ val DarkCard = Color(0xFF2E2F4A)
 // Text
 val TextDark = Color(0xFF2D2D3A)
 val TextMedium = Color(0xFF6B6B7B)
-val TextLight = Color(0xFF9E9EAE)
+// U8: 접근성 — 4.5:1 이상 대비 확보를 위해 어둡게 조정(배경 CreamWhite 대비 약 4.75:1). 현재 사용처 0건(미사용 토큰).
+val TextLight = Color(0xFF6E6E80)
 
 // Bubble colors - Light
 val UserBubble = Color(0xFFC9B1FF)

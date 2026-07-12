@@ -84,6 +84,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -246,7 +249,9 @@ fun ChatScreen(
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        // U8: 접근성 — 새 메시지(응답) 도착 시 TalkBack이 자동으로 낭독하도록
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                     state = listState,
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -859,7 +864,8 @@ private fun UserMessageBubble(
                     Text(
                         text = timeText,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        // U8: 접근성 — 저대비 타임스탬프 0.6 → 0.75
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                     )
                 }
             }
@@ -990,7 +996,8 @@ private fun AiMessageBubble(
                 Text(
                     text = timeText,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    // U8: 접근성 — 저대비 타임스탬프 0.6 → 0.75
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                 )
 
                 // 피드백 아이콘 (500ms 후 fade-in)
@@ -1086,7 +1093,8 @@ private fun TypingBubble(avatarId: String = "", avatar: CharacterAvatar? = null)
             ) {
                 Icon(
                     Icons.Default.MoreHoriz,
-                    contentDescription = null,
+                    // U8: 접근성 — 타이핑(생각 중) 상태를 전달하는 아이콘이라 설명 부여
+                    contentDescription = "생각하는 중",
                     modifier = Modifier.size(22.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
