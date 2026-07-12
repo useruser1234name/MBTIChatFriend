@@ -23,8 +23,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -84,6 +86,9 @@ fun HomeScreen(
     onGallery: () -> Unit = {},
     onCommunityPostClick: (Long) -> Unit = {},
     onCompatibility: () -> Unit = {},
+    // U6: 캐릭터 카드에서 일기·통화로 1탭 진입 (기존 CharacterProfileScreen의 onDiary/onVoiceCall과 동일 계약)
+    onDiary: (Long) -> Unit = {},
+    onVoiceCall: (Long) -> Unit = {},
     viewModel: HomeViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -441,7 +446,9 @@ fun HomeScreen(
                                 character = character,
                                 lastMessage = lastMessages[character.id],
                                 onClick = { onCharacterClick(character.id) },
-                                onLongClick = { deleteTarget = character }
+                                onLongClick = { deleteTarget = character },
+                                onDiaryClick = { onDiary(character.id) },
+                                onVoiceCallClick = { onVoiceCall(character.id) }
                             )
                         }
                     }
@@ -507,7 +514,9 @@ private fun CharacterCard(
     character: CharacterEntity,
     lastMessage: LastMessageInfo?,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    onDiaryClick: () -> Unit = {},
+    onVoiceCallClick: () -> Unit = {}
 ) {
     val avatarId = character.avatarId
     val affinityColor by animateColorAsState(
@@ -626,6 +635,32 @@ private fun CharacterCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(4.dp),
+                )
+            }
+
+            // U6: 일기·통화 1탭 진입점 — 48dp 터치타겟(U3 패턴), 아이콘 자체는 20dp로 작게.
+            // Card 전체가 combinedClickable(채팅 진입/삭제)이지만, IconButton은 자체 클릭 영역을
+            // 우선 소비하므로 카드 클릭/롱프레스를 가로채지 않는다.
+            IconButton(
+                onClick = onDiaryClick,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.MenuBook,
+                    contentDescription = "일기",
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(
+                onClick = onVoiceCallClick,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Icon(
+                    Icons.Default.Phone,
+                    contentDescription = "음성 통화",
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

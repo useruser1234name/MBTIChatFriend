@@ -210,6 +210,13 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
                     val myMbti = homeUserMbti.ifEmpty { "INFP" }
                     navController.navigate(Route.Compatibility.createRoute(myMbti, "ENFP"))
                 },
+                // U6: 홈 카드에서 일기·통화 1탭 진입 — CharacterProfileScreen의 기존 배선과 동일한 네비게이션 재사용
+                onDiary = { id ->
+                    navController.navigate(Route.Diary.createRoute(id))
+                },
+                onVoiceCall = { id ->
+                    navController.navigate(Route.VoiceCall.createRoute(id))
+                },
                 viewModel = homeViewModel
             )
 

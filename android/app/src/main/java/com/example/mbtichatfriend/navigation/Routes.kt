@@ -63,7 +63,7 @@ enum class BottomNavItem(
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector
 ) {
-    HOME(Route.Home.route, "채팅", Icons.Filled.ChatBubble, Icons.Outlined.ChatBubbleOutline),
+    HOME(Route.Home.route, "홈", Icons.Filled.ChatBubble, Icons.Outlined.ChatBubbleOutline),
     GALLERY(Route.Gallery.route, "갤러리", Icons.Filled.Explore, Icons.Outlined.Explore),
     COMMUNITY(Route.Community.route, "커뮤니티", Icons.Filled.Forum, Icons.Outlined.Forum),
     SETTINGS(Route.Settings.route, "설정", Icons.Filled.Settings, Icons.Outlined.Settings)
