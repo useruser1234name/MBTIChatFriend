@@ -95,6 +95,7 @@ import com.example.mbtichatfriend.ui.components.LiveCharacter
 import com.example.mbtichatfriend.ui.components.LottieOneShot
 import com.example.mbtichatfriend.ui.components.TypingIndicatorBubble
 import com.example.mbtichatfriend.ui.components.affinityLevelName
+import com.example.mbtichatfriend.ui.components.ConfirmDialog
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -478,46 +479,37 @@ fun ChatScreen(
 
     // 대화 초기화 확인
     if (showClearDialog) {
-        AlertDialog(
-            onDismissRequest = { showClearDialog = false },
-            title = { Text("대화 초기화") },
-            text = { Text("모든 대화 내용이 삭제됩니다. 계속하시겠어요?") },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.clearChat()
-                    showClearDialog = false
-                }) {
-                    Text("초기화", color = MaterialTheme.colorScheme.error)
-                }
+        ConfirmDialog(
+            title = "대화 초기화",
+            text = "모든 대화 내용이 삭제됩니다. 계속하시겠어요?",
+            confirmLabel = "초기화",
+            dismissLabel = "취소",
+            confirmColor = MaterialTheme.colorScheme.error,
+            onConfirm = {
+                viewModel.clearChat()
+                showClearDialog = false
             },
-            dismissButton = {
-                TextButton(onClick = { showClearDialog = false }) {
-                    Text("취소")
-                }
-            }
+            onDismiss = { showClearDialog = false }
         )
     }
 
     // 대화 공유 확인
     if (shareTargetIndex != null) {
         val targetIdx = shareTargetIndex!!
-        AlertDialog(
-            onDismissRequest = { shareTargetIndex = null },
-            title = { Text("이 대화를 공유할까요?") },
-            text = { Text("앞뒤 메시지 포함 최대 4개가 이미지로 저장됩니다.\n닉네임은 표시되지 않습니다.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    val start = maxOf(0, targetIdx - 3)
-                    val snapshot = messages.subList(start, minOf(messages.size, targetIdx + 1))
-                    val mbti = character?.mbti ?: "MBTI"
-                    val bitmap = ShareMessageHelper.captureChatSnapshot(snapshot, mbti, context)
-                    ShareMessageHelper.shareSnapshot(bitmap, context)
-                    shareTargetIndex = null
-                }) { Text("공유하기") }
+        ConfirmDialog(
+            title = "이 대화를 공유할까요?",
+            text = "앞뒤 메시지 포함 최대 4개가 이미지로 저장됩니다.\n닉네임은 표시되지 않습니다.",
+            confirmLabel = "공유하기",
+            dismissLabel = "취소",
+            onConfirm = {
+                val start = maxOf(0, targetIdx - 3)
+                val snapshot = messages.subList(start, minOf(messages.size, targetIdx + 1))
+                val mbti = character?.mbti ?: "MBTI"
+                val bitmap = ShareMessageHelper.captureChatSnapshot(snapshot, mbti, context)
+                ShareMessageHelper.shareSnapshot(bitmap, context)
+                shareTargetIndex = null
             },
-            dismissButton = {
-                TextButton(onClick = { shareTargetIndex = null }) { Text("취소") }
-            }
+            onDismiss = { shareTargetIndex = null }
         )
     }
 }

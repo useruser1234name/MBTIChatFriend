@@ -64,6 +64,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.mbtichatfriend.BuildConfig
+import com.example.mbtichatfriend.ui.components.ConfirmDialog
 import androidx.hilt.navigation.compose.hiltViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -526,25 +527,17 @@ fun SettingsScreen(
 
     // 로그아웃 확인 다이얼로그
     if (showLogoutDialog) {
-        AlertDialog(
-            onDismissRequest = { showLogoutDialog = false },
-            title = { Text("로그아웃") },
-            text = { Text("모든 데이터가 초기화됩니다. 정말 로그아웃 하시겠어요?") },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showLogoutDialog = false
-                        viewModel.logout(onLogout)
-                    }
-                ) {
-                    Text("로그아웃", color = MaterialTheme.colorScheme.error)
-                }
+        ConfirmDialog(
+            title = "로그아웃",
+            text = "모든 데이터가 초기화됩니다. 정말 로그아웃 하시겠어요?",
+            confirmLabel = "로그아웃",
+            dismissLabel = "취소",
+            confirmColor = MaterialTheme.colorScheme.error,
+            onConfirm = {
+                showLogoutDialog = false
+                viewModel.logout(onLogout)
             },
-            dismissButton = {
-                TextButton(onClick = { showLogoutDialog = false }) {
-                    Text("취소")
-                }
-            }
+            onDismiss = { showLogoutDialog = false }
         )
     }
 }

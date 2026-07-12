@@ -25,8 +25,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,6 +60,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.ui.components.CharacterFace
+import com.example.mbtichatfriend.ui.components.ConfirmDialog
 import com.example.mbtichatfriend.ui.components.affinityLevelColor
 import com.example.mbtichatfriend.ui.components.affinityLevelTag
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -123,30 +122,17 @@ fun HomeScreen(
 
             // 삭제 확인 다이얼로그
             deleteTarget?.let { character ->
-                AlertDialog(
-                    onDismissRequest = { deleteTarget = null },
-                    title = { Text("캐릭터 삭제") },
-                    text = {
-                        Text("'${character.name}'을(를) 삭제하시겠어요?\n대화 기록도 모두 삭제됩니다.")
+                ConfirmDialog(
+                    title = "캐릭터 삭제",
+                    text = "'${character.name}'을(를) 삭제하시겠어요?\n대화 기록도 모두 삭제됩니다.",
+                    confirmLabel = "삭제",
+                    dismissLabel = "취소",
+                    confirmColor = MaterialTheme.colorScheme.error,
+                    onConfirm = {
+                        viewModel.deleteCharacter(character.id)
+                        deleteTarget = null
                     },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                viewModel.deleteCharacter(character.id)
-                                deleteTarget = null
-                            },
-                            colors = ButtonDefaults.textButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error
-                            )
-                        ) {
-                            Text("삭제")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { deleteTarget = null }) {
-                            Text("취소")
-                        }
-                    }
+                    onDismiss = { deleteTarget = null }
                 )
             }
 
