@@ -136,6 +136,8 @@ async def upgrade_subscription(
             """,
             (req.user_id, req.plan),
         )
+        # P3: 60초 TTL 플랜 캐시가 이전 플랜을 반환하지 않도록 즉시 무효화
+        get_subscription_manager().invalidate_plan_cache(req.user_id)
         logger.info(
             f"[Subscription] 플랜 업그레이드 완료: user_id={req.user_id}, plan={req.plan}"
         )

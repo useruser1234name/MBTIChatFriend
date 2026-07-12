@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from ..auth_middleware import require_auth_always, _assert_owner
 from ..play_billing import verify_rtdn_token, verify_subscription_purchase
 from ..postgres_async import get_async_db
+from ..subscription import get_subscription_manager
 
 router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
 
@@ -54,35 +55,50 @@ async def rtdn_webhook(
     purchase_token = payload.get("subscriptionNotification", {}).get("purchaseToken", "")
 
     db = get_async_db()
+    sub_mgr = get_subscription_manager()
 
+    # P3: 세 분기 모두 purchase_token으로만 대상을 특정하므로(RTDN 페이로드에
+    # user_id가 없음) UPDATE ... RETURNING user_id로 영향받은 uid를 받아
+    # 각각의 플랜 캐시를 무효화한다. user_id는 UNIQUE라 보통 0-1건이지만
+    # purchase_token 자체는 유니크 제약이 없어 안전하게 반복 처리한다.
     if notification_type in (2, 4):  # RENEWED, PURCHASED
         # 구독 유지 — verified_at 갱신
-        await db.execute(
+        rows = await db.fetch(
             """
             UPDATE user_subscriptions
             SET plan = 'premium', verified_at = NOW()
             WHERE purchase_token = $1
+            RETURNING user_id
             """,
             purchase_token,
         )
     elif notification_type == 3:  # CANCELED — 기간 만료까지 유지
-        await db.execute(
+        rows = await db.fetch(
             """
             UPDATE user_subscriptions
             SET expires_at = NOW() + INTERVAL '30 days'
             WHERE purchase_token = $1
+            RETURNING user_id
             """,
             purchase_token,
         )
     elif notification_type == 13:  # EXPIRED — 무료로 다운그레이드
-        await db.execute(
+        rows = await db.fetch(
             """
             UPDATE user_subscriptions
             SET plan = 'free', expires_at = NOW()
             WHERE purchase_token = $1
+            RETURNING user_id
             """,
             purchase_token,
         )
+    else:
+        rows = []
+
+    for row in rows or []:
+        affected_uid = row.get("user_id") if isinstance(row, dict) else None
+        if affected_uid:
+            sub_mgr.invalidate_plan_cache(affected_uid)
 
     return {"status": "ok", "notification_type": notification_type}
 
@@ -119,4 +135,6 @@ async def verify_purchase(
         req.purchase_token,
         req.order_id,
     )
+    # P3: 결제 직후 최대 60초(TTL) 동안 이전 플랜이 캐시에 남지 않도록 즉시 무효화
+    get_subscription_manager().invalidate_plan_cache(req.user_id)
     return {"success": True, "plan": "premium", "user_id": req.user_id, "mock": result.mock}

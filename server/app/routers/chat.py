@@ -452,34 +452,47 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
 
 
 async def _gate_user(req: ChatRequest, user: Optional[dict], request: Request):
-    """일일 토큰 예산 및 구독 한도 게이팅 공통 처리."""
-    if user:
-        uid = user.get("uid", "")
-        if uid:
-            is_within, used = await get_async_db().check_daily_budget(uid, DAILY_TOKEN_LIMIT)
-            if not is_within:
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"일일 사용량 한도({DAILY_TOKEN_LIMIT:,} 토큰)에 도달했습니다. 내일 다시 이용해주세요.",
-                )
+    """일일 토큰 예산 및 구독 한도 게이팅 공통 처리.
 
-    if user:
-        uid = user.get("uid", "")
-        if uid:
-            sub_mgr = get_subscription_manager()
-            room_id_for_check = _resolve_room_id(req, user)
-            is_allowed, limit_reason = await sub_mgr.check_message_limit(uid, room_id_for_check)
-            if not is_allowed:
-                upgrade_prompt = sub_mgr.get_upgrade_prompt("daily_messages")
-                plan = sub_mgr.get_plan(uid).value
-                raise HTTPException(
-                    status_code=402,
-                    detail={
-                        "detail": "일일 메시지 한도에 도달했습니다.",
-                        "upgrade_prompt": upgrade_prompt,
-                        "plan": plan,
-                    },
-                )
+    P3: check_daily_budget/check_message_limit 두 DB 조회를 asyncio.gather로
+    동시 실행해 직렬 대기 시간을 없앤다. 기존 코드는 순차 실행이라 daily_budget이
+    실패하면 message_limit은 아예 평가되지 않아 429가 항상 402보다 우선했다 —
+    그 우선순위를 유지하기 위해 gather로 두 결과를 모두 받은 뒤에도 반드시
+    budget(429)을 먼저 검사하고, budget이 통과했을 때만 message_limit(402)을
+    검사한다(두 검사 모두 실패해도 429만 raise). room_id_for_check는 부수효과
+    없는 순수 계산이라 미리 구해도 안전하다.
+    """
+    if not user:
+        return
+    uid = user.get("uid", "")
+    if not uid:
+        return
+
+    sub_mgr = get_subscription_manager()
+    room_id_for_check = _resolve_room_id(req, user)
+
+    (is_within, _used), (is_allowed, _limit_reason) = await asyncio.gather(
+        get_async_db().check_daily_budget(uid, DAILY_TOKEN_LIMIT),
+        sub_mgr.check_message_limit(uid, room_id_for_check),
+    )
+
+    if not is_within:
+        raise HTTPException(
+            status_code=429,
+            detail=f"일일 사용량 한도({DAILY_TOKEN_LIMIT:,} 토큰)에 도달했습니다. 내일 다시 이용해주세요.",
+        )
+
+    if not is_allowed:
+        upgrade_prompt = sub_mgr.get_upgrade_prompt("daily_messages")
+        plan = sub_mgr.get_plan(uid).value
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "detail": "일일 메시지 한도에 도달했습니다.",
+                "upgrade_prompt": upgrade_prompt,
+                "plan": plan,
+            },
+        )
 
 
 @router.post("/chat/send", response_model=ChatResponse)

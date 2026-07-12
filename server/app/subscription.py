@@ -10,11 +10,16 @@
 from __future__ import annotations
 
 import logging
+import time
 from enum import Enum
 from datetime import date
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# ── 플랜 캐시 설정 (P3: 매 턴 DB 히트 제거) ─────────────────────────────────────
+_PLAN_CACHE_TTL_SECONDS = 60.0
+_PLAN_CACHE_MAX_ENTRIES = 1000
 
 
 # ── 플랜 정의 ─────────────────────────────────────────────────────────────────
@@ -93,6 +98,20 @@ class SubscriptionManager:
     DB 미설정 환경에서는 모든 유저를 FREE로 간주한다 (안전 기본값).
     """
 
+    def __init__(self) -> None:
+        # P3: uid → (plan, monotonic 캐시 시각) 인메모리 TTL 캐시.
+        # get_plan_async(비동기 핫패스)만 사용 — 동기 get_plan(관리자/대시보드
+        # 등 실시간 조회 경로)은 캐시하지 않는다.
+        self._plan_cache: dict[str, tuple[Plan, float]] = {}
+
+    def invalidate_plan_cache(self, user_id: str) -> None:
+        """구독 변경(업그레이드/다운그레이드/취소/webhook) 성공 시 호출.
+
+        결제 직후 최대 60초(TTL) 동안 이전 플랜이 노출되는 것을 막기 위해
+        해당 uid의 캐시 항목만 제거한다. 캐시에 없어도 안전(no-op).
+        """
+        self._plan_cache.pop(user_id, None)
+
     # ── 플랜 조회 ──────────────────────────────────────────────────────────────
 
     def get_plan(self, user_id: str) -> Plan:
@@ -133,6 +152,32 @@ class SubscriptionManager:
         check_message_limit(매 턴 게이팅)에서 사용 — postgres_async의
         AsyncDatabase 풀을 사용해 동기 psycopg 신규 커넥션 생성을 피한다.
         폴백 로직(레코드 없음/DB 오류 시 FREE)은 get_plan과 동일하게 유지.
+
+        P3: uid별 60초 TTL 인메모리 캐시를 적용해 매 턴 DB 히트를 없앤다.
+        구독이 변경되면 invalidate_plan_cache(uid)가 즉시 무효화하므로 최악의
+        경우에도 갱신 지연은 TTL(60초) 이내로 제한된다.
+        """
+        cached = self._plan_cache.get(user_id)
+        if cached is not None:
+            cached_plan, cached_at = cached
+            if time.monotonic() - cached_at < _PLAN_CACHE_TTL_SECONDS:
+                return cached_plan
+
+        plan = await self._fetch_plan_async(user_id)
+
+        # 무제한 성장 방지: 엔트리 수가 상한을 넘으면(드물게, LRU 없이) 전체 clear.
+        if len(self._plan_cache) >= _PLAN_CACHE_MAX_ENTRIES:
+            self._plan_cache.clear()
+        self._plan_cache[user_id] = (plan, time.monotonic())
+
+        return plan
+
+    async def _fetch_plan_async(self, user_id: str) -> Plan:
+        """get_plan_async의 실제 DB 조회 부분(캐시 미적용, private).
+
+        get_plan_async가 캐시 히트 시 이 메서드를 건너뛴다 — 테스트에서
+        fetch 호출 횟수를 세려면 이 메서드(또는 그 내부 db.fetchone)를
+        목킹한다.
         """
         from .postgres import postgres_enabled
         from .postgres_async import get_async_db
