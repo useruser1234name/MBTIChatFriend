@@ -10,6 +10,7 @@ import coil.compose.AsyncImage
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -77,8 +78,23 @@ fun CharacterFace(
             }
         }
 
+        // 입 움직임 상태 (C3): 대화 중일 때만 0/1/2 순환, 아니면 -1로 비활성
+        // (ImageCharacterFace.kt의 120ms mouthPhase 순환과 동일 패턴 — isTalking=false면 타이머 자체가 돌지 않음)
+        var mouthPhase by remember { mutableIntStateOf(-1) }
+        LaunchedEffect(isTalking) {
+            if (!isTalking) {
+                mouthPhase = -1
+                return@LaunchedEffect
+            }
+            mouthPhase = 0
+            while (true) {
+                delay(120)
+                mouthPhase = (mouthPhase + 1) % 3
+            }
+        }
+
         Canvas(modifier = modifier) {
-            drawCharacterFace(config, emotion, isBlinking)
+            drawCharacterFace(config, emotion, isBlinking, isTalking, mouthPhase)
         }
     } else {
         val avatar = CharacterAvatar.fromId(avatarId)
@@ -104,7 +120,9 @@ fun CharacterFace(
 private fun DrawScope.drawCharacterFace(
     config: AvatarConfig,
     emotion: CharacterEmotion,
-    isBlinking: Boolean
+    isBlinking: Boolean,
+    isTalking: Boolean = false,
+    mouthPhase: Int = -1
 ) {
     val w  = size.width
     val h  = size.height
@@ -176,8 +194,12 @@ private fun DrawScope.drawCharacterFace(
         }
     }
 
-    // 10. 입
-    drawMouth(cx, faceCy, faceR, w, emotion)
+    // 10. 입 (C3: 대화 중이면 감정 입 대신 립싱크 3프레임, 종료 시 감정 입으로 자연 복귀)
+    if (isTalking && mouthPhase >= 0) {
+        drawTalkingMouth(cx, faceCy, faceR, w, mouthPhase)
+    } else {
+        drawMouth(cx, faceCy, faceR, w, emotion)
+    }
 
     // 11. 감정별 추가 이펙트
     drawEmotionEffects(emotion, cx, faceCy, faceR, w)
@@ -785,6 +807,44 @@ private fun DrawScope.drawMouth(
                 quadraticTo(cx, my + faceR * 0.18f, cx + faceR * 0.22f, my)
             }
             drawPath(mouthPath, mouthColor, style = Stroke(w * 0.026f, cap = StrokeCap.Round))
+        }
+    }
+}
+
+// ── 대화 중 입 (C3: 립싱크) ──────────────────────────────────
+// mouthPhase 0=closed, 1=half, 2=open — 120ms 주기로 순환 호출됨(CharacterFace 참고).
+// 감정별 입 색(mouthColor)은 drawMouth와 동일한 값을 재사용.
+private fun DrawScope.drawTalkingMouth(
+    cx: Float, faceCy: Float, faceR: Float, w: Float,
+    mouthPhase: Int
+) {
+    val my = faceCy + faceR * 0.38f
+    val mouthColor = Color(0xFFE0607E)
+
+    when (mouthPhase) {
+        0 -> {
+            // closed
+            drawLine(
+                mouthColor,
+                Offset(cx - faceR * 0.16f, my), Offset(cx + faceR * 0.16f, my),
+                strokeWidth = w * 0.022f, cap = StrokeCap.Round
+            )
+        }
+        1 -> {
+            // half-open
+            drawOval(
+                mouthColor,
+                topLeft = Offset(cx - faceR * 0.14f, my - faceR * 0.05f),
+                size = Size(faceR * 0.28f, faceR * 0.10f)
+            )
+        }
+        else -> {
+            // open
+            drawOval(
+                mouthColor,
+                topLeft = Offset(cx - faceR * 0.16f, my - faceR * 0.09f),
+                size = Size(faceR * 0.32f, faceR * 0.18f)
+            )
         }
     }
 }
