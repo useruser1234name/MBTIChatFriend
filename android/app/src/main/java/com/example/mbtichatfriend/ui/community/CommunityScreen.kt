@@ -74,7 +74,9 @@ fun CommunityScreen(
             TopAppBar(title = { Text("커뮤니티") })
         },
         floatingActionButton = {
-            FloatingActionButton(onClick = onNavigateToWrite) {
+            // U1: MaterialTheme.shapes.large가 AppShapes 배선으로 16dp→20dp 바뀌므로
+            // FAB 모양(현상) 유지를 위해 기존 M3 기본값(large=16dp)을 명시적으로 고정.
+            FloatingActionButton(onClick = onNavigateToWrite, shape = RoundedCornerShape(16.dp)) {
                 Icon(Icons.Default.Add, "글 쓰기")
             }
         }

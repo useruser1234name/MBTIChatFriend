@@ -1,6 +1,7 @@
 package com.example.mbtichatfriend.ui.chat
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarOutline
@@ -22,7 +23,12 @@ fun SessionFeedbackSheet(
     var rating by remember { mutableStateOf(0) }
     var feedbackText by remember { mutableStateOf("") }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        // U1: MaterialTheme.shapes.extraLarge가 AppShapes 배선으로 28dp→24dp 바뀌므로
+        // 바텀시트 상단 코너(현상) 유지를 위해 기존 M3 기본값(extraLarge=28dp)을 명시적으로 고정.
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

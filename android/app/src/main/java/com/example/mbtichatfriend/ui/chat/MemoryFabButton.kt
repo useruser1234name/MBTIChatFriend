@@ -2,6 +2,7 @@ package com.example.mbtichatfriend.ui.chat
 
 import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.*
@@ -42,6 +43,9 @@ fun MemoryFabButton(
             text = { Text("이 순간 저장") },
             containerColor = MaterialTheme.colorScheme.primaryContainer,
             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            // U1: MaterialTheme.shapes.large가 AppShapes 배선으로 16dp→20dp 바뀌므로
+            // FAB 모양(현상) 유지를 위해 기존 M3 기본값(large=16dp)을 명시적으로 고정.
+            shape = RoundedCornerShape(16.dp),
             modifier = Modifier.semantics {
                 contentDescription = "이 대화를 기억 앨범에 저장합니다"
             },

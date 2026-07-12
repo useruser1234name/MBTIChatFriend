@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -15,6 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -214,7 +216,10 @@ fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) 
             if (showCreateSheet) {
                 ModalBottomSheet(
                     onDismissRequest = { showCreateSheet = false },
-                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                    // U1: MaterialTheme.shapes.extraLarge가 AppShapes 배선으로 28dp→24dp 바뀌므로
+                    // 바텀시트 상단 코너(현상) 유지를 위해 기존 M3 기본값(extraLarge=28dp)을 명시적으로 고정.
+                    shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
                 ) {
                     CreateCharacterSheet(
                         onDismiss = { showCreateSheet = false },

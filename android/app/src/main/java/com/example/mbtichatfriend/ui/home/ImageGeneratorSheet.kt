@@ -117,7 +117,10 @@ fun ImageGeneratorSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState
+        sheetState = sheetState,
+        // U1: MaterialTheme.shapes.extraLarge가 AppShapes 배선으로 28dp→24dp 바뀌므로
+        // 바텀시트 상단 코너(현상) 유지를 위해 기존 M3 기본값(extraLarge=28dp)을 명시적으로 고정.
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     ) {
         AnimatedContent(
             targetState = currentStep,
