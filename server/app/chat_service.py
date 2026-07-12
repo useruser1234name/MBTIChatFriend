@@ -742,6 +742,46 @@ async def _quality_gate_regenerate(
     return replies, content
 
 
+async def _record_turn_latency_event(
+    room_id: str,
+    character_id: str,
+    model_id: str,
+    streaming: bool,
+    t_memory_ms: float,
+    t_rag_ms: float,
+    t_first_token_ms: float,
+) -> None:
+    """턴 단계별 레이턴시(P1 계측)를 turn_latency 이벤트로 기록.
+
+    generate_reply/stream_reply가 공유. `_record_usage`/`_record_ab_result`와
+    동일하게 create_tracked_task로 fire-and-forget 스케줄되어 메인 응답
+    경로를 블로킹하지 않는다(record_event 자체는 아직 동기 — P2에서
+    async 전환 예정, 이 이벤트도 그때 같이 정리).
+    t_gate(라우터 게이트 단계)는 이번 계측에 포함하지 않음 — 라우터
+    호출부까지 시그니처를 확장하는 대신 최소 변경으로 3구간만 계측.
+    """
+    payload = {
+        "model_id": model_id,
+        "streaming": streaming,
+        "t_memory_ms": round(t_memory_ms, 2),
+        "t_rag_ms": round(t_rag_ms, 2),
+        "t_first_token_ms": round(t_first_token_ms, 2),
+    }
+    logger.info(
+        "[latency] room=%s model=%s streaming=%s memory=%.1fms rag=%.1fms first_token=%.1fms",
+        room_id, model_id, streaming, t_memory_ms, t_rag_ms, t_first_token_ms,
+    )
+    try:
+        record_event(
+            event_type="turn_latency",
+            room_id=room_id,
+            character_id=character_id,
+            payload=payload,
+        )
+    except Exception as e:
+        logger.warning(f"턴 레이턴시 이벤트 기록 실패: {e}")
+
+
 async def _collect_affinity_delta(
     affinity_task: Optional[asyncio.Task],
     message: str,
@@ -1111,10 +1151,13 @@ async def generate_reply(
         return _blocked
 
     # 2. 호감도 변화 계산 (LLM 우선, 실패 시 키워드 fallback)
+    # P1 계측: build_memory_context 대기를 포함한 준비 단계 소요(t_memory)
+    _t_memory_start = time.perf_counter()
     affinity_task, rag_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
         message, mbti, affinity_level, conversation_history, user_mbti,
         character_name, nickname, character_id, room_id,
     )
+    _t_memory_ms = (time.perf_counter() - _t_memory_start) * 1000
 
     # 3. API 키가 없으면 목업 응답
     if not client:
@@ -1145,9 +1188,12 @@ async def generate_reply(
                 )
 
         # RAG: Chroma 검색 결과 수집 (이미 스레드에서 병렬 실행 중인 rag_task await)
+        # P1 계측: rag_task 대기 소요(t_rag)
+        _t_rag_start = time.perf_counter()
         all_memories, episode_context = await _merge_rag_results(
             rag_task, memories, warn_context="검색 태스크"
         )
+        _t_rag_ms = (time.perf_counter() - _t_rag_start) * 1000
 
         # ── DCI: 메모리 관련성 필터링 (RAG 병합 완료 후) ───────────────
         _orig_all_memories_len = len(all_memories)
@@ -1229,6 +1275,21 @@ async def generate_reply(
             message, result, mbti, affinity_level,
         )
 
+        # P1: 턴 단계별 레이턴시 계측 기록 (t_first_token은 비스트리밍이므로
+        # LLM 호출 전체 시간 _elapsed_ms로 대체)
+        create_tracked_task(
+            _record_turn_latency_event(
+                room_id=room_id,
+                character_id=character_id,
+                model_id=model_id,
+                streaming=False,
+                t_memory_ms=_t_memory_ms,
+                t_rag_ms=_t_rag_ms,
+                t_first_token_ms=_elapsed_ms,
+            ),
+            name="turn-latency",
+        )
+
         return result, affinity_delta
 
     except Exception as e:
@@ -1307,10 +1368,13 @@ async def stream_reply(
     # 클라이언트가 없으면 헬퍼가 즉시 키워드 기반 호감도(affinity_delta)만
     # 계산하고 태스크는 만들지 않는다 — 아래 "4. 클라이언트 부재" 분기에서
     # 그 값을 그대로 사용한다(원본 stream_reply의 동일 계산과 동치).
+    # P1 계측: build_memory_context 대기를 포함한 준비 단계 소요(t_memory)
+    _t_memory_start = time.perf_counter()
     affinity_task, rag_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
         message, mbti, affinity_level, conversation_history, user_mbti,
         character_name, nickname, character_id, room_id,
     )
+    _t_memory_ms = (time.perf_counter() - _t_memory_start) * 1000
 
     # 4. 클라이언트 부재 → 목업 (스트리밍 흉내)
     if not client:
@@ -1339,9 +1403,12 @@ async def stream_reply(
                 )
 
         # 7. RAG 수집 + 병합
+        # P1 계측: rag_task 대기 소요(t_rag)
+        _t_rag_start = time.perf_counter()
         all_memories, episode_context = await _merge_rag_results(
             rag_task, memories, warn_context="스트리밍 검색"
         )
+        _t_rag_ms = (time.perf_counter() - _t_rag_start) * 1000
 
         all_memories = _filter_relevant_memories(message, all_memories, top_k=3)
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
@@ -1371,6 +1438,8 @@ async def stream_reply(
 
         parser = IncrementalReplyParser()
         _t_start = time.monotonic()
+        # P1 계측: LLM 호출 시작~첫 콘텐츠 청크 도착까지의 소요(t_first_token)
+        _t_first_token_ms: Optional[float] = None
         _stream_total_tokens = 0.0
         stream = await active_client.chat.completions.create(**_stream_kwargs)
         async for chunk in stream:
@@ -1383,12 +1452,17 @@ async def stream_reply(
                 delta = None
             if not delta:
                 continue
+            if _t_first_token_ms is None:
+                _t_first_token_ms = (time.monotonic() - _t_start) * 1000
             for part in parser.feed(delta):
                 is_safe_part, _ = check_content(part.text)
                 if is_safe_part:
                     full_text += (" " if full_text else "") + part.text
                     yield part
         _elapsed_ms = (time.monotonic() - _t_start) * 1000
+        if _t_first_token_ms is None:
+            # 콘텐츠 청크를 한 번도 못 받은 경우(빈 스트림 등) 전체 소요로 대체
+            _t_first_token_ms = _elapsed_ms
 
         # 10. 폴백: 형식 파괴로 아무 것도 방출 못한 경우 raw 로 재파싱
         if parser.emitted_count == 0:
@@ -1439,6 +1513,20 @@ async def stream_reply(
                 tokens=_stream_total_tokens,
                 response_time_ms=_elapsed_ms,
             ), name="record-ab-result")
+
+        # 16. P1: 턴 단계별 레이턴시 계측 기록
+        create_tracked_task(
+            _record_turn_latency_event(
+                room_id=room_id,
+                character_id=character_id,
+                model_id=model_id,
+                streaming=True,
+                t_memory_ms=_t_memory_ms,
+                t_rag_ms=_t_rag_ms,
+                t_first_token_ms=_t_first_token_ms,
+            ),
+            name="turn-latency",
+        )
 
     except Exception as e:
         if not affinity_task.done():
