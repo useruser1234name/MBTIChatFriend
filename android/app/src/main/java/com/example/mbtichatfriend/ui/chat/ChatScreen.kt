@@ -667,7 +667,6 @@ private fun CharacterAnimationArea(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     msg: ChatMessage,
@@ -678,28 +677,210 @@ private fun MessageBubble(
     onFeedback: ((Long, String) -> Unit)? = null,
     onLongPress: (() -> Unit)? = null
 ) {
-    val isFromUser = msg.isFromUser
+    if (msg.isFromUser) {
+        UserMessageBubble(
+            msg = msg,
+            onRetry = onRetry,
+            onLongPress = onLongPress
+        )
+    } else {
+        AiMessageBubble(
+            msg = msg,
+            avatarId = avatarId,
+            avatar = avatar,
+            feedback = feedback,
+            onFeedback = onFeedback,
+            onLongPress = onLongPress
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun UserMessageBubble(
+    msg: ChatMessage,
+    onRetry: ((Long) -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null
+) {
     val isDark = isSystemInDarkTheme()
     val timeFormat = remember { SimpleDateFormat("a h:mm", Locale.KOREAN) }
     val timeText = timeFormat.format(Date(msg.createdAt))
 
     val userBubbleColor = if (isDark) UserBubbleDark else UserBubble
     val userTextColor = if (isDark) UserBubbleTextDark else UserBubbleText
+
+    // 유저 메시지: 오른쪽 정렬
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.End
+    ) {
+        Surface(
+            shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp),
+            color = if (msg.sendStatus == "FAILED") userBubbleColor.copy(alpha = 0.6f) else userBubbleColor,
+            shadowElevation = 1.dp,
+            modifier = Modifier
+                .widthIn(max = 280.dp)
+                .combinedClickable(
+                    onClick = {},
+                    onLongClick = { onLongPress?.invoke() }
+                )
+        ) {
+            Text(
+                text = msg.text,
+                style = MaterialTheme.typography.bodyLarge,
+                color = userTextColor,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+        ) {
+            when (msg.sendStatus) {
+                "PENDING" -> {
+                    val infiniteTransition = rememberInfiniteTransition(label = "pending")
+                    val alpha by infiniteTransition.animateFloat(
+                        initialValue = 0.3f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+                        label = "pendingAlpha"
+                    )
+                    Text(
+                        text = "전송 대기 중",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
+                    )
+                }
+                "FAILED" -> {
+                    Icon(
+                        Icons.Default.ErrorOutline,
+                        contentDescription = "전송 실패",
+                        tint = AccentRed,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "전송 실패",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AccentRed
+                    )
+                    if (onRetry != null) {
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = AccentRed.copy(alpha = 0.1f),
+                            modifier = Modifier.clickable { onRetry(msg.id) }
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = "재전송",
+                                    tint = AccentRed,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(Modifier.width(2.dp))
+                                Text(
+                                    text = "재전송",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = AccentRed
+                                )
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    Text(
+                        text = timeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AiMessageBubble(
+    msg: ChatMessage,
+    avatarId: String = "",
+    avatar: CharacterAvatar? = null,
+    feedback: String? = null,
+    onFeedback: ((Long, String) -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null
+) {
+    val isDark = isSystemInDarkTheme()
+    val timeFormat = remember { SimpleDateFormat("a h:mm", Locale.KOREAN) }
+    val timeText = timeFormat.format(Date(msg.createdAt))
     val aiBubbleColor = if (isDark) AiBubbleDark else AiBubble
     val aiTextColor = if (isDark) AiBubbleTextDark else AiBubbleText
 
-    if (isFromUser) {
-        // 유저 메시지: 오른쪽 정렬
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.End
-        ) {
+    // AI 메시지: 감정 표정 아바타 + 말풍선
+    val emotion = msg.emotion
+    val emotionBubbleColor = if (emotion != null && emotion != CharacterEmotion.NEUTRAL) {
+        if (isDark) emotionBubbleDark(emotion) else emotionBubbleLight(emotion)
+    } else {
+        aiBubbleColor
+    }
+    val emotionBorder = if (emotion != null && emotion != CharacterEmotion.NEUTRAL) {
+        BorderStroke(1.5.dp, emotionBorderColor(emotion).copy(alpha = 0.5f))
+    } else {
+        null
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start,
+        verticalAlignment = Alignment.Top
+    ) {
+        // 캐릭터 아바타 (감정 이모지 or Compose 캐릭터)
+        if (avatarId.startsWith("v2:")) {
+            CharacterFace(
+                avatarId = avatarId,
+                modifier = Modifier
+                    .padding(top = 2.dp)
+                    .size(36.dp)
+                    .clip(CircleShape),
+                emotion = emotion ?: CharacterEmotion.NEUTRAL
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .padding(top = 2.dp)
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (emotion != null && emotion != CharacterEmotion.NEUTRAL) {
+                            emotionBorderColor(emotion).copy(alpha = 0.15f)
+                        } else {
+                            avatar?.let { Color(it.colorHex).copy(alpha = 0.3f) }
+                                ?: MaterialTheme.colorScheme.primaryContainer
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = emotionEmoji(emotion ?: CharacterEmotion.NEUTRAL),
+                    fontSize = 22.sp
+                )
+            }
+        }
+
+        Spacer(Modifier.width(8.dp))
+
+        Column {
             Surface(
-                shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp),
-                color = if (msg.sendStatus == "FAILED") userBubbleColor.copy(alpha = 0.6f) else userBubbleColor,
+                shape = RoundedCornerShape(20.dp, 20.dp, 20.dp, 4.dp),
+                color = emotionBubbleColor,
+                border = emotionBorder,
+                tonalElevation = 1.dp,
                 shadowElevation = 1.dp,
                 modifier = Modifier
-                    .widthIn(max = 280.dp)
+                    .widthIn(max = 260.dp)
                     .combinedClickable(
                         onClick = {},
                         onLongClick = { onLongPress?.invoke() }
@@ -708,220 +889,75 @@ private fun MessageBubble(
                 Text(
                     text = msg.text,
                     style = MaterialTheme.typography.bodyLarge,
-                    color = userTextColor,
+                    color = aiTextColor,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
             }
+
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
             ) {
-                when (msg.sendStatus) {
-                    "PENDING" -> {
-                        val infiniteTransition = rememberInfiniteTransition(label = "pending")
-                        val alpha by infiniteTransition.animateFloat(
-                            initialValue = 0.3f,
-                            targetValue = 1f,
-                            animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
-                            label = "pendingAlpha"
-                        )
-                        Text(
-                            text = "전송 대기 중",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
-                        )
-                    }
-                    "FAILED" -> {
-                        Icon(
-                            Icons.Default.ErrorOutline,
-                            contentDescription = "전송 실패",
-                            tint = AccentRed,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            text = "전송 실패",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = AccentRed
-                        )
-                        if (onRetry != null) {
-                            Spacer(Modifier.width(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = AccentRed.copy(alpha = 0.1f),
-                                modifier = Modifier.clickable { onRetry(msg.id) }
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.Refresh,
-                                        contentDescription = "재전송",
-                                        tint = AccentRed,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                    Spacer(Modifier.width(2.dp))
-                                    Text(
-                                        text = "재전송",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = AccentRed
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    else -> {
-                        Text(
-                            text = timeText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        )
-                    }
-                }
-            }
-        }
-    } else {
-        // AI 메시지: 감정 표정 아바타 + 말풍선
-        val emotion = msg.emotion
-        val emotionBubbleColor = if (emotion != null && emotion != CharacterEmotion.NEUTRAL) {
-            if (isDark) emotionBubbleDark(emotion) else emotionBubbleLight(emotion)
-        } else {
-            aiBubbleColor
-        }
-        val emotionBorder = if (emotion != null && emotion != CharacterEmotion.NEUTRAL) {
-            BorderStroke(1.5.dp, emotionBorderColor(emotion).copy(alpha = 0.5f))
-        } else {
-            null
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Start,
-            verticalAlignment = Alignment.Top
-        ) {
-            // 캐릭터 아바타 (감정 이모지 or Compose 캐릭터)
-            if (avatarId.startsWith("v2:")) {
-                CharacterFace(
-                    avatarId = avatarId,
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .size(36.dp)
-                        .clip(CircleShape),
-                    emotion = emotion ?: CharacterEmotion.NEUTRAL
+                Text(
+                    text = timeText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .padding(top = 2.dp)
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (emotion != null && emotion != CharacterEmotion.NEUTRAL) {
-                                emotionBorderColor(emotion).copy(alpha = 0.15f)
-                            } else {
-                                avatar?.let { Color(it.colorHex).copy(alpha = 0.3f) }
-                                    ?: MaterialTheme.colorScheme.primaryContainer
-                            }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = emotionEmoji(emotion ?: CharacterEmotion.NEUTRAL),
-                        fontSize = 22.sp
-                    )
-                }
-            }
 
-            Spacer(Modifier.width(8.dp))
-
-            Column {
-                Surface(
-                    shape = RoundedCornerShape(20.dp, 20.dp, 20.dp, 4.dp),
-                    color = emotionBubbleColor,
-                    border = emotionBorder,
-                    tonalElevation = 1.dp,
-                    shadowElevation = 1.dp,
-                    modifier = Modifier
-                        .widthIn(max = 260.dp)
-                        .combinedClickable(
-                            onClick = {},
-                            onLongClick = { onLongPress?.invoke() }
-                        )
-                ) {
-                    Text(
-                        text = msg.text,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = aiTextColor,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                    )
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = timeText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    )
-
-                    // 피드백 아이콘 (500ms 후 fade-in)
-                    if (onFeedback != null) {
-                        var visible by remember { mutableStateOf(false) }
-                        LaunchedEffect(Unit) {
-                            kotlinx.coroutines.delay(500)
-                            visible = true
-                        }
-                        AnimatedVisibility(
-                            visible = visible,
-                            enter = fadeIn(tween(300))
+                // 피드백 아이콘 (500ms 후 fade-in)
+                if (onFeedback != null) {
+                    var visible by remember { mutableStateOf(false) }
+                    LaunchedEffect(Unit) {
+                        kotlinx.coroutines.delay(500)
+                        visible = true
+                    }
+                    AnimatedVisibility(
+                        visible = visible,
+                        enter = fadeIn(tween(300))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(start = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.padding(start = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            // 좋아요
+                            IconButton(
+                                onClick = { onFeedback(msg.id, "thumbs_up") },
+                                enabled = feedback == null,
+                                modifier = Modifier.size(28.dp)
                             ) {
-                                // 좋아요
-                                IconButton(
-                                    onClick = { onFeedback(msg.id, "thumbs_up") },
-                                    enabled = feedback == null,
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.ThumbUp,
-                                        contentDescription = "좋아요",
-                                        modifier = Modifier.size(14.dp).graphicsLayer {
-                                            alpha = when (feedback) {
-                                                "thumbs_up" -> 1f
-                                                "thumbs_down" -> 0.3f
-                                                else -> 0.5f
-                                            }
-                                        },
-                                        tint = if (feedback == "thumbs_up") MaterialTheme.colorScheme.primary
-                                               else MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                // 아쉬워요
-                                IconButton(
-                                    onClick = { onFeedback(msg.id, "thumbs_down") },
-                                    enabled = feedback == null,
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(
-                                        Icons.Default.ThumbDown,
-                                        contentDescription = "아쉬워요",
-                                        modifier = Modifier.size(14.dp).graphicsLayer {
-                                            alpha = when (feedback) {
-                                                "thumbs_down" -> 1f
-                                                "thumbs_up" -> 0.3f
-                                                else -> 0.5f
-                                            }
-                                        },
-                                        tint = if (feedback == "thumbs_down") MaterialTheme.colorScheme.error
-                                               else MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                                Icon(
+                                    Icons.Default.ThumbUp,
+                                    contentDescription = "좋아요",
+                                    modifier = Modifier.size(14.dp).graphicsLayer {
+                                        alpha = when (feedback) {
+                                            "thumbs_up" -> 1f
+                                            "thumbs_down" -> 0.3f
+                                            else -> 0.5f
+                                        }
+                                    },
+                                    tint = if (feedback == "thumbs_up") MaterialTheme.colorScheme.primary
+                                           else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            // 아쉬워요
+                            IconButton(
+                                onClick = { onFeedback(msg.id, "thumbs_down") },
+                                enabled = feedback == null,
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.ThumbDown,
+                                    contentDescription = "아쉬워요",
+                                    modifier = Modifier.size(14.dp).graphicsLayer {
+                                        alpha = when (feedback) {
+                                            "thumbs_down" -> 1f
+                                            "thumbs_up" -> 0.3f
+                                            else -> 0.5f
+                                        }
+                                    },
+                                    tint = if (feedback == "thumbs_down") MaterialTheme.colorScheme.error
+                                           else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     }
