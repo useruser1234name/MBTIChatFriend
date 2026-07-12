@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -69,6 +70,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,6 +83,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -145,8 +149,26 @@ fun ChatScreen(
     var shareTargetIndex by remember { mutableStateOf<Int?>(null) }
     val context = LocalContext.current
 
+    // U3-1: 자동 스크롤 강제 해소 — 사용자가 위로 스크롤 중이면 새 메시지가 와도 끌어내리지 않는다.
+    // "하단 근처"는 마지막-1 아이템까지 화면에 보이는지로 판정(리스트가 비었으면 근처로 간주).
+    val isNearBottom by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            if (totalItems == 0) {
+                true
+            } else {
+                val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                lastVisibleIndex >= totalItems - 2
+            }
+        }
+    }
+
     LaunchedEffect(messages.size, viewModel.isTyping) {
-        if (messages.isNotEmpty()) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        // 하단 근처에 있거나, 방금 내가 보낸 메시지(직접 전송)면 스크롤 — 그 외(위로 스크롤 중)엔 스킵
+        val justSentByUser = messages.last().isFromUser
+        if (isNearBottom || justSentByUser) {
             listState.animateScrollToItem(messages.lastIndex)
         }
     }
@@ -717,28 +739,53 @@ private fun UserMessageBubble(
     val userBubbleColor = if (isDark) UserBubbleDark else UserBubble
     val userTextColor = if (isDark) UserBubbleTextDark else UserBubbleText
 
+    // U3-3: 롱프레스 메뉴(복사/공유) — 메뉴 열림 상태는 버블 로컬로만 소유(hoisting 최소화)
+    val clipboardManager = LocalClipboardManager.current
+    var showBubbleMenu by remember { mutableStateOf(false) }
+
     // 유저 메시지: 오른쪽 정렬
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.End
     ) {
-        Surface(
-            shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp),
-            color = if (msg.sendStatus == "FAILED") userBubbleColor.copy(alpha = 0.6f) else userBubbleColor,
-            shadowElevation = 1.dp,
-            modifier = Modifier
-                .widthIn(max = 280.dp)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = { onLongPress?.invoke() }
+        Box {
+            Surface(
+                shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp),
+                color = if (msg.sendStatus == "FAILED") userBubbleColor.copy(alpha = 0.6f) else userBubbleColor,
+                shadowElevation = 1.dp,
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = { showBubbleMenu = true }
+                    )
+            ) {
+                Text(
+                    text = msg.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = userTextColor,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                 )
-        ) {
-            Text(
-                text = msg.text,
-                style = MaterialTheme.typography.bodyLarge,
-                color = userTextColor,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-            )
+            }
+            DropdownMenu(
+                expanded = showBubbleMenu,
+                onDismissRequest = { showBubbleMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("복사") },
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(msg.text))
+                        showBubbleMenu = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("공유") },
+                    onClick = {
+                        showBubbleMenu = false
+                        onLongPress?.invoke()
+                    }
+                )
+            }
         }
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -774,14 +821,17 @@ private fun UserMessageBubble(
                     )
                     if (onRetry != null) {
                         Spacer(Modifier.width(6.dp))
+                        // U3-2: 재전송 필 터치 영역 확대 (heightIn min 32dp + 패딩 확대)
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = AccentRed.copy(alpha = 0.1f),
-                            modifier = Modifier.clickable { onRetry(msg.id) }
+                            modifier = Modifier
+                                .heightIn(min = 32.dp)
+                                .clickable { onRetry(msg.id) }
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                             ) {
                                 Icon(
                                     Icons.Default.Refresh,
@@ -840,6 +890,10 @@ private fun AiMessageBubble(
         null
     }
 
+    // U3-3: 롱프레스 메뉴(복사/공유) — 메뉴 열림 상태는 버블 로컬로만 소유(hoisting 최소화)
+    val clipboardManager = LocalClipboardManager.current
+    var showBubbleMenu by remember { mutableStateOf(false) }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Start,
@@ -881,25 +935,46 @@ private fun AiMessageBubble(
         Spacer(Modifier.width(8.dp))
 
         Column {
-            Surface(
-                shape = RoundedCornerShape(20.dp, 20.dp, 20.dp, 4.dp),
-                color = emotionBubbleColor,
-                border = emotionBorder,
-                tonalElevation = 1.dp,
-                shadowElevation = 1.dp,
-                modifier = Modifier
-                    .widthIn(max = 260.dp)
-                    .combinedClickable(
-                        onClick = {},
-                        onLongClick = { onLongPress?.invoke() }
+            Box {
+                Surface(
+                    shape = RoundedCornerShape(20.dp, 20.dp, 20.dp, 4.dp),
+                    color = emotionBubbleColor,
+                    border = emotionBorder,
+                    tonalElevation = 1.dp,
+                    shadowElevation = 1.dp,
+                    modifier = Modifier
+                        .widthIn(max = 260.dp)
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = { showBubbleMenu = true }
+                        )
+                ) {
+                    Text(
+                        text = msg.text,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = aiTextColor,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
-            ) {
-                Text(
-                    text = msg.text,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = aiTextColor,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
+                }
+                DropdownMenu(
+                    expanded = showBubbleMenu,
+                    onDismissRequest = { showBubbleMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("복사") },
+                        onClick = {
+                            clipboardManager.setText(AnnotatedString(msg.text))
+                            showBubbleMenu = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("공유") },
+                        onClick = {
+                            showBubbleMenu = false
+                            onLongPress?.invoke()
+                        }
+                    )
+                }
             }
 
             Row(
@@ -927,11 +1002,11 @@ private fun AiMessageBubble(
                             modifier = Modifier.padding(start = 8.dp),
                             horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            // 좋아요
+                            // 좋아요 (U3-2: 터치 영역 48dp — 아이콘 시각 크기는 기존 14dp 유지, 시각 변화 최소화)
                             IconButton(
                                 onClick = { onFeedback(msg.id, "thumbs_up") },
                                 enabled = feedback == null,
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier.size(48.dp)
                             ) {
                                 Icon(
                                     Icons.Default.ThumbUp,
@@ -947,11 +1022,11 @@ private fun AiMessageBubble(
                                            else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            // 아쉬워요
+                            // 아쉬워요 (U3-2: 터치 영역 48dp — 아이콘 시각 크기는 기존 14dp 유지, 시각 변화 최소화)
                             IconButton(
                                 onClick = { onFeedback(msg.id, "thumbs_down") },
                                 enabled = feedback == null,
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier.size(48.dp)
                             ) {
                                 Icon(
                                     Icons.Default.ThumbDown,
