@@ -1239,17 +1239,19 @@ private fun ChatInputBar(
     }
 }
 
+// U9: ASCII 이모티콘 → 유니코드 이모지 (정서 앱에 걸맞지 않은 텍스트 표현 교체).
+// TOUCHED는 계획서 원안 🥹 대신 API 28 두부(□) 렌더링 위험 때문에 계획서가 지정한 폴백 🥺 채택.
 private fun emotionEmoji(emotion: CharacterEmotion): String = when (emotion) {
-    CharacterEmotion.NEUTRAL -> "~"
-    CharacterEmotion.HAPPY -> "^^"
-    CharacterEmotion.SHY -> "//"
-    CharacterEmotion.SAD -> "ㅠ"
-    CharacterEmotion.ANGRY -> "!!"
-    CharacterEmotion.SURPRISED -> "?!"
-    CharacterEmotion.LOVE -> "<3"
-    CharacterEmotion.PLAYFUL -> ":P"
-    CharacterEmotion.WORRIED -> "..."
-    CharacterEmotion.TOUCHED -> "T_T"
+    CharacterEmotion.NEUTRAL -> "🙂"
+    CharacterEmotion.HAPPY -> "😊"
+    CharacterEmotion.SHY -> "😳"
+    CharacterEmotion.SAD -> "😢"
+    CharacterEmotion.ANGRY -> "😠"
+    CharacterEmotion.SURPRISED -> "😲"
+    CharacterEmotion.LOVE -> "🥰"
+    CharacterEmotion.PLAYFUL -> "😜"
+    CharacterEmotion.WORRIED -> "😟"
+    CharacterEmotion.TOUCHED -> "🥺"
 }
 
 private fun emotionBubbleLight(emotion: CharacterEmotion): Color = when (emotion) {
