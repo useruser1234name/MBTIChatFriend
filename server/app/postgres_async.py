@@ -18,7 +18,7 @@ import re
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from .config import DATABASE_URL, DATABASE_REPLICA_URL
+from .config import DATABASE_URL, DATABASE_REPLICA_URL, DB_POOL_MIN_SIZE, DB_POOL_MAX_SIZE
 from .circuit_breaker import CircuitOpenError, get_db_circuit
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,9 @@ class AsyncDatabase:
     """비동기 PostgreSQL 커넥션 풀 래퍼.
 
     FastAPI lifespan에서 initialize() 호출 후 사용.
-    풀 크기: min=2, max=10 (pgBouncer 앞단 운영 기준 — DATA-A 오재원 권고).
+    풀 크기: config.py의 DB_POOL_MIN_SIZE/DB_POOL_MAX_SIZE(기본 5/20)를 기본값으로
+    사용한다(P4 — 이전에는 min=2/max=10으로 하드코딩되어 config 값을 무시했음).
+    pgBouncer 앞단 운영 기준 — DATA-A 오재원 권고.
     """
 
     def __init__(self) -> None:
@@ -63,8 +65,8 @@ class AsyncDatabase:
     async def initialize(
         self,
         dsn: str = "",
-        min_size: int = 2,
-        max_size: int = 10,
+        min_size: int = DB_POOL_MIN_SIZE,
+        max_size: int = DB_POOL_MAX_SIZE,
     ) -> None:
         """애플리케이션 시작 시 1회 호출."""
         if not _PSYCOPG_ASYNC_AVAILABLE:
