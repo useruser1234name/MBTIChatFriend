@@ -24,6 +24,7 @@ from ..chat_service import (
     StreamDone,
     AFFINITY_LEVEL_THRESHOLDS,
 )
+from ..mbti import get_greeting_emotion
 from ..config import DAILY_TOKEN_LIMIT, LLM_MODEL_SIMPLE, MAX_TOKENS, OPENAI_API_KEY, TOGETHER_API_KEY
 from ..content_filter import (
     check_content,
@@ -931,12 +932,16 @@ async def send_greeting(
         mbti_upper,
         f"{mbti_upper} 성격의 AI 친구로서 따뜻한 첫 인사를 해주세요. 50자 이내.",
     )
+    # C2: 첫인사에 감정 부여 — MBTI 고정 매핑(get_greeting_emotion, app/mbti.py).
+    # additive 필드: 기존 greeting/character_mbti 필드는 그대로 유지한다.
+    greeting_emotion = get_greeting_emotion(mbti_upper)
 
     if not OPENAI_API_KEY:
         # API 키 없으면 기본 인사 반환
         return {
             "greeting": f"안녕! 나는 {mbti_upper} 성격의 AI야. 잘 부탁해!",
             "character_mbti": mbti_upper,
+            "emotion": greeting_emotion,
         }
 
     try:
@@ -953,4 +958,4 @@ async def send_greeting(
         logger.warning("[Greeting] LLM 호출 실패, 기본 인사 사용: %s", exc)
         greeting_text = f"안녕! 나는 {mbti_upper} 성격의 AI야. 잘 부탁해!"
 
-    return {"greeting": greeting_text, "character_mbti": mbti_upper}
+    return {"greeting": greeting_text, "character_mbti": mbti_upper, "emotion": greeting_emotion}

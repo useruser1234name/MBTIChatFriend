@@ -597,10 +597,15 @@ class ChatViewModel @Inject constructor(
                 mapOf("character_mbti" to ch.mbti, "character_name" to ch.name)
             )
             if (response.greeting.isNotBlank()) {
+                // C2: 서버가 greeting에 emotion을 additive로 내려줌 — 없거나 알 수 없는 값이면 NEUTRAL
+                val emotion = runCatching {
+                    CharacterEmotion.valueOf(response.emotion ?: "NEUTRAL")
+                }.getOrDefault(CharacterEmotion.NEUTRAL)
+                currentEmotion = emotion
                 sendMessageUseCase.saveReplyMessage(
                     characterId = characterId,
                     text = response.greeting,
-                    emotion = "NEUTRAL",
+                    emotion = emotion.name,
                 )
             }
         }

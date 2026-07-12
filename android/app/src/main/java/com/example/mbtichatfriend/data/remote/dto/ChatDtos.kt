@@ -114,5 +114,6 @@ data class SessionCheckResponse(
 @JsonClass(generateAdapter = false)
 data class GreetingResponse(
     val greeting: String,
-    @Json(name = "character_mbti") val characterMbti: String
+    @Json(name = "character_mbti") val characterMbti: String,
+    val emotion: String? = null
 )

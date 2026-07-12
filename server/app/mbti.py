@@ -25,3 +25,32 @@ def get_mbti_group(mbti: str) -> str:
         return "ST"
     else:
         return "SF"
+
+
+# ── 첫인사 감정 매핑 (C2) ────────────────────────────────────────────────
+# get_mbti_group의 NT/NF/ST/SF 4그룹과는 다른 축(E/I × J/P 또는 F/T)의
+# 별도 분류다 — 재사용 목적(C6에서도 쓸 예정)으로 이 중립 모듈에 둔다.
+# 값은 반드시 models.VALID_EMOTIONS의 코드와 일치해야 한다.
+GREETING_EMOTION_MAP: dict[str, str] = {
+    # 외향 인식형(E**P) → PLAYFUL
+    "ENFP": "PLAYFUL", "ESFP": "PLAYFUL", "ESTP": "PLAYFUL", "ENTP": "PLAYFUL",
+    # 외향 판단형(E**J) → HAPPY
+    "ENFJ": "HAPPY", "ESFJ": "HAPPY", "ENTJ": "HAPPY", "ESTJ": "HAPPY",
+    # 내향 감정형(I**F) → SHY
+    "INFP": "SHY", "ISFP": "SHY", "INFJ": "SHY", "ISFJ": "SHY",
+    # 내향 사고형(I**T) → NEUTRAL
+    "INTJ": "NEUTRAL", "INTP": "NEUTRAL", "ISTJ": "NEUTRAL", "ISTP": "NEUTRAL",
+}
+
+_DEFAULT_GREETING_EMOTION = "NEUTRAL"
+
+
+def get_greeting_emotion(mbti: str) -> str:
+    """MBTI 유형별 첫인사 감정 코드 반환 (C2, C6 재사용 예정).
+
+    16종 유효 MBTI는 GREETING_EMOTION_MAP에 고정 매핑되어 있다(대소문자
+    무관, 내부에서 upper() 정규화). 유효하지 않거나 알 수 없는 입력은
+    기본값 NEUTRAL로 안전하게 폴백한다. 반환값은 models.VALID_EMOTIONS의
+    코드와 항상 일치한다(NEUTRAL/HAPPY/SHY/PLAYFUL 중 하나).
+    """
+    return GREETING_EMOTION_MAP.get((mbti or "").strip().upper(), _DEFAULT_GREETING_EMOTION)
