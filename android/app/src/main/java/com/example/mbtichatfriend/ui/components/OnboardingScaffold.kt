@@ -22,6 +22,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +38,7 @@ fun OnboardingScaffold(
     buttonText: String = "다음",
     buttonEnabled: Boolean = true,
     onBack: (() -> Unit)? = null,
+    onSkip: (() -> Unit)? = null,
     onNext: () -> Unit,
     content: @Composable () -> Unit
 ) {
@@ -49,7 +51,7 @@ fun OnboardingScaffold(
     ) {
         Spacer(Modifier.height(8.dp))
 
-        // Progress bar + Back button
+        // Progress bar + Back button + (선택) 건너뛰기 버튼
         Box(modifier = Modifier.fillMaxWidth()) {
             if (onBack != null) {
                 IconButton(
@@ -60,6 +62,19 @@ fun OnboardingScaffold(
                         Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "뒤로가기",
                         tint = MaterialTheme.colorScheme.onBackground
+                    )
+                }
+            }
+            // U5: 민감 정보(성별/나이) 화면에서만 onSkip이 전달됨 — null이면 미표시, 다른 화면 무영향
+            if (onSkip != null) {
+                TextButton(
+                    onClick = onSkip,
+                    modifier = Modifier.align(Alignment.CenterEnd)
+                ) {
+                    Text(
+                        text = "건너뛰기",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }

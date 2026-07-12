@@ -31,7 +31,13 @@ fun GenderScreen(
         title = "성별을 선택해주세요",
         subtitle = "캐릭터가 대화 톤을 맞춰줘요",
         onNext = onNext,
-        onBack = onBack
+        onBack = onBack,
+        // U5: 민감 정보 선택화 — 건너뛰면 기존 기본값(Gender.MALE)을 그대로 유지한 채
+        // "다음" 버튼과 동일한 네비게이션 경로(onNext)로 진행. 서버로는 애초에 전송되지 않는 값(로컬 DataStore·Firestore 백업 전용).
+        onSkip = {
+            viewModel.updateGender(Gender.MALE)
+            onNext()
+        }
     ) {
         Column(
             verticalArrangement = Arrangement.spacedBy(12.dp)
