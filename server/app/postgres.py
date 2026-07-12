@@ -116,6 +116,14 @@ def init_postgres_schema() -> None:
         CREATE INDEX IF NOT EXISTS idx_metric_events_event_type
         ON metric_events(event_type)
         """,
+        # P5: 다양성 조회(check_diversity/check_diversity_async, quality_service.py)가
+        # 매턴 event_type='quality_score' AND room_id=... ORDER BY created_at DESC로
+        # 스캔하는데 복합 인덱스가 없어 순차 스캔이 발생하던 핫패스 최적화.
+        # (idx_metric_events_investment는 3종 이벤트만 대상인 부분 인덱스라 별개.)
+        """
+        CREATE INDEX IF NOT EXISTS idx_metric_events_type_room_created
+        ON metric_events(event_type, room_id, created_at DESC)
+        """,
         """
         CREATE TABLE IF NOT EXISTS conversation_memory (
             id BIGSERIAL PRIMARY KEY,
@@ -169,6 +177,14 @@ def init_postgres_schema() -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_api_usage_model
         ON api_usage(model_id, created_at DESC)
+        """,
+        # P5: check_daily_budget/check_message_limit(subscription.py)이 매턴
+        # room_id LIKE '{uid}:%' 프리픽스 스캔을 하는데 인덱스가 없어 순차 스캔이
+        # 발생하던 핫패스 최적화. room_id는 TEXT라 text_pattern_ops 사용
+        # (컬럼이 VARCHAR였다면 varchar_pattern_ops).
+        """
+        CREATE INDEX IF NOT EXISTS idx_api_usage_room_id
+        ON api_usage (room_id text_pattern_ops)
         """,
         # 대화 기록 삭제 추적 (GDPR/개인정보 삭제 이력)
         """
