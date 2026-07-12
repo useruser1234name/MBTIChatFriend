@@ -94,6 +94,7 @@ import com.example.mbtichatfriend.ui.components.CharacterFace
 import com.example.mbtichatfriend.ui.components.LiveCharacter
 import com.example.mbtichatfriend.ui.components.LottieOneShot
 import com.example.mbtichatfriend.ui.components.TypingIndicatorBubble
+import com.example.mbtichatfriend.ui.components.affinityLevelName
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -212,10 +213,7 @@ fun ChatScreen(
                                 )
                             } else {
                                 character?.let {
-                                    val levelName = when (it.affinityLevel) {
-                                        1 -> "낯선 사이"; 2 -> "아는 사이"; 3 -> "친한 친구"
-                                        4 -> "특별한 사이"; 5 -> "연인"; else -> ""
-                                    }
+                                    val levelName = affinityLevelName(it.affinityLevel)
                                     Text(
                                         text = "${emotionEmoji(viewModel.currentEmotion)} $levelName",
                                         style = MaterialTheme.typography.bodySmall,
@@ -391,13 +389,7 @@ fun ChatScreen(
 
     // 호감도 레벨업 축하 팝업 + Lottie 오버레이
     viewModel.levelUpEvent?.let { newLevel ->
-        val levelName = when (newLevel) {
-            2 -> "아는 사이"
-            3 -> "친한 친구"
-            4 -> "특별한 사이"
-            5 -> "연인"
-            else -> ""
-        }
+        val levelName = affinityLevelName(newLevel)
         val levelLabel = when (newLevel) {
             2 -> "Lv.2"; 3 -> "Lv.3"; 4 -> "Lv.4"; 5 -> "Lv.5"
             else -> ""
@@ -445,13 +437,7 @@ fun ChatScreen(
 
     // 호감도 레벨다운 알림
     viewModel.levelDownEvent?.let { newLevel ->
-        val levelName = when (newLevel) {
-            1 -> "낯선 사이"
-            2 -> "아는 사이"
-            3 -> "친한 친구"
-            4 -> "특별한 사이"
-            else -> ""
-        }
+        val levelName = affinityLevelName(newLevel)
         AlertDialog(
             onDismissRequest = { viewModel.dismissLevelDown() },
             title = {

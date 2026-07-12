@@ -52,7 +52,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,6 +62,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.ui.components.CharacterFace
+import com.example.mbtichatfriend.ui.components.affinityLevelColor
+import com.example.mbtichatfriend.ui.components.affinityLevelTag
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -70,10 +71,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.launch
-import com.example.mbtichatfriend.ui.theme.SoftMint
-import com.example.mbtichatfriend.ui.theme.SoftYellow
-import com.example.mbtichatfriend.ui.theme.PastelPink
-import com.example.mbtichatfriend.ui.theme.PastelPurple
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -469,14 +466,7 @@ private fun CharacterCard(
 ) {
     val avatarId = character.avatarId
     val affinityColor by animateColorAsState(
-        targetValue = when (character.affinityLevel) {
-            1 -> Color(0xFFB0B0C0)
-            2 -> Color(0xFFB5E8D5)
-            3 -> Color(0xFFFFF3B0)
-            4 -> Color(0xFFFFB5C2)
-            5 -> Color(0xFFC9B1FF)
-            else -> Color(0xFFB0B0C0)
-        },
+        targetValue = affinityLevelColor(character.affinityLevel),
         label = "affinityColor"
     )
 
@@ -533,14 +523,7 @@ private fun CharacterCard(
                     )
                     Spacer(Modifier.width(6.dp))
                     // 호감도 레벨 표시 — Lv.1(첫 만남)도 항상 표시 (A9)
-                    val levelTag = when (character.affinityLevel) {
-                        1 -> "첫 만남"
-                        2 -> "Lv.2"
-                        3 -> "Lv.3"
-                        4 -> "Lv.4"
-                        5 -> "Lv.5"
-                        else -> "첫 만남"
-                    }
+                    val levelTag = affinityLevelTag(character.affinityLevel)
                     Text(
                         text = levelTag,
                         style = MaterialTheme.typography.labelSmall,
@@ -623,15 +606,8 @@ private fun AffinityThermometer(
     level: Int,
     modifier: Modifier = Modifier,
 ) {
-    // 레벨 구간별 기준 색상 (Color.kt 토큰 사용)
-    val levelColor = when (level) {
-        1 -> Color(0xFFB0B0C0)  // 회색
-        2 -> SoftMint            // 민트
-        3 -> SoftYellow          // 노랑
-        4 -> PastelPink          // 핑크
-        5 -> PastelPurple        // 보라
-        else -> Color(0xFFB0B0C0)
-    }
+    // 레벨 구간별 기준 색상 (A2: affinityLevelColor로 통합 — affinityColor와 동일 매핑)
+    val levelColor = affinityLevelColor(level)
 
     // 레벨 내 진행도 계산 (각 레벨 구간은 20점)
     val levelStart = ((level - 1).coerceIn(0, 4)) * 20
