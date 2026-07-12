@@ -24,10 +24,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -52,9 +54,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.mbtichatfriend.data.local.CharacterEntity
@@ -275,10 +279,20 @@ fun HomeScreen(
                             )
                         }
                         item {
-                            GalleryBannerCard(onClick = onGallery)
+                            DismissibleBannerCard(
+                                title = "MBTI 캐릭터 갤러리",
+                                subtitle = "16가지 MBTI 친구 둘러보기",
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                onClick = onGallery
+                            )
                         }
                         item {
-                            ImageGeneratorBannerCard(onClick = { showImageGenerator = true })
+                            DismissibleBannerCard(
+                                title = "이상형 만들기",
+                                subtitle = "AI로 나만의 이상형 캐릭터 생성",
+                                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                                onClick = { showImageGenerator = true }
+                            )
                         }
                         // 신년 바이럴 카드 섹션 (23차 스프린트) - 2027년 1월 1일~10일에만 노출
                         if (state.showNewYearCard) {
@@ -299,9 +313,13 @@ fun HomeScreen(
                         // 화이트데이 특집 배너 (25차 스프린트) - 3월 13~14일에만 노출
                         if (state.showWhiteDay) {
                             item {
-                                WhiteDayBannerCard(
+                                DismissibleBannerCard(
+                                    title = "🤍 화이트데이 특집 궁합 보기",
+                                    subtitle = "나와 찰떡궁합인 MBTI는?",
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
                                     onClick = onCompatibility,
-                                    modifier = Modifier.padding(vertical = 4.dp)
+                                    modifier = Modifier.padding(vertical = 4.dp),
+                                    contentVerticalPadding = 12.dp
                                 )
                             }
                         }
@@ -630,111 +648,55 @@ private fun formatRelativeTime(timestamp: Long): String {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun GalleryBannerCard(onClick: () -> Unit) {
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
-        )
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "MBTI 캐릭터 갤러리",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                Text(
-                    text = "16가지 MBTI 친구 둘러보기",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f)
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun WhiteDayBannerCard(onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun DismissibleBannerCard(
+    title: String,
+    subtitle: String,
+    containerColor: Color,
+    onClick: () -> Unit,
+    onDismiss: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    contentVerticalPadding: Dp = 14.dp,
+) {
+    val contentColor = MaterialTheme.colorScheme.contentColorFor(containerColor)
     Card(
         onClick = onClick,
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
+            containerColor = containerColor
         )
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = contentVerticalPadding),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "🤍 화이트데이 특집 궁합 보기",
+                    text = title,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                    color = contentColor
                 )
                 Text(
-                    text = "나와 찰떡궁합인 MBTI는?",
+                    text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f)
+                    color = contentColor.copy(alpha = 0.75f)
                 )
             }
             Icon(
                 Icons.AutoMirrored.Filled.ArrowForward,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                tint = contentColor
             )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ImageGeneratorBannerCard(onClick: () -> Unit) {
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
-        )
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "이상형 만들기",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
-                )
-                Text(
-                    text = "AI로 나만의 이상형 캐릭터 생성",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.75f)
-                )
+            if (onDismiss != null) {
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "닫기",
+                        tint = contentColor
+                    )
+                }
             }
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onTertiaryContainer
-            )
         }
     }
 }
