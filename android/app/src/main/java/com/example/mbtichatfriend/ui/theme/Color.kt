@@ -73,3 +73,25 @@ val EmotionShyBorder = Color(0xFFF8BBD0)
 val EmotionPlayfulBorder = Color(0xFFCE93D8)
 val EmotionWorriedBorder = Color(0xFF9FA8DA)
 val EmotionTouchedBorder = Color(0xFFFFCC80)
+
+// ── U2: 채팅 무대(호감도 그라데이션) 배경 - Light ─────────────────────────────
+// (ChatScreen의 CharacterAnimationArea, 호감도 레벨 3~5 단계 무대 배경)
+val AffinityBgLv5 = Color(0xFFFFF0F5)
+val AffinityBgLv4 = Color(0xFFFCE4EC)
+val AffinityBgLv3 = Color(0xFFFFF8E1)
+
+// ── U2: 채팅 무대 배경 - Dark ──────────────────────────────────────────────
+// 감정 버블 패턴과 동일한 소스 hue(라이트 값이 EmotionLoveBubble/EmotionShyBubble/
+// EmotionSurprisedBubble과 각각 동일)라, 이미 검증된 대응 Dark 값을 그대로 재사용.
+val AffinityBgLv5Dark = Color(0xFF3D2033)
+val AffinityBgLv4Dark = Color(0xFF3D2028)
+val AffinityBgLv3Dark = Color(0xFF3D3520)
+
+// ── U2: 가정의 달 감사 카드 그라데이션 - Light ─────────────────────────────
+val GratitudeOrange = Color(0xFFE8621A)
+val GratitudeGold = Color(0xFFD4AF37)
+
+// ── U2: 감사 카드 그라데이션 - Dark ────────────────────────────────────────
+// hue 유지(각각 원본 대비 명도 ~50%)한 채도 낮춘 어두운 대응색 — DarkCard(0xFF2E2F4A) 계열과 어울리게 선정.
+val GratitudeOrangeDark = Color(0xFF74310D)
+val GratitudeGoldDark = Color(0xFF6A571B)

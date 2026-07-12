@@ -599,6 +599,8 @@ private fun CharacterAnimationArea(
 ) {
     // C7: MBTI별 유휴 모션 프로파일 (mbti가 비어있거나 인식 불가면 기존 동작과 동일한 기본값)
     val motionProfile = remember(mbti) { motionProfileForMbti(mbti) }
+    // U2: 다크모드에서 라이트 파스텔이 그대로 밝게 워시되던 문제 — 감정 버블과 동일한 isDark 분기 패턴 적용
+    val isDarkStage = isSystemInDarkTheme()
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -607,15 +609,15 @@ private fun CharacterAnimationArea(
                 Brush.verticalGradient(
                     when (affinityLevel) {
                         5 -> listOf(
-                            Color(0xFFFFF0F5).copy(alpha = 0.6f),
+                            (if (isDarkStage) AffinityBgLv5Dark else AffinityBgLv5).copy(alpha = 0.6f),
                             MaterialTheme.colorScheme.background
                         )
                         4 -> listOf(
-                            Color(0xFFFCE4EC).copy(alpha = 0.5f),
+                            (if (isDarkStage) AffinityBgLv4Dark else AffinityBgLv4).copy(alpha = 0.5f),
                             MaterialTheme.colorScheme.background
                         )
                         3 -> listOf(
-                            Color(0xFFFFF8E1).copy(alpha = 0.4f),
+                            (if (isDarkStage) AffinityBgLv3Dark else AffinityBgLv3).copy(alpha = 0.4f),
                             MaterialTheme.colorScheme.background
                         )
                         else -> listOf(

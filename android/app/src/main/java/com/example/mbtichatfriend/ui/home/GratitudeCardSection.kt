@@ -1,6 +1,7 @@
 package com.example.mbtichatfriend.ui.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.mbtichatfriend.ui.theme.GratitudeGold
+import com.example.mbtichatfriend.ui.theme.GratitudeGoldDark
+import com.example.mbtichatfriend.ui.theme.GratitudeOrange
+import com.example.mbtichatfriend.ui.theme.GratitudeOrangeDark
 
 // ── 가정의 달 감사 카드 섹션 (26차 스프린트) ─────────────────────────────────
 // 날짜 조건: 4월 24일~5월 8일에만 노출
@@ -42,8 +47,11 @@ fun GratitudeCardSection(
     onStoryShare: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val orangeColor = Color(0xFFE8621A)
-    val goldColor = Color(0xFFD4AF37)
+    // U2: 다크모드에서 라이트 전용 그라데이션이 그대로 밝게 워시되던 문제 —
+    // 감정 버블과 동일한 isDark 분기 패턴 적용(hue 유지, 명도만 낮춘 Dark 대응색).
+    val isDark = isSystemInDarkTheme()
+    val orangeColor = if (isDark) GratitudeOrangeDark else GratitudeOrange
+    val goldColor = if (isDark) GratitudeGoldDark else GratitudeGold
     val warmYellowColor = Color(0xFFFFF3E0)
 
     Box(
