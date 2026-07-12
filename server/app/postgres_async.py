@@ -156,6 +156,54 @@ class AsyncDatabase:
         except Exception:
             raise
 
+    async def execute_sequence(
+        self, statements: list[tuple[str, tuple]],
+    ) -> list[Optional[Exception]]:
+        """여러 결과 없는 쿼리를 커넥션 1회 획득으로 순차 실행한다 (P8).
+
+        execute()는 호출마다 풀에서 커넥션을 새로 획득/반환한다(왕복 N회).
+        이 메서드는 커넥션을 한 번만 빌려 그 위에서 문장들을 순서대로
+        실행해 왕복 횟수를 1회로 줄인다.
+
+        **트랜잭션으로 묶지 않는다.** 문장 하나가 실패해도 나머지 문장이
+        독립적으로 실행되어야 하므로(호출부의 기존 문장별 try/except와 동일한
+        견고성), 각 문장 실행 직후 개별적으로 commit(성공) 또는 rollback(실패)
+        한다 — Postgres는 트랜잭션 내부에서 한 문장이 실패하면 그 트랜잭션
+        전체가 abort 상태가 되어 이후 문장까지 연쇄로 실패하므로, 문장마다
+        즉시 commit/rollback해 그 상태가 다음 문장으로 전이되지 않게 한다.
+
+        Returns: statements와 같은 길이·순서의 리스트. 성공한 문장은 None,
+        실패한 문장은 발생한 Exception 객체를 담는다 — 예외를 여기서 삼키지
+        않고 그대로 반환해 호출부가 문장별로 독립적인 로깅을 할 수 있게 한다.
+        커넥션 자체를 획득할 수 없는 경우(풀 없음/서킷 오픈)는 모든 문장에
+        동일한 예외를 채운 리스트를 반환한다(이 경우는 원래도 전 문장이
+        똑같이 실패했을 상황이므로 독립성 훼손이 아니다).
+        """
+        if not self._pool:
+            return [RuntimeError("async pool unavailable")] * len(statements)
+
+        cb = get_db_circuit()
+        try:
+            async def _do() -> list[Optional[Exception]]:
+                local_results: list[Optional[Exception]] = []
+                async with self._pool.connection() as conn:
+                    for query, args in statements:
+                        q = _to_psycopg(query)
+                        try:
+                            await conn.execute(q, args)
+                            await conn.commit()
+                            local_results.append(None)
+                        except Exception as stmt_exc:
+                            await conn.rollback()
+                            local_results.append(stmt_exc)
+                return local_results
+            return await cb.call(_do())
+        except CircuitOpenError:
+            logger.warning("[CB] postgres circuit OPEN — DB 호출 스킵")
+            return [CircuitOpenError("postgres")] * len(statements)
+        except Exception:
+            raise
+
     # ── asyncpg 호환 별칭 ──────────────────────────────────────────
     # 라우터들이 asyncpg API(fetchrow/fetch/fetchval)를 기대하고 작성되어 있어
     # 누락 시 호출 즉시 AttributeError가 발생한다. dict_row 기반으로 매핑한다.

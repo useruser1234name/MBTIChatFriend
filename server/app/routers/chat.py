@@ -188,55 +188,59 @@ async def _persist_chat_data(
     _finalize_chat_turn 전용(잔여 본문 분할, S15). 원래도 필요한 값을 모두
     파라미터로 받고 있어 클로저 캡처가 없었다(그대로 모듈 레벨로 승격).
     fire-and-forget: DB 미연결 환경에서도 메인 응답을 블로킹하지 않는다.
+
+    P8: users upsert + 메시지 INSERT(최대 2건)를 각각 별도로 풀에서 커넥션을
+    획득하던 것(왕복 최대 3회)을 AsyncDatabase.execute_sequence로 교체해
+    커넥션 1회 획득으로 순차 실행한다. 트랜잭션으로 묶지 않으므로(문장별
+    개별 commit/rollback) 기존과 동일하게 한 문장이 실패해도 나머지 문장은
+    독립적으로 실행되고, 실패 로그도 문장별로 그대로 남는다.
     """
     if not uid:
         return
     db = get_async_db()
     if not db.available:
         return
-    try:
-        # users upsert: 최초 가입 시 created_at 기록, 이후엔 last_active_at만 갱신
-        await db.execute(
+
+    # 문장과 로그 라벨을 같은 순서로 구성 — user_message/assistant_text가
+    # 비어있으면 기존과 동일하게 해당 문장 자체를 실행하지 않는다(로그도 없음).
+    statements: list[tuple[str, tuple]] = [
+        (
+            # users upsert: 최초 가입 시 created_at 기록, 이후엔 last_active_at만 갱신
             """
             INSERT INTO users (user_id, created_at, last_active_at)
             VALUES ($1, NOW(), NOW())
             ON CONFLICT (user_id)
             DO UPDATE SET last_active_at = NOW()
             """,
-            uid,
-        )
-    except Exception as _e:
-        logger.warning("users upsert 실패 (uid=%s): %s", uid, _e)
+            (uid,),
+        ),
+    ]
+    labels = ["users upsert"]
 
-    try:
-        # user 메시지 적재
-        if user_message:
-            await db.execute(
-                """
-                INSERT INTO messages (user_id, character_mbti, role, content)
-                VALUES ($1, $2, 'user', $3)
-                """,
-                uid,
-                character_mbti,
-                user_message[:2000],
-            )
-    except Exception as _e:
-        logger.warning("messages(user) INSERT 실패 (uid=%s): %s", uid, _e)
+    if user_message:
+        statements.append((
+            """
+            INSERT INTO messages (user_id, character_mbti, role, content)
+            VALUES ($1, $2, 'user', $3)
+            """,
+            (uid, character_mbti, user_message[:2000]),
+        ))
+        labels.append("messages(user) INSERT")
 
-    try:
-        # assistant 응답 적재
-        if assistant_text:
-            await db.execute(
-                """
-                INSERT INTO messages (user_id, character_mbti, role, content)
-                VALUES ($1, $2, 'assistant', $3)
-                """,
-                uid,
-                character_mbti,
-                assistant_text[:2000],
-            )
-    except Exception as _e:
-        logger.warning("messages(assistant) INSERT 실패 (uid=%s): %s", uid, _e)
+    if assistant_text:
+        statements.append((
+            """
+            INSERT INTO messages (user_id, character_mbti, role, content)
+            VALUES ($1, $2, 'assistant', $3)
+            """,
+            (uid, character_mbti, assistant_text[:2000]),
+        ))
+        labels.append("messages(assistant) INSERT")
+
+    results = await db.execute_sequence(statements)
+    for label, result in zip(labels, results):
+        if result is not None:
+            logger.warning("%s 실패 (uid=%s): %s", label, uid, result)
 
 
 async def _maybe_generate_night_diary(
