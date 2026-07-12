@@ -35,10 +35,15 @@ def _base_req(**overrides) -> ChatRequest:
 
 @pytest.fixture
 def patch_finalize_deps(monkeypatch):
-    """DB/외부 I/O 없이 _finalize_chat_turn을 실행하기 위한 공통 목킹."""
+    """DB/외부 I/O 없이 _finalize_chat_turn을 실행하기 위한 공통 목킹.
+
+    P2: record_event → record_event_async 전환에 맞춰 목도 async로 교체
+    (핫패스 이벤트 루프 블로킹 해소 — chat_router는 이제 record_event_async만
+    모듈 전역으로 참조하므로 그 이름을 patch해야 monkeypatch가 적용된다).
+    """
     recorded_events = []
 
-    def _fake_record_event(**kwargs):
+    async def _fake_record_event_async(**kwargs):
         recorded_events.append(kwargs)
 
     tracked = []
@@ -47,7 +52,7 @@ def patch_finalize_deps(monkeypatch):
         tracked.append((name, coro))
         return None
 
-    monkeypatch.setattr(chat_router, "record_event", _fake_record_event)
+    monkeypatch.setattr(chat_router, "record_event_async", _fake_record_event_async)
     monkeypatch.setattr(chat_router, "create_tracked_task", _fake_tracked)
     monkeypatch.setattr(chat_router, "mark_callback_used", lambda *a, **k: None)
     monkeypatch.setattr(chat_router, "get_story_state", lambda *a, **k: _fake_state())

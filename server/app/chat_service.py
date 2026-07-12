@@ -31,12 +31,12 @@ from .vector_store import get_store
 from .finetune_service import get_model_for_character
 from .memory_service import summarize_conversation, extract_facts, extract_episodes, build_memory_context
 from .quality_service import (
-    check_diversity,
+    check_diversity_async,
     classify_quality_issues,
     quick_score,
     score_response_async,
 )
-from .metrics_service import record_event
+from .metrics_service import record_event_async
 from .model_routing import resolve_model_endpoint
 
 logger = logging.getLogger(__name__)
@@ -637,7 +637,7 @@ def _route_model(
         return (LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE), None
 
 
-def _record_quality_gate_event(
+async def _record_quality_gate_event(
     score: float,
     user_msg: str,
     ai_response: str,
@@ -650,6 +650,9 @@ def _record_quality_gate_event(
 
     generate_reply/stream_reply가 공유. extra_payload로 payload 확장
     필드를 흡수(스트리밍 경로만 기존에 "streaming": True 를 추가로 남겼음).
+    P2: 두 호출부 모두 메인 응답 경로에서 직접 await하는 자리이므로(품질
+    게이트가 실제로 발동했을 때만 실행되는 드문 경로) record_event_async로
+    전환해 이벤트 루프 블로킹을 없앤다.
     """
     payload = {
         "score": score,
@@ -658,7 +661,7 @@ def _record_quality_gate_event(
     }
     if extra_payload:
         payload.update(extra_payload)
-    record_event(
+    await record_event_async(
         event_type="quality_gate_triggered",
         room_id=room_id,
         character_id=character_id,
@@ -688,7 +691,7 @@ async def _quality_gate_regenerate(
 
     Returns (replies, content) — 재시도가 원본보다 낫지 않으면 입력을 그대로 반환.
     """
-    _record_quality_gate_event(score, message, content, model_id, room_id, character_id)
+    await _record_quality_gate_event(score, message, content, model_id, room_id, character_id)
     logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
 
     # 첫 응답이 JSON 파싱 깨짐(매우 낮은 점수)이면 형식 강제 보강.
@@ -755,8 +758,8 @@ async def _record_turn_latency_event(
 
     generate_reply/stream_reply가 공유. `_record_usage`/`_record_ab_result`와
     동일하게 create_tracked_task로 fire-and-forget 스케줄되어 메인 응답
-    경로를 블로킹하지 않는다(record_event 자체는 아직 동기 — P2에서
-    async 전환 예정, 이 이벤트도 그때 같이 정리).
+    경로를 블로킹하지 않는다. P2: record_event_async로 전환해 이 백그라운드
+    태스크 내부에서도 이벤트 루프를 블로킹하지 않도록 정리했다.
     t_gate(라우터 게이트 단계)는 이번 계측에 포함하지 않음 — 라우터
     호출부까지 시그니처를 확장하는 대신 최소 변경으로 3구간만 계측.
     """
@@ -772,7 +775,7 @@ async def _record_turn_latency_event(
         room_id, model_id, streaming, t_memory_ms, t_rag_ms, t_first_token_ms,
     )
     try:
-        record_event(
+        await record_event_async(
             event_type="turn_latency",
             room_id=room_id,
             character_id=character_id,
@@ -1480,7 +1483,7 @@ async def stream_reply(
         if full_text:
             _score = quick_score(message, parser.raw or full_text, mbti)
             if _score < QUALITY_GATE_THRESHOLD:
-                _record_quality_gate_event(
+                await _record_quality_gate_event(
                     _score, message, parser.raw or full_text, model_id, room_id, character_id,
                     extra_payload={"streaming": True},
                 )
@@ -1593,12 +1596,17 @@ async def _record_ab_result(
     tokens: float,
     response_time_ms: float,
 ) -> None:
-    """A/B 테스트 메트릭(토큰 수·응답시간)을 백그라운드에서 기록 (DATA-B 신예린)."""
+    """A/B 테스트 메트릭(토큰 수·응답시간)을 백그라운드에서 기록 (DATA-B 신예린).
+
+    P2: ab.record_result는 동기 psycopg 호출(ab_test.py)이라 이 fire-and-forget
+    태스크 안에서도 이벤트 루프를 블로킹한다 — asyncio.to_thread로 감싼다.
+    """
     try:
         # 지연 임포트: 순환/기동 순서 회피
         from .ab_test import get_ab_manager
         ab = get_ab_manager()
-        ab.record_result(
+        await asyncio.to_thread(
+            ab.record_result,
             experiment_id=experiment_id,
             variant=variant,
             metric_name="total_tokens",
@@ -1606,7 +1614,8 @@ async def _record_ab_result(
             user_id=user_id,
             character_id=character_id,
         )
-        ab.record_result(
+        await asyncio.to_thread(
+            ab.record_result,
             experiment_id=experiment_id,
             variant=variant,
             metric_name="response_time_ms",
@@ -1637,7 +1646,7 @@ async def _post_response_quality_check(
             character_id=character_id,
         )
         if character_id:
-            check_diversity(character_id, ai_response, room_id=room_id)
+            await check_diversity_async(character_id, ai_response, room_id=room_id)
     except Exception as e:
         logger.warning(f"백그라운드 품질 평가 오류: {e}")
 

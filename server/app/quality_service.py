@@ -6,6 +6,7 @@ fire-and-forget 방식으로 응답 전송 후 백그라운드에서 품질 점�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -16,7 +17,7 @@ from openai import AsyncOpenAI
 
 from .config import OPENAI_API_KEY, LLM_MODEL_SIMPLE, MAX_MESSAGE_LENGTH
 from .json_utils import extract_json_array
-from .metrics_service import record_event
+from .metrics_service import record_event, record_event_async
 from .models import VALID_EMOTIONS
 from .postgres import fetchall, fetchone, postgres_enabled
 
@@ -87,8 +88,10 @@ async def score_response_async(
             "ai_response": ai_response,
         }
 
-        # metric_events 에 저장
-        record_event(
+        # metric_events 에 저장 (P2: 핫패스 async 전환 — 이 함수는 이미
+        # fire-and-forget 백그라운드 태스크에서 실행되지만, 동기 record_event가
+        # 그 태스크 안에서도 이벤트 루프를 블로킹하므로 async 버전으로 교체)
+        await record_event_async(
             event_type="quality_score",
             room_id=room_id,
             character_id=character_id,
@@ -260,6 +263,52 @@ def _scope_filter(room_id: str, character_id: str) -> Tuple[str, Tuple[Any, ...]
     return "character_id = %s", (character_id,)
 
 
+def _diversity_score_from_rows(rows: list, new_response: str) -> Tuple[Optional[float], int]:
+    """DB에서 가져온 과거 응답 행들과 bigram 겹침 비율로 diversity_score 계산.
+
+    check_diversity/check_diversity_async가 공유하는 순수 로직(DB 접근 없음).
+    Returns (diversity_score 또는 None(계산 불가), past_texts 개수).
+    """
+    if not rows:
+        return None, 0
+
+    past_texts = [r["resp"] for r in rows if r.get("resp")]
+    if not past_texts:
+        return None, 0
+
+    new_bg = set(_bigrams(new_response))
+    if not new_bg:
+        return None, len(past_texts)
+
+    overlap_ratios: List[float] = []
+    for past in past_texts:
+        past_bg = set(_bigrams(past))
+        if not past_bg:
+            continue
+        overlap = len(new_bg & past_bg)
+        ratio = overlap / len(new_bg)
+        overlap_ratios.append(ratio)
+
+    if not overlap_ratios:
+        return None, len(past_texts)
+
+    avg_overlap = sum(overlap_ratios) / len(overlap_ratios)
+    return round(1.0 - avg_overlap, 3), len(past_texts)
+
+
+def _diversity_query(room_id: str, character_id: str, n_recent: int) -> Tuple[str, tuple]:
+    scope_sql, scope_params = _scope_filter(room_id, character_id)
+    query = f"""
+        SELECT payload->>'ai_response' AS resp
+        FROM metric_events
+        WHERE event_type = 'quality_score'
+          AND {scope_sql}
+        ORDER BY created_at DESC
+        LIMIT %s
+        """
+    return query, scope_params + (n_recent,)
+
+
 def check_diversity(
     character_id: str,
     new_response: str,
@@ -274,44 +323,12 @@ def check_diversity(
     if not postgres_enabled():
         return 1.0
 
-    scope_sql, scope_params = _scope_filter(room_id, character_id)
-    rows = fetchall(
-        f"""
-        SELECT payload->>'ai_response' AS resp
-        FROM metric_events
-        WHERE event_type = 'quality_score'
-          AND {scope_sql}
-        ORDER BY created_at DESC
-        LIMIT %s
-        """,
-        scope_params + (n_recent,),
-    )
+    query, params = _diversity_query(room_id, character_id, n_recent)
+    rows = fetchall(query, params)
 
-    if not rows:
+    diversity_score, recent_count = _diversity_score_from_rows(rows, new_response)
+    if diversity_score is None:
         return 1.0
-
-    past_texts = [r["resp"] for r in rows if r.get("resp")]
-    if not past_texts:
-        return 1.0
-
-    new_bg = set(_bigrams(new_response))
-    if not new_bg:
-        return 1.0
-
-    overlap_ratios: List[float] = []
-    for past in past_texts:
-        past_bg = set(_bigrams(past))
-        if not past_bg:
-            continue
-        overlap = len(new_bg & past_bg)
-        ratio = overlap / len(new_bg)
-        overlap_ratios.append(ratio)
-
-    if not overlap_ratios:
-        return 1.0
-
-    avg_overlap = sum(overlap_ratios) / len(overlap_ratios)
-    diversity_score = round(1.0 - avg_overlap, 3)
 
     if diversity_score < 0.3:
         record_event(
@@ -320,7 +337,44 @@ def check_diversity(
             character_id=character_id,
             payload={
                 "diversity_score": diversity_score,
-                "recent_count": len(past_texts),
+                "recent_count": recent_count,
+            },
+        )
+
+    return diversity_score
+
+
+async def check_diversity_async(
+    character_id: str,
+    new_response: str,
+    room_id: str = "",
+    n_recent: int = 20,
+) -> float:
+    """check_diversity의 비동기 버전 (P2: 핫패스 이벤트 루프 블로킹 해소).
+
+    _post_response_quality_check(chat_service.py, fire-and-forget 백그라운드
+    태스크) 전용. 동기 fetchall을 asyncio.to_thread로 감싸고, low_diversity_warning
+    기록도 record_event_async로 교체한다. 라우터가 쓰는 동기 check_diversity는
+    그대로 유지(계산 로직은 _diversity_score_from_rows를 공유해 중복 없음).
+    """
+    if not postgres_enabled():
+        return 1.0
+
+    query, params = _diversity_query(room_id, character_id, n_recent)
+    rows = await asyncio.to_thread(fetchall, query, params)
+
+    diversity_score, recent_count = _diversity_score_from_rows(rows, new_response)
+    if diversity_score is None:
+        return 1.0
+
+    if diversity_score < 0.3:
+        await record_event_async(
+            event_type="low_diversity_warning",
+            room_id=room_id,
+            character_id=character_id,
+            payload={
+                "diversity_score": diversity_score,
+                "recent_count": recent_count,
             },
         )
 

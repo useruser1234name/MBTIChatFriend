@@ -127,6 +127,44 @@ class SubscriptionManager:
         plan = self.get_plan(user_id)
         return dict(PLAN_LIMITS[plan])
 
+    async def get_plan_async(self, user_id: str) -> Plan:
+        """get_plan의 비동기 버전 (P2: 핫패스 이벤트 루프 블로킹 해소).
+
+        check_message_limit(매 턴 게이팅)에서 사용 — postgres_async의
+        AsyncDatabase 풀을 사용해 동기 psycopg 신규 커넥션 생성을 피한다.
+        폴백 로직(레코드 없음/DB 오류 시 FREE)은 get_plan과 동일하게 유지.
+        """
+        from .postgres import postgres_enabled
+        from .postgres_async import get_async_db
+
+        if not postgres_enabled():
+            return Plan.FREE
+
+        db = get_async_db()
+        if not db.available:
+            return Plan.FREE
+
+        try:
+            row = await db.fetchone(
+                """
+                SELECT plan FROM user_subscriptions
+                WHERE user_id = $1
+                  AND (expires_at IS NULL OR expires_at > NOW())
+                """,
+                user_id,
+            )
+            if row and row.get("plan") in Plan._value2member_map_:
+                return Plan(row["plan"])
+        except Exception as e:
+            logger.error(f"[Subscription] 플랜 조회 실패(async) user_id={user_id}: {e}")
+
+        return Plan.FREE
+
+    async def get_limits_async(self, user_id: str) -> dict:
+        """get_limits의 비동기 버전 — get_plan_async를 사용."""
+        plan = await self.get_plan_async(user_id)
+        return dict(PLAN_LIMITS[plan])
+
     # ── 일일 메시지 한도 확인 ──────────────────────────────────────────────────
 
     async def check_message_limit(
@@ -143,7 +181,7 @@ class SubscriptionManager:
         """
         from .postgres_async import get_async_db
 
-        limits = self.get_limits(user_id)
+        limits = await self.get_limits_async(user_id)
         daily_limit: int = limits["daily_messages"]
 
         # 무제한 플랜

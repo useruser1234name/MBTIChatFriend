@@ -13,7 +13,7 @@ from slowapi.util import get_remote_address
 
 from ..analytics_events import is_allowed
 from ..auth_middleware import require_auth_always
-from ..metrics_service import record_event
+from ..metrics_service import record_event_async
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -42,6 +42,10 @@ async def ingest_events(
 
     - 인증 필수: user_id는 토큰에서 채운다(클라이언트 값 무시).
     - 허용 목록(analytics_events.ALLOWED_CLIENT_EVENTS)에 없는 event_type은 건너뛴다.
+
+    P2: 배치당 최대 100건(EventBatch.events max_length)까지 순차 기록되므로
+    동기 record_event를 쓰면 요청당 최대 100회 이벤트 루프 블로킹이 발생한다
+    — record_event_async로 전환.
     """
     uid = user.get("uid", "")
     accepted = 0
@@ -50,7 +54,7 @@ async def ingest_events(
         if not is_allowed(ev.event_type):
             skipped.append(ev.event_type)
             continue
-        record_event(
+        await record_event_async(
             event_type=ev.event_type,
             room_id=ev.room_id,
             character_id=ev.character_id,

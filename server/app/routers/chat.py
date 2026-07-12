@@ -1,5 +1,6 @@
 """Chat 엔드포인트 — REST 및 SSE 스트리밍"""
 
+import asyncio
 import json
 import logging
 import random
@@ -34,7 +35,7 @@ from ..content_filter import (
     CRISIS_RESPONSE_TIER2,
 )
 from ..diary_store import has_night_diary, night_bucket_date, save_night_diary
-from ..metrics_service import record_event
+from ..metrics_service import record_event_async
 from ..background_tasks import create_tracked_task
 from ..model_routing import resolve_model_endpoint, select_model_for_crisis
 from ..models import (
@@ -116,15 +117,18 @@ def _merge_memories(base: list[MemoryItem], extra: list[MemoryItem]) -> list[Mem
     return merged
 
 
-def _prepare_chat_turn(req: ChatRequest, user: Optional[dict]) -> dict:
+async def _prepare_chat_turn(req: ChatRequest, user: Optional[dict]) -> dict:
     """턴 시작 준비: room_id 해석, 스토리 상태 bump, 콜백/스토리 기억 병합.
 
     generate_reply(논스트림)와 stream_reply(스트림)가 공유하는 전처리.
+    P2: bump_turn_and_get_state는 동기 psycopg 호출(story_state_store.py)이라
+    핫패스(매 턴)에서 이벤트 루프를 블로킹한다 — asyncio.to_thread로 감싼다
+    (함수 자체는 시그니처 변경 없이 유지, 호출부만 감쌈).
     """
     room_id = _resolve_room_id(req, user)
     character_id = req.character_id or ""
 
-    state = bump_turn_and_get_state(room_id, character_id)
+    state = await asyncio.to_thread(bump_turn_and_get_state, room_id, character_id)
     effective_character_id = character_id or state.character_id
     callback_key, callback_hint = maybe_build_callback_hint(state)
     story_memories = build_story_memory_items(state, callback_hint or "")
@@ -152,11 +156,12 @@ async def _record_affinity_level_up(
 
     _finalize_chat_turn 전용(잔여 본문 분할, S15). 원래 중첩 함수였으며
     room_id/event_type(AFFINITY_LEVEL_UP)은 클로저로 캡처하던 값을
-    명시적 파라미터로 전환했다. record_event는 반드시 모듈 전역 이름으로
-    호출해야 tests/test_chat_turn_events_user_id.py의 monkeypatch가 적용된다.
+    명시적 파라미터로 전환했다. record_event_async는 반드시 모듈 전역
+    이름으로 호출해야 tests/test_chat_turn_events_user_id.py의 monkeypatch가
+    적용된다(P2: record_event → record_event_async로 전환).
     """
     try:
-        record_event(
+        await record_event_async(
             event_type=event_type,
             room_id=room_id,
             character_id=character_id,
@@ -276,7 +281,7 @@ async def _maybe_generate_night_diary(
                 apply_diary_outcome(room_id, effective_character_id, diary_next_hook, diary_next_goal)
                 next_hook = diary_next_hook
                 next_goal = diary_next_goal
-                record_event(
+                await record_event_async(
                     event_type="night_diary_generated",
                     room_id=room_id,
                     character_id=effective_character_id,
@@ -334,8 +339,10 @@ async def _finalize_chat_turn(
     # (라이브 chat_turn 이벤트에 user_id가 비어 있던 결함 수정 — 검증관 실측 기반)
     _uid = (user or {}).get("uid", "") if user else ""
 
+    # P2: story_state_store의 동기 psycopg 호출을 asyncio.to_thread로 감싼다
+    # (함수 시그니처/모듈 바인딩은 그대로 유지 — monkeypatch 호환).
     if callback_key:
-        mark_callback_used(room_id, callback_key, state.turn_count)
+        await asyncio.to_thread(mark_callback_used, room_id, callback_key, state.turn_count)
 
     next_hook = state.next_hook
     next_goal = state.next_goal
@@ -345,7 +352,7 @@ async def _finalize_chat_turn(
     )
 
     if not next_hook or not next_goal:
-        latest = get_story_state(room_id, effective_character_id)
+        latest = await asyncio.to_thread(get_story_state, room_id, effective_character_id)
         next_hook = next_hook or latest.next_hook
         next_goal = next_goal or latest.next_goal
 
@@ -375,7 +382,7 @@ async def _finalize_chat_turn(
             except Exception as _e:
                 logger.warning("affinity_level_up 이벤트 태스크 생성 실패: %s", _e)
 
-    record_event(
+    await record_event_async(
         event_type="chat_turn",
         room_id=room_id,
         character_id=effective_character_id,
@@ -418,7 +425,7 @@ async def _finalize_chat_turn(
 
 async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
     """논스트림 경로: 준비 → 전체 응답 생성 → 후처리."""
-    prep = _prepare_chat_turn(req, user)
+    prep = await _prepare_chat_turn(req, user)
     replies, affinity_delta = await generate_reply(
         message=req.message,
         mbti=req.mbti,
@@ -510,7 +517,7 @@ async def send_message(
             crisis_msg = get_crisis_response(crisis_tier)
             crisis_reply = ReplyPart(text=crisis_msg, emotion="SAD", delay=0)
             replies = [crisis_reply] + list(replies)
-        record_event(
+        await record_event_async(
             event_type="crisis_detected",
             room_id=result["room_id"],
             character_id=req.character_id,
@@ -630,9 +637,9 @@ async def _openai_event_generator(
     전환했다. SSE 이벤트 이름("message"/"done")·data JSON 구조·예외 시
     폴백 이벤트·yield 순서는 원본과 동일.
     """
-    prep = _prepare_chat_turn(req, user)
+    prep = await _prepare_chat_turn(req, user)
     room_id = prep["room_id"]
-    record_crisis(room_id)
+    await record_crisis(room_id)
 
     # 위기 문구를 가장 먼저 전송 (persistence/finalize 대상에는 미포함 — 기존 동작 유지)
     if crisis_reply is not None:
@@ -739,9 +746,9 @@ async def stream_message(
             ),
         }
 
-    def _record_crisis(room_id: str) -> None:
+    async def _record_crisis(room_id: str) -> None:
         if is_crisis:
-            record_event(
+            await record_event_async(
                 event_type="crisis_detected",
                 room_id=room_id,
                 character_id=req.character_id,
@@ -764,7 +771,7 @@ async def stream_message(
         replies = list(result["replies"])
         if _crisis_reply is not None:
             replies = [_crisis_reply] + replies
-        _record_crisis(result["room_id"])
+        await _record_crisis(result["room_id"])
 
         return EventSourceResponse(_lora_event_generator(
             req, crisis_type_hint, _lora_model_id, _lora_base_url, replies, result,

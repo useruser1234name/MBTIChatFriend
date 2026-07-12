@@ -2,11 +2,15 @@
 
 stream_reply를 test_stream_reply.py의 patch_deps 방식으로 목킹 실행하고,
 create_tracked_task로 스케줄되는 "turn-latency" 백그라운드 태스크가
-record_event(event_type="turn_latency")를 t_memory_ms/t_rag_ms/
+record_event_async(event_type="turn_latency")를 t_memory_ms/t_rag_ms/
 t_first_token_ms 3개 구간 키를 포함한 payload로 호출하는지 검증한다.
 
 t_gate(라우터 게이트 단계)는 이번 계측 범위에서 의도적으로 제외했으므로
 (chat_service.py의 _record_turn_latency_event 참고) 3구간만 단언한다.
+
+P2 갱신: chat_service.py가 record_event(동기) 대신 record_event_async만
+모듈 전역으로 참조하도록 바뀌어(핫패스 이벤트 루프 블로킹 해소), 이 테스트의
+목도 record_event_async를 async 함수로 patch하도록 갱신했다.
 """
 
 import types
@@ -124,7 +128,7 @@ async def test_stream_reply_records_turn_latency_event(patch_deps, monkeypatch):
 
     recorded: list[dict] = []
 
-    def _fake_record_event(event_type, room_id="", character_id="", user_id="", payload=None):
+    async def _fake_record_event_async(event_type, room_id="", character_id="", user_id="", payload=None):
         recorded.append(dict(
             event_type=event_type,
             room_id=room_id,
@@ -133,7 +137,7 @@ async def test_stream_reply_records_turn_latency_event(patch_deps, monkeypatch):
             payload=payload or {},
         ))
 
-    monkeypatch.setattr(chat_service, "record_event", _fake_record_event)
+    monkeypatch.setattr(chat_service, "record_event_async", _fake_record_event_async)
 
     parts, done = await _collect(
         chat_service.stream_reply(**_base_kwargs(room_id="room-latency"))
@@ -179,10 +183,10 @@ async def test_generate_reply_records_turn_latency_event(patch_deps, monkeypatch
 
     recorded: list[dict] = []
 
-    def _fake_record_event(event_type, room_id="", character_id="", user_id="", payload=None):
+    async def _fake_record_event_async(event_type, room_id="", character_id="", user_id="", payload=None):
         recorded.append(dict(event_type=event_type, room_id=room_id, payload=payload or {}))
 
-    monkeypatch.setattr(chat_service, "record_event", _fake_record_event)
+    monkeypatch.setattr(chat_service, "record_event_async", _fake_record_event_async)
 
     replies, affinity_delta = await chat_service.generate_reply(
         **_base_kwargs(room_id="room-latency-2")
