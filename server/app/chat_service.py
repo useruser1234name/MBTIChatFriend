@@ -1494,10 +1494,36 @@ async def stream_reply(
         # P1 계측: LLM 호출 시작~첫 콘텐츠 청크 도착까지의 소요(t_first_token)
         _t_first_token_ms: Optional[float] = None
         _stream_total_tokens = 0.0
-        stream = await active_client.chat.completions.create(**_stream_kwargs)
+        # P7: usage를 포함한 마지막 청크(비어있는 choices) 전체를 보관 —
+        # api_usage 기록(_record_usage)에 prompt/completion_tokens가 필요.
+        _stream_usage = None
+
+        # P7: 서킷브레이커 보호 — generate_reply(_openai_cb.call(...))와 동일 패턴.
+        # 스트림 객체를 반환하는 create() 호출 자체만 래핑하고, 토큰 순회(async for)는
+        # 서킷 판정과 무관하므로 바깥에 둔다.
+        _openai_cb = get_openai_circuit()
+        try:
+            stream = await _openai_cb.call(
+                active_client.chat.completions.create(**_stream_kwargs)
+            )
+        except CircuitOpenError as _cb_err:
+            logger.warning(f"[CB] openai circuit OPEN — 목업 응답 반환(스트림): {_cb_err}")
+            # generate_reply의 CircuitOpenError 폴백(_mock_reply)과 동일한 사용자 경험.
+            # 이 시점엔 아직 토큰을 하나도 못 받았으므로(create() 자체가 실패) 진행 중이던
+            # affinity/rag task를 정리해야 한다(아래 공용 except 블록과 동일 로직).
+            if not affinity_task.done():
+                affinity_task.cancel()
+            if rag_task is not None and not rag_task.done():
+                rag_task.cancel()
+            for part in _mock_reply(message, mbti, nickname, affinity_level):
+                yield part
+            yield StreamDone(affinity_delta=affinity_delta, full_text="")
+            return
+
         async for chunk in stream:
             _chunk_usage = getattr(chunk, "usage", None)
             if _chunk_usage is not None:
+                _stream_usage = _chunk_usage
                 _stream_total_tokens = float(getattr(_chunk_usage, "total_tokens", 0) or 0)
             try:
                 delta = chunk.choices[0].delta.content
@@ -1567,6 +1593,22 @@ async def stream_reply(
                 response_time_ms=_elapsed_ms,
             ), name="record-ab-result")
 
+        # 15b. P7: SSE 턴도 api_usage에 기록 — 이전에는 스트림 경로가 전혀
+        # 기록하지 않아 _gate_user의 일일 예산/한도 계산이 SSE 트래픽을
+        # 사실상 무제한으로 취급했다. generate_reply와 동일한 _record_usage
+        # 헬퍼를 재사용하되 endpoint="stream"으로 구분한다.
+        # 주의(의도된 동작 변경): 이 기록으로 SSE 사용자도 일일 예산/메시지
+        # 한도 검사에 정상적으로 걸리기 시작한다 — 운영 반영 시점은 소유자 확인 필요.
+        if _stream_usage is not None:
+            create_tracked_task(_record_usage(
+                room_id=room_id,
+                character_id=character_id,
+                model_id=model_id,
+                prompt_tokens=getattr(_stream_usage, "prompt_tokens", 0),
+                completion_tokens=getattr(_stream_usage, "completion_tokens", 0),
+                endpoint="stream",
+            ), name="record-usage")
+
         # 16. P1: 턴 단계별 레이턴시 계측 기록
         create_tracked_task(
             _record_turn_latency_event(
@@ -1620,8 +1662,15 @@ async def _record_usage(
     model_id: str,
     prompt_tokens: int,
     completion_tokens: int,
+    endpoint: str = "chat",
 ) -> None:
-    """OpenAI API 사용량 비동기 기록 (H-3)."""
+    """OpenAI API 사용량 비동기 기록 (H-3).
+
+    endpoint 기본값은 기존 generate_reply 호출부와 동일한 "chat"을 유지한다
+    (하위 호환). P7: stream_reply가 endpoint="stream"으로 호출해 SSE 턴도
+    api_usage에 구분 기록되도록 한다(이전에는 스트림 경로가 전혀 기록하지
+    않아 _gate_user의 일일 예산/한도 계산이 SSE 트래픽을 누락했음).
+    """
     try:
         # 지연 임포트: 순환/기동 순서 회피
         from .postgres_async import get_async_db
@@ -1633,6 +1682,7 @@ async def _record_usage(
                 model_id=model_id,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                endpoint=endpoint,
             )
     except Exception as e:
         logger.warning(f"API 사용량 기록 실패: {e}")

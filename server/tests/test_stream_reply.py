@@ -17,36 +17,47 @@ from app.models import HistoryMessage, ReplyPart
 
 
 class _FakeChunk:
-    def __init__(self, content):
-        self.choices = [types.SimpleNamespace(delta=types.SimpleNamespace(content=content))]
+    def __init__(self, content, usage=None):
+        # 실제 OpenAI usage 청크는 choices가 빈 리스트다(콘텐츠 없이 usage만
+        # 실려 온다) — content=None이면 그 형태를 재현한다.
+        if content is None:
+            self.choices = []
+        else:
+            self.choices = [types.SimpleNamespace(delta=types.SimpleNamespace(content=content))]
+        self.usage = usage
 
 
 class _FakeStream:
-    def __init__(self, tokens):
+    def __init__(self, tokens, usage=None):
         self._tokens = list(tokens)
+        self._usage = usage  # P7: 마지막에 usage-only 청크를 덧붙이기 위함
 
     def __aiter__(self):
-        self._it = iter(self._tokens)
+        chunks = [_FakeChunk(t) for t in self._tokens]
+        if self._usage is not None:
+            chunks.append(_FakeChunk(None, usage=self._usage))
+        self._it = iter(chunks)
         return self
 
     async def __anext__(self):
         try:
-            return _FakeChunk(next(self._it))
+            return next(self._it)
         except StopIteration:
             raise StopAsyncIteration
 
 
 class _FakeCompletions:
-    def __init__(self, tokens):
+    def __init__(self, tokens, usage=None):
         self._tokens = tokens
+        self._usage = usage
 
     async def create(self, **kwargs):
-        return _FakeStream(self._tokens)
+        return _FakeStream(self._tokens, usage=self._usage)
 
 
 class _FakeClient:
-    def __init__(self, tokens):
-        self.chat = types.SimpleNamespace(completions=_FakeCompletions(tokens))
+    def __init__(self, tokens, usage=None):
+        self.chat = types.SimpleNamespace(completions=_FakeCompletions(tokens, usage=usage))
 
 
 @pytest.fixture
@@ -73,8 +84,8 @@ def patch_deps(monkeypatch):
             pass
         return None
 
-    def apply(tokens):
-        monkeypatch.setattr(chat_service, "client", _FakeClient(tokens))
+    def apply(tokens, usage=None):
+        monkeypatch.setattr(chat_service, "client", _FakeClient(tokens, usage=usage))
         monkeypatch.setattr(chat_service, "analyze_affinity_with_llm", _fake_affinity)
         monkeypatch.setattr(chat_service, "build_memory_context", _fake_mem_ctx)
         monkeypatch.setattr(chat_service, "resolve_model_endpoint", _fake_resolve)
@@ -271,3 +282,74 @@ async def test_streaming_skips_ab_result_without_character_id(patch_deps):
 
     assert done is not None
     assert "record-ab-result" not in tracked
+
+
+# P7: 스트림 경로도 api_usage를 기록해야 한다(이전에는 전혀 기록하지 않아
+# _gate_user의 일일 예산/한도 계산이 SSE 트래픽을 누락하던 결함).
+@pytest.mark.asyncio
+async def test_streaming_records_api_usage_when_usage_chunk_present(patch_deps, monkeypatch):
+    usage = types.SimpleNamespace(prompt_tokens=120, completion_tokens=40, total_tokens=160)
+    patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'], usage=usage)
+
+    # create_tracked_task를 다시 가로채(패턴: test_streaming_records_ab_result_...와 동일)
+    # 이번엔 코루틴을 즉시 닫지 않고 record-usage 태스크만 직접 await 한다.
+    tracked: list[tuple[str, object]] = []
+
+    def _capture_tracked(coro, name=""):
+        tracked.append((name, coro))
+        return None
+
+    monkeypatch.setattr(chat_service, "create_tracked_task", _capture_tracked)
+
+    recorded: list[dict] = []
+
+    async def _fake_record_usage(
+        room_id, character_id, model_id, prompt_tokens, completion_tokens, endpoint="chat"
+    ):
+        recorded.append(dict(
+            room_id=room_id,
+            character_id=character_id,
+            model_id=model_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            endpoint=endpoint,
+        ))
+
+    monkeypatch.setattr(chat_service, "_record_usage", _fake_record_usage)
+
+    parts, done = await _collect(
+        chat_service.stream_reply(**_base_kwargs(room_id="room-usage", character_id="char-usage"))
+    )
+    assert done is not None
+    assert parts
+
+    usage_task = next((c for n, c in tracked if n == "record-usage"), None)
+    assert usage_task is not None, "usage 청크가 있으면 record-usage 태스크가 스케줄되어야 함"
+    await usage_task
+
+    assert len(recorded) == 1
+    rec = recorded[0]
+    assert rec["room_id"] == "room-usage"
+    assert rec["character_id"] == "char-usage"
+    assert rec["prompt_tokens"] == 120
+    assert rec["completion_tokens"] == 40
+    # 스트림 경로는 반드시 endpoint="stream"으로 구분 기록해야 한다
+    # (generate_reply의 기본값 "chat"과 혼동되면 안 됨).
+    assert rec["endpoint"] == "stream"
+
+    for name, coro in tracked:
+        if name != "record-usage":
+            coro.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_skips_api_usage_without_usage_chunk(patch_deps):
+    """usage 청크가 없는 스트림(예: LoRA 엔드포인트)에서는 record-usage를 스케줄하지 않는다."""
+    tracked = patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'])  # usage=None(기본값)
+
+    _, done = await _collect(
+        chat_service.stream_reply(**_base_kwargs(character_id="char-no-usage"))
+    )
+
+    assert done is not None
+    assert "record-usage" not in tracked
