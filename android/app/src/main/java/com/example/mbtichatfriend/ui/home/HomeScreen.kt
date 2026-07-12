@@ -40,7 +40,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -65,6 +64,7 @@ import com.example.mbtichatfriend.data.local.CharacterEntity
 import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.ui.components.CharacterFace
 import com.example.mbtichatfriend.ui.components.ConfirmDialog
+import com.example.mbtichatfriend.ui.components.SkeletonBox
 import com.example.mbtichatfriend.ui.components.affinityLevelColor
 import com.example.mbtichatfriend.ui.components.affinityLevelTag
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -102,11 +102,16 @@ fun HomeScreen(
 
     when (val state = uiState) {
         is HomeUiState.Loading -> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+            // U4: 스피너 대신 캐릭터 카드 3개 스켈레톤 — Success 분기의 실제 리스트와
+            // 동일한 contentPadding/간격(16dp horizontal, 8dp vertical, spacedBy 12dp)을 맞춰
+            // 로딩→콘텐츠 전환 시 레이아웃 점프를 최소화.
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                CircularProgressIndicator()
+                repeat(3) { CharacterCardSkeleton() }
             }
         }
         is HomeUiState.Error -> {
@@ -455,6 +460,42 @@ fun HomeScreen(
                         }
                     }
                 )
+            }
+        }
+    }
+}
+
+/**
+ * U4: [CharacterCard]의 대략적 레이아웃(아바타 원 + 텍스트 줄 2개 + 온도계 바)을
+ * 흉내낸 스켈레톤. 정확한 치수를 맞출 필요는 없음 — 로딩 중 레이아웃 점프 최소화 목적.
+ */
+@Composable
+private fun CharacterCardSkeleton() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SkeletonBox(
+                modifier = Modifier.size(60.dp),
+                shape = CircleShape
+            )
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                SkeletonBox(modifier = Modifier.fillMaxWidth(0.5f).height(16.dp))
+                Spacer(Modifier.height(8.dp))
+                SkeletonBox(modifier = Modifier.fillMaxWidth(0.8f).height(12.dp))
+                Spacer(Modifier.height(8.dp))
+                SkeletonBox(modifier = Modifier.fillMaxWidth().height(4.dp))
             }
         }
     }

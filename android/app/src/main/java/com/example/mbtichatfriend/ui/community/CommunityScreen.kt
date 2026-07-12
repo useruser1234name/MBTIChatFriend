@@ -102,8 +102,14 @@ fun CommunityScreen(
 
             when (val state = uiState) {
                 is CommunityUiState.Loading -> {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
+                    // U4: 스피너 대신 게시글 카드 3개 스켈레톤 (PostCard의 대략적 레이아웃을 흉내)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        repeat(3) { PostCardSkeleton() }
                     }
                 }
                 is CommunityUiState.Success -> {

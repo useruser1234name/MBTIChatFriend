@@ -2,6 +2,7 @@ package com.example.mbtichatfriend.ui.community
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
@@ -13,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.mbtichatfriend.ui.components.SkeletonBox
 
 private val REPORT_REASONS = listOf("불쾌한 내용", "스팸/광고", "개인정보 노출")
 
@@ -137,6 +139,41 @@ fun PostCard(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * U4: [PostCard]의 대략적 레이아웃(칩+이름 줄 / 본문 2줄 / 하단 아이콘 3개)을 흉내낸 스켈레톤.
+ * 정확한 치수를 맞출 필요는 없음 — 로딩 중 레이아웃 점프 최소화 목적.
+ */
+@Composable
+fun PostCardSkeleton(modifier: Modifier = Modifier) {
+    Card(modifier = modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SkeletonBox(modifier = Modifier.width(48.dp).height(20.dp))
+                SkeletonBox(modifier = Modifier.width(64.dp).height(14.dp))
+            }
+            Spacer(Modifier.height(8.dp))
+            SkeletonBox(modifier = Modifier.fillMaxWidth().height(14.dp))
+            Spacer(Modifier.height(6.dp))
+            SkeletonBox(modifier = Modifier.fillMaxWidth(0.6f).height(14.dp))
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SkeletonBox(modifier = Modifier.size(32.dp), shape = CircleShape)
+                Spacer(Modifier.width(8.dp))
+                SkeletonBox(modifier = Modifier.size(32.dp), shape = CircleShape)
+                Spacer(Modifier.width(8.dp))
+                SkeletonBox(modifier = Modifier.size(32.dp), shape = CircleShape)
             }
         }
     }

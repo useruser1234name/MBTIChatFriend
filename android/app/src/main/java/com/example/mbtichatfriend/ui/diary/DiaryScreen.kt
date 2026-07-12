@@ -33,7 +33,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -66,6 +65,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.mbtichatfriend.data.local.DiaryEntity
 import com.example.mbtichatfriend.model.AvatarConfig
 import com.example.mbtichatfriend.ui.components.CharacterFace
+import com.example.mbtichatfriend.ui.components.SkeletonBox
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -233,23 +233,21 @@ private fun TodayDiarySection(
 
             when {
                 isGenerating -> {
+                    // U4: 스피너 대신, 실제 완성된 일기가 들어갈 카드(surface bg + 12dp 라운드 + 16dp 패딩)와
+                    // 동일한 모양의 스켈레톤을 보여줘 생성 완료 시 레이아웃 점프를 최소화.
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(120.dp),
-                        contentAlignment = Alignment.Center
+                            .background(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .padding(16.dp)
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(36.dp),
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                text = "$characterName 이(가) 일기를 쓰고 있어요...",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SkeletonBox(modifier = Modifier.fillMaxWidth().height(16.dp))
+                            SkeletonBox(modifier = Modifier.fillMaxWidth().height(16.dp))
+                            SkeletonBox(modifier = Modifier.fillMaxWidth(0.6f).height(16.dp))
                         }
                     }
                 }
