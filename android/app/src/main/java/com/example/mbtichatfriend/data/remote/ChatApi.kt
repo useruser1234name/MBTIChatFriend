@@ -83,11 +83,6 @@ interface ChatApi {
         @Query("character_id") characterId: String,
     ): LetterResponse
 
-    // ── 레퍼럴 (17차 스프린트) ───────────────────────────────────────────────
-
-    @POST("api/v1/referral/redeem")
-    suspend fun redeemReferralCode(@Body req: ReferralRedeemRequest): Response<ReferralRedeemResponse>
-
     // ── 커뮤니티 (19차 스프린트) ─────────────────────────────────────────────
 
     @GET("api/v1/community/posts")

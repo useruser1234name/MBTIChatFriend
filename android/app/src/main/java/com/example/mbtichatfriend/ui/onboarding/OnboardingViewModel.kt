@@ -7,7 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.ChatApi
-import com.example.mbtichatfriend.data.remote.ReferralRedeemRequest
+import com.example.mbtichatfriend.data.remote.RedeemRequest
 import com.example.mbtichatfriend.data.repository.AnalyticsEvent
 import com.example.mbtichatfriend.data.repository.AnalyticsRepository
 import com.example.mbtichatfriend.model.AgeGroup
@@ -18,7 +18,6 @@ import com.example.mbtichatfriend.model.Relationship
 import com.example.mbtichatfriend.model.SpeechStyle
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -143,12 +142,12 @@ class OnboardingViewModel @Inject constructor(
     }
 
     // ── 레퍼럴 코드 적용 (17차 스프린트) ──────────────────────────────────────
-    fun redeemReferralCode(code: String, callback: (Boolean, String?) -> Unit) {
+    // A8: 서버(/api/v1/referral/redeem)는 RedeemRequest({"code": ...})만 인식(uid는 인증 토큰에서 추출).
+    fun redeemReferral(code: String, callback: (Boolean, String?) -> Unit) {
         viewModelScope.launch {
             try {
-                val userId = prefs.firebaseUid.first()
-                val response = chatApi.redeemReferralCode(
-                    ReferralRedeemRequest(code = code, userId = userId)
+                val response = chatApi.redeemReferral(
+                    RedeemRequest(code = code)
                 )
                 if (response.isSuccessful && response.body()?.success == true) {
                     callback(true, null)

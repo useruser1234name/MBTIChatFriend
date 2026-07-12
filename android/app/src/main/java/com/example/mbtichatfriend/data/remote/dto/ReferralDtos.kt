@@ -6,12 +6,6 @@ import com.squareup.moshi.JsonClass
 // ── 레퍼럴 모델 ──────────────────────────────────────────────────────────────
 
 @JsonClass(generateAdapter = false)
-data class ReferralRedeemRequest(
-    @Json(name = "code") val code: String,
-    @Json(name = "user_id") val userId: String
-)
-
-@JsonClass(generateAdapter = false)
 data class ReferralRedeemResponse(
     val success: Boolean,
     val message: String = "",
