@@ -56,8 +56,8 @@ private fun emotionToLottieAsset(emotion: CharacterEmotion): String = when (emot
     CharacterEmotion.ANGRY     -> "lottie/angry.json"
     CharacterEmotion.LOVE,
     CharacterEmotion.TOUCHED   -> "lottie/love.json"
-    CharacterEmotion.SAD,
-    CharacterEmotion.WORRIED   -> "lottie/sad.json"
+    CharacterEmotion.SAD       -> "lottie/sad.json"
+    CharacterEmotion.WORRIED   -> "lottie/worried.json"
     CharacterEmotion.SHY       -> "lottie/shy.json"       // fallback: idle.json
     CharacterEmotion.SURPRISED -> "lottie/surprised.json"  // fallback: idle.json
     CharacterEmotion.PLAYFUL   -> "lottie/playful.json"    // fallback: happy.json
