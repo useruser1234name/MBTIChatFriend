@@ -455,8 +455,14 @@ private fun ChatTopBar(
 @Composable
 private fun AffinityProgressBar(affinityScore: Int?) {
     if (affinityScore != null) {
+        // U7: 호감도 델타 발생 시 게이지가 스냅하지 않고 부드럽게 차오르도록 (U1 MotionDurations 토큰)
+        val animatedProgress by animateFloatAsState(
+            targetValue = affinityScore / 100f,
+            animationSpec = tween(MotionDurations.Medium),
+            label = "affinityProgress"
+        )
         LinearProgressIndicator(
-            progress = { affinityScore / 100f },
+            progress = { animatedProgress },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(3.dp),

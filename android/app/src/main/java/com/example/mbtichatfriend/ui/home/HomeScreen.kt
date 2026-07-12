@@ -448,7 +448,9 @@ fun HomeScreen(
                                 onClick = { onCharacterClick(character.id) },
                                 onLongClick = { deleteTarget = character },
                                 onDiaryClick = { onDiary(character.id) },
-                                onVoiceCallClick = { onVoiceCall(character.id) }
+                                onVoiceCallClick = { onVoiceCall(character.id) },
+                                // U7: 순서 변경 시 배치 애니메이션만(fade 없음) — 최초 로드 순차 등장은 구현하지 않음
+                                modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)
                             )
                         }
                     }
@@ -516,7 +518,8 @@ private fun CharacterCard(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onDiaryClick: () -> Unit = {},
-    onVoiceCallClick: () -> Unit = {}
+    onVoiceCallClick: () -> Unit = {},
+    modifier: Modifier = Modifier
 ) {
     val avatarId = character.avatarId
     val affinityColor by animateColorAsState(
@@ -525,7 +528,7 @@ private fun CharacterCard(
     )
 
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
             .combinedClickable(
