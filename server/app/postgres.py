@@ -288,6 +288,10 @@ def init_postgres_schema() -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """,
+        # S-3: prefix caching 측정 — cached_tokens 컬럼 추가
+        """
+        ALTER TABLE api_usage ADD COLUMN IF NOT EXISTS cached_tokens INTEGER NOT NULL DEFAULT 0
+        """,
         """
         CREATE INDEX IF NOT EXISTS idx_api_usage_created_at
         ON api_usage(created_at DESC)
@@ -622,6 +626,21 @@ def init_postgres_schema() -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_messages_created
             ON messages(created_at DESC)
+        """,
+        # 호감도 서버 미러링 — 클라이언트 단독 관리 보완 (S-11 미러링)
+        # room_id = '{uid}:{character_id}' 형식, score 0-100, level 1-5
+        """
+        CREATE TABLE IF NOT EXISTS affinity_scores (
+            room_id     TEXT PRIMARY KEY,
+            character_id TEXT NOT NULL DEFAULT '',
+            score       INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 100),
+            level       INTEGER NOT NULL DEFAULT 1 CHECK (level >= 1 AND level <= 5),
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_affinity_scores_room
+            ON affinity_scores(room_id)
         """,
     ]
 
