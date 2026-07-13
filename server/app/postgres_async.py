@@ -184,14 +184,15 @@ class AsyncDatabase:
         prompt_tokens: int,
         completion_tokens: int,
         endpoint: str = "chat",
+        cached_tokens: int = 0,
     ) -> None:
         """OpenAI API 사용량 기록 — H-3 비용 메트릭 수집."""
         await self.execute(
             """
             INSERT INTO api_usage
                 (room_id, character_id, model_id, prompt_tokens,
-                 completion_tokens, total_tokens, endpoint)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 completion_tokens, total_tokens, endpoint, cached_tokens)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             room_id,
             character_id,
@@ -200,6 +201,7 @@ class AsyncDatabase:
             completion_tokens,
             prompt_tokens + completion_tokens,
             endpoint,
+            cached_tokens,
         )
 
     async def check_daily_budget(
@@ -305,6 +307,239 @@ class AsyncDatabase:
             )
 
         return deleted
+
+    async def delete_account(self, uid: str) -> None:
+        """계정 완전삭제 — 20+ 테이블에서 uid 관련 데이터를 순서대로 제거.
+
+        S-6: Google Play/Apple App Store 출시게이트 요구사항.
+        - community_posts / community_comments: 소프트삭제(deleted_at 설정)로 커뮤니티 무결성 유지.
+        - users 테이블: 마지막에 삭제 (FK 참조 방지).
+        - best-effort: 각 단계 실패해도 다음 단계 계속 진행, 전체 삭제 여부는 deletion_log로 추적.
+
+        Args:
+            uid: Firebase user_id (room_id는 '{uid}:...' 형식으로 저장됨)
+        """
+        if not self._pool:
+            return
+
+        room_id_prefix = f"{uid}:%"
+
+        async with self._pool.connection() as conn:
+            # 1. conversation_memory (memory_key에 room_id 포함)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM conversation_memory WHERE memory_key LIKE $1"),
+                    (f"%{uid}%",),
+                )
+            except Exception:
+                logger.exception("[delete_account] conversation_memory 삭제 실패 (uid=%s)", uid)
+
+            # 2. story_state (room_id LIKE '{uid}:%')
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM story_state WHERE room_id LIKE $1"),
+                    (room_id_prefix,),
+                )
+            except Exception:
+                logger.exception("[delete_account] story_state 삭제 실패 (uid=%s)", uid)
+
+            # 3. diary_entries (room_id LIKE '{uid}:%')
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM diary_entries WHERE room_id LIKE $1"),
+                    (room_id_prefix,),
+                )
+            except Exception:
+                logger.exception("[delete_account] diary_entries 삭제 실패 (uid=%s)", uid)
+
+            # 4. metric_events (room_id LIKE '{uid}:%' OR user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg(
+                        "DELETE FROM metric_events WHERE room_id LIKE $1 OR user_id = $2"
+                    ),
+                    (room_id_prefix, uid),
+                )
+            except Exception:
+                logger.exception("[delete_account] metric_events 삭제 실패 (uid=%s)", uid)
+
+            # 5. response_feedback (room_id LIKE '{uid}:%')
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM response_feedback WHERE room_id LIKE $1"),
+                    (room_id_prefix,),
+                )
+            except Exception:
+                logger.exception("[delete_account] response_feedback 삭제 실패 (uid=%s)", uid)
+
+            # 6. api_usage (room_id LIKE '{uid}:%')
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM api_usage WHERE room_id LIKE $1"),
+                    (room_id_prefix,),
+                )
+            except Exception:
+                logger.exception("[delete_account] api_usage 삭제 실패 (uid=%s)", uid)
+
+            # 7. ab_test_results (user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM ab_test_results WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] ab_test_results 삭제 실패 (uid=%s)", uid)
+
+            # 8. user_subscriptions (user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM user_subscriptions WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] user_subscriptions 삭제 실패 (uid=%s)", uid)
+
+            # 9. memory_moments (room_id LIKE '{uid}:%' OR user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg(
+                        "DELETE FROM memory_moments WHERE room_id LIKE $1 OR user_id = $2"
+                    ),
+                    (room_id_prefix, uid),
+                )
+            except Exception:
+                logger.exception("[delete_account] memory_moments 삭제 실패 (uid=%s)", uid)
+
+            # 10. user_data_consent (user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM user_data_consent WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] user_data_consent 삭제 실패 (uid=%s)", uid)
+
+            # 11. session_feedback (room_id LIKE '{uid}:%')
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM session_feedback WHERE room_id LIKE $1"),
+                    (room_id_prefix,),
+                )
+            except Exception:
+                logger.exception("[delete_account] session_feedback 삭제 실패 (uid=%s)", uid)
+
+            # 12. referral_codes (inviter_id = uid 또는 redeemed_by = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg(
+                        "DELETE FROM referral_codes WHERE inviter_id = $1 OR redeemed_by = $1"
+                    ),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] referral_codes 삭제 실패 (uid=%s)", uid)
+
+            # 13. community_posts — 소프트삭제 (커뮤니티 게시글 무결성 유지)
+            try:
+                await conn.execute(
+                    _to_psycopg(
+                        "UPDATE community_posts SET deleted_at = NOW() WHERE user_id = $1 AND deleted_at IS NULL"
+                    ),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] community_posts 소프트삭제 실패 (uid=%s)", uid)
+
+            # 14. community_comments — 소프트삭제
+            try:
+                await conn.execute(
+                    _to_psycopg(
+                        "UPDATE community_comments SET deleted_at = NOW() WHERE user_id = $1 AND deleted_at IS NULL"
+                    ),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] community_comments 소프트삭제 실패 (uid=%s)", uid)
+
+            # 15. community_empathies (user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM community_empathies WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] community_empathies 삭제 실패 (uid=%s)", uid)
+
+            # 16. pending_empathy_notifications (author_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg(
+                        "DELETE FROM pending_empathy_notifications WHERE author_id = $1"
+                    ),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception(
+                    "[delete_account] pending_empathy_notifications 삭제 실패 (uid=%s)", uid
+                )
+
+            # 17. notifications (user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM notifications WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] notifications 삭제 실패 (uid=%s)", uid)
+
+            # 18. post_reports (reporter_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM post_reports WHERE reporter_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] post_reports 삭제 실패 (uid=%s)", uid)
+
+            # 19. user_diary_entries (user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM user_diary_entries WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] user_diary_entries 삭제 실패 (uid=%s)", uid)
+
+            # 20. fcm_tokens (user_id = uid)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM fcm_tokens WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] fcm_tokens 삭제 실패 (uid=%s)", uid)
+
+            # 21. deletion_log 기록 (계정 삭제 이력)
+            try:
+                await conn.execute(
+                    _to_psycopg(
+                        "INSERT INTO deletion_log (room_id, character_id, deleted_by) VALUES ($1, $2, $3)"
+                    ),
+                    (uid, "", "account_delete"),
+                )
+            except Exception:
+                logger.exception("[delete_account] deletion_log 기록 실패 (uid=%s)", uid)
+
+            # 22. users — 마지막 (FK 의존성 고려)
+            try:
+                await conn.execute(
+                    _to_psycopg("DELETE FROM users WHERE user_id = $1"),
+                    (uid,),
+                )
+            except Exception:
+                logger.exception("[delete_account] users 삭제 실패 (uid=%s)", uid)
+
+        logger.info("[delete_account] 계정 삭제 완료 (uid=%s)", uid)
 
     async def record_investment_event(
         self,
