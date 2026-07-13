@@ -1,11 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Optional
 import json
 import os
 import random
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from app.auth_middleware import require_auth_always
 from app.postgres_async import get_async_db
+
+limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/api/v1/community", tags=["community"])
 
@@ -52,7 +56,9 @@ class CommentCreate(BaseModel):
 
 
 @router.post("/posts", status_code=201)
+@limiter.limit("20/minute")
 async def create_post(
+    request: Request,
     body: PostCreate,
     user: dict = Depends(require_auth_always),
     db=Depends(get_async_db),
@@ -301,7 +307,9 @@ async def delete_post(
 
 
 @router.post("/posts/{post_id}/empathy")
+@limiter.limit("20/minute")
 async def toggle_empathy(
+    request: Request,
     post_id: int,
     body: EmpathyToggle,
     user: dict = Depends(require_auth_always),
@@ -372,7 +380,9 @@ async def report_post(
 
 
 @router.post("/posts/{post_id}/comments", status_code=201)
+@limiter.limit("20/minute")
 async def create_comment(
+    request: Request,
     post_id: int,
     body: CommentCreate,
     user: dict = Depends(require_auth_always),
