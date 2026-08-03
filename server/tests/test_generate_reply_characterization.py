@@ -181,3 +181,103 @@ async def test_generate_reply_quality_gate_regenerates(patch_common, monkeypatch
     assert fake_client.chat.completions.call_count == 2
     assert parts[0].text == "안녕! 반가워"
     assert parts[0].emotion == "HAPPY"
+
+
+# 2026-08-03 P2(회의 항목2): usage.prompt_tokens_details.cached_tokens를 아무도
+# 읽지 않아 prefix cache 히트율이 완전 미지였다. _emit_background_metrics가
+# _record_usage에 cached_tokens를 안전 추출해 전달하는지 검증한다.
+@pytest.mark.asyncio
+async def test_generate_reply_forwards_cached_tokens_to_record_usage(patch_common, monkeypatch):
+    class _UsageWithCache(_FakeUsage):
+        def __init__(self):
+            super().__init__()
+            self.prompt_tokens_details = types.SimpleNamespace(cached_tokens=256)
+
+    class _ResponseWithCache(_FakeResponse):
+        def __init__(self, content):
+            self.choices = [_FakeChoice(content)]
+            self.usage = _UsageWithCache()
+
+    class _CompletionsWithCache:
+        async def create(self, **kwargs):
+            return _ResponseWithCache('[{"text": "안녕!", "emotion": "HAPPY"}]')
+
+    fake_client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=_CompletionsWithCache())
+    )
+    monkeypatch.setattr(chat_service, "client", fake_client)
+
+    tracked: list[tuple[str, object]] = []
+
+    def _capture_tracked(coro, name=""):
+        tracked.append((name, coro))
+        return None
+
+    monkeypatch.setattr(chat_service, "create_tracked_task", _capture_tracked)
+
+    recorded: list[dict] = []
+
+    async def _fake_record_usage(
+        room_id, character_id, model_id, prompt_tokens, completion_tokens,
+        endpoint="chat", cached_tokens=0,
+    ):
+        recorded.append(dict(cached_tokens=cached_tokens))
+
+    monkeypatch.setattr(chat_service, "_record_usage", _fake_record_usage)
+
+    parts, delta = await chat_service.generate_reply(**_base_kwargs())
+    assert parts
+
+    usage_task = next((c for n, c in tracked if n == "record-usage"), None)
+    assert usage_task is not None
+    await usage_task
+
+    for name, coro in tracked:
+        if name != "record-usage":
+            try:
+                coro.close()
+            except Exception:
+                pass
+
+    assert recorded == [{"cached_tokens": 256}]
+
+
+@pytest.mark.asyncio
+async def test_generate_reply_cached_tokens_defaults_to_zero_without_details(patch_common, monkeypatch):
+    """usage에 prompt_tokens_details가 없으면(구버전 응답 등) 0으로 안전 기록."""
+    fake_client = _FakeClient(['[{"text": "안녕!", "emotion": "HAPPY"}]'])
+    monkeypatch.setattr(chat_service, "client", fake_client)
+
+    tracked: list[tuple[str, object]] = []
+
+    def _capture_tracked(coro, name=""):
+        tracked.append((name, coro))
+        return None
+
+    monkeypatch.setattr(chat_service, "create_tracked_task", _capture_tracked)
+
+    recorded: list[dict] = []
+
+    async def _fake_record_usage(
+        room_id, character_id, model_id, prompt_tokens, completion_tokens,
+        endpoint="chat", cached_tokens=0,
+    ):
+        recorded.append(dict(cached_tokens=cached_tokens))
+
+    monkeypatch.setattr(chat_service, "_record_usage", _fake_record_usage)
+
+    parts, delta = await chat_service.generate_reply(**_base_kwargs())
+    assert parts
+
+    usage_task = next((c for n, c in tracked if n == "record-usage"), None)
+    assert usage_task is not None
+    await usage_task
+
+    for name, coro in tracked:
+        if name != "record-usage":
+            try:
+                coro.close()
+            except Exception:
+                pass
+
+    assert recorded == [{"cached_tokens": 0}]

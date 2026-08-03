@@ -314,7 +314,8 @@ async def test_streaming_records_api_usage_when_usage_chunk_present(patch_deps, 
     recorded: list[dict] = []
 
     async def _fake_record_usage(
-        room_id, character_id, model_id, prompt_tokens, completion_tokens, endpoint="chat"
+        room_id, character_id, model_id, prompt_tokens, completion_tokens,
+        endpoint="chat", cached_tokens=0,
     ):
         recorded.append(dict(
             room_id=room_id,
@@ -323,6 +324,7 @@ async def test_streaming_records_api_usage_when_usage_chunk_present(patch_deps, 
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             endpoint=endpoint,
+            cached_tokens=cached_tokens,
         ))
 
     monkeypatch.setattr(chat_service, "_record_usage", _fake_record_usage)
@@ -346,6 +348,56 @@ async def test_streaming_records_api_usage_when_usage_chunk_present(patch_deps, 
     # 스트림 경로는 반드시 endpoint="stream"으로 구분 기록해야 한다
     # (generate_reply의 기본값 "chat"과 혼동되면 안 됨).
     assert rec["endpoint"] == "stream"
+    # 2026-08-03 P2(회의 항목2): usage에 prompt_tokens_details가 없으면(구버전
+    # SDK/이 테스트의 usage처럼) cached_tokens는 안전하게 0으로 기록된다.
+    assert rec["cached_tokens"] == 0
+
+    for name, coro in tracked:
+        if name != "record-usage":
+            coro.close()
+
+
+# 2026-08-03 P2(회의 항목2): usage.prompt_tokens_details.cached_tokens가 있으면
+# _record_usage에 cached_tokens로 그대로 전달돼야 한다(prefix cache 히트율 계측).
+@pytest.mark.asyncio
+async def test_streaming_records_cached_tokens_when_present(patch_deps, monkeypatch):
+    usage = types.SimpleNamespace(
+        prompt_tokens=500,
+        completion_tokens=40,
+        total_tokens=540,
+        prompt_tokens_details=types.SimpleNamespace(cached_tokens=384),
+    )
+    patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'], usage=usage)
+
+    tracked: list[tuple[str, object]] = []
+
+    def _capture_tracked(coro, name=""):
+        tracked.append((name, coro))
+        return None
+
+    monkeypatch.setattr(chat_service, "create_tracked_task", _capture_tracked)
+
+    recorded: list[dict] = []
+
+    async def _fake_record_usage(
+        room_id, character_id, model_id, prompt_tokens, completion_tokens,
+        endpoint="chat", cached_tokens=0,
+    ):
+        recorded.append(dict(cached_tokens=cached_tokens))
+
+    monkeypatch.setattr(chat_service, "_record_usage", _fake_record_usage)
+
+    parts, done = await _collect(
+        chat_service.stream_reply(**_base_kwargs(room_id="room-cache", character_id="char-cache"))
+    )
+    assert done is not None
+    assert parts
+
+    usage_task = next((c for n, c in tracked if n == "record-usage"), None)
+    assert usage_task is not None
+    await usage_task
+
+    assert recorded == [{"cached_tokens": 384}]
 
     for name, coro in tracked:
         if name != "record-usage":

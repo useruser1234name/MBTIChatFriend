@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 import openai
 from datetime import datetime, timezone
 from typing import Optional, Tuple
@@ -465,6 +466,8 @@ async def _run_chat_pipeline(
     user: Optional[dict],
     crisis_tier: int = 0,
     crisis_hint: str = "",
+    request_start_ts: Optional[float] = None,
+    gate_ms: float = 0.0,
 ) -> dict:
     """논스트림 경로: 준비 → 전체 응답 생성 → 후처리.
 
@@ -472,6 +475,11 @@ async def _run_chat_pipeline(
     전달한다. 이전에는 select_model_for_crisis 결과가 로그·이벤트 payload에만
     쓰이고 generate_reply에 넘어가지 않아 Tier1 턴도 mini로 처리될 수 있었고,
     위기 대응 지침은 도달 불가한 LoRA 경로에만 붙어 사실상 미적용이었다.
+
+    request_start_ts/gate_ms(2026-08-03 P1, 회의 항목1): 호출부(send_message/
+    stream_message)가 요청 진입 시각(time.monotonic())과 _gate_user 소요를
+    측정해 넘겨주면 generate_reply가 turn_latency에 t_e2e_total_ms/t_gate_ms를
+    함께 남긴다. 기본값(None/0.0)이면 기존 동작과 동일.
     """
     prep = await _prepare_chat_turn(req, user)
     replies, affinity_delta = await generate_reply(
@@ -489,6 +497,8 @@ async def _run_chat_pipeline(
         time_context=build_time_context(req.client_local_hour),
         crisis_tier=crisis_tier,
         crisis_hint=crisis_hint,
+        request_start_ts=request_start_ts,
+        gate_ms=gate_ms,
     )
     return await _finalize_chat_turn(
         req,
@@ -554,12 +564,17 @@ async def send_message(
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
     """기존 REST 방식 (하위 호환)"""
+    # P1(2026-08-03, 회의 항목1): 요청 진입 시각 — turn_latency의 t_e2e_total_ms/
+    # t_gate_ms 계측 기준점. 콘텐츠 필터보다도 먼저 캡처해야 진짜 "요청 진입"이 된다.
+    _req_t0 = time.monotonic()
+
     # H-1: 콘텐츠 필터
     is_safe, reason = check_content(req.message)
     if not is_safe:
         raise HTTPException(status_code=400, detail=reason)
 
     await _gate_user(req, user, request)
+    _t_gate_ms = (time.monotonic() - _req_t0) * 1000
 
     # W1-1: 위기 개입 키워드 감지 v2 — 맥락 인식, 관용 표현 필터 강화
     is_crisis, crisis_tier = detect_crisis_v2(
@@ -577,7 +592,8 @@ async def send_message(
     _effective_tier = crisis_tier if is_crisis else 0
 
     result = await _run_chat_pipeline(
-        req, user, crisis_tier=_effective_tier, crisis_hint=crisis_type_hint
+        req, user, crisis_tier=_effective_tier, crisis_hint=crisis_type_hint,
+        request_start_ts=_req_t0, gate_ms=_t_gate_ms,
     )
 
     replies = result["replies"]
@@ -700,6 +716,8 @@ async def _openai_event_generator(
     done_event,
     crisis_tier: int = 0,
     crisis_hint: str = "",
+    request_start_ts: Optional[float] = None,
+    gate_ms: float = 0.0,
 ):
     """OpenAI 경로 SSE 제너레이터: 말풍선이 완결되는 즉시 전송해 TTFB를 단축한다.
 
@@ -711,6 +729,10 @@ async def _openai_event_generator(
 
     crisis_tier/crisis_hint(2026-08-03 P0-S3): 위기 감지 결과를 stream_reply로
     전달해 모델 승격 + 위기 지침 주입이 실제로 적용되게 한다.
+
+    request_start_ts/gate_ms(2026-08-03 P1, 회의 항목1): stream_message가
+    측정한 요청 진입 시각/게이트 소요를 stream_reply까지 전달해
+    turn_latency에 t_e2e_first_bubble_ms/t_gate_ms를 남긴다.
     """
     prep = await _prepare_chat_turn(req, user)
     room_id = prep["room_id"]
@@ -739,6 +761,8 @@ async def _openai_event_generator(
             time_context=build_time_context(req.client_local_hour),
             crisis_tier=crisis_tier,
             crisis_hint=crisis_hint,
+            request_start_ts=request_start_ts,
+            gate_ms=gate_ms,
         ):
             if isinstance(item, StreamDone):
                 affinity_delta = item.affinity_delta
@@ -773,12 +797,17 @@ async def stream_message(
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
     """SSE 스트리밍 방식 - 메시지를 실시간으로 분할 전송"""
+    # P1(2026-08-03, 회의 항목1): 요청 진입 시각 — turn_latency의
+    # t_e2e_first_bubble_ms/t_gate_ms 계측 기준점.
+    _req_t0 = time.monotonic()
+
     # H-1: 콘텐츠 필터
     is_safe, reason = check_content(req.message)
     if not is_safe:
         raise HTTPException(status_code=400, detail=reason)
 
     await _gate_user(req, user, request)
+    _t_gate_ms = (time.monotonic() - _req_t0) * 1000
 
     # W1-1: 위기 개입 감지 v2 — 맥락 인식, 관용 표현 필터 강화
     is_crisis, crisis_tier = detect_crisis_v2(
@@ -848,7 +877,8 @@ async def stream_message(
         # LoRA 경로: 전체 파이프라인으로 replies/메타 확보 후 토큰 스트리밍 (기존 동작 유지)
         # 폴백 replies도 위기 인지 상태로 생성되도록 crisis 정보를 함께 전달한다.
         result = await _run_chat_pipeline(
-            req, user, crisis_tier=_effective_tier, crisis_hint=crisis_type_hint
+            req, user, crisis_tier=_effective_tier, crisis_hint=crisis_type_hint,
+            request_start_ts=_req_t0, gate_ms=_t_gate_ms,
         )
         replies = list(result["replies"])
         if _crisis_reply is not None:
@@ -864,6 +894,7 @@ async def stream_message(
     return EventSourceResponse(_openai_event_generator(
         req, user, _crisis_reply, _record_crisis, _message_event, _done_event,
         crisis_tier=_effective_tier, crisis_hint=crisis_type_hint,
+        request_start_ts=_req_t0, gate_ms=_t_gate_ms,
     ))
 
 

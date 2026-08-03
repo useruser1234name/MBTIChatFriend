@@ -420,7 +420,7 @@ async def test_send_message_endpoint_wires_detected_crisis(patch_router, monkeyp
     """실제 detect_crisis_v2/_build_crisis_hint 결과가 파이프라인까지 전달된다."""
     captured = {}
 
-    async def _fake_pipeline(req, user, crisis_tier=0, crisis_hint=""):
+    async def _fake_pipeline(req, user, crisis_tier=0, crisis_hint="", **_kwargs):
         captured["crisis_tier"] = crisis_tier
         captured["crisis_hint"] = crisis_hint
         return {
@@ -446,7 +446,7 @@ async def test_send_message_endpoint_wires_detected_crisis(patch_router, monkeyp
 async def test_send_message_endpoint_no_crisis_passes_defaults(patch_router, monkeypatch):
     captured = {}
 
-    async def _fake_pipeline(req, user, crisis_tier=0, crisis_hint=""):
+    async def _fake_pipeline(req, user, crisis_tier=0, crisis_hint="", **_kwargs):
         captured["crisis_tier"] = crisis_tier
         captured["crisis_hint"] = crisis_hint
         return {
@@ -471,7 +471,7 @@ async def test_stream_message_endpoint_wires_detected_crisis(patch_router, monke
     captured = {}
 
     async def _fake_generator(req, user, crisis_reply, record_crisis, message_event,
-                              done_event, crisis_tier=0, crisis_hint=""):
+                              done_event, crisis_tier=0, crisis_hint="", **_kwargs):
         captured["crisis_tier"] = crisis_tier
         captured["crisis_hint"] = crisis_hint
         if False:

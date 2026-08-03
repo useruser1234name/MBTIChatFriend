@@ -233,14 +233,20 @@ class AsyncDatabase:
         prompt_tokens: int,
         completion_tokens: int,
         endpoint: str = "chat",
+        cached_tokens: int = 0,
     ) -> None:
-        """OpenAI API 사용량 기록 — H-3 비용 메트릭 수집."""
+        """OpenAI API 사용량 기록 — H-3 비용 메트릭 수집.
+
+        cached_tokens(2026-08-03 P2): prefix cache 히트 토큰 수(기본값 0).
+        api_usage 테이블 컬럼은 postgres.py 스키마 초기화에서
+        ALTER TABLE ... ADD COLUMN IF NOT EXISTS로 추가된다.
+        """
         await self.execute(
             """
             INSERT INTO api_usage
                 (room_id, character_id, model_id, prompt_tokens,
-                 completion_tokens, total_tokens, endpoint)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 completion_tokens, total_tokens, endpoint, cached_tokens)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             room_id,
             character_id,
@@ -249,6 +255,7 @@ class AsyncDatabase:
             completion_tokens,
             prompt_tokens + completion_tokens,
             endpoint,
+            cached_tokens,
         )
 
     async def check_daily_budget(

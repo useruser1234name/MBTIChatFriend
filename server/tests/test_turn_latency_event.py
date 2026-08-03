@@ -206,3 +206,151 @@ async def test_generate_reply_records_turn_latency_event(patch_deps, monkeypatch
     for key in ("t_memory_ms", "t_rag_ms", "t_first_token_ms"):
         assert key in payload
     assert payload["streaming"] is False
+
+
+# ── P1(2026-08-03, 회의 항목1): end-to-end TTFT 계측(t_gate 포함) ──────────
+#
+# 기존에는 t_gate(라우터 게이트 단계)를 의도적으로 제외하고 t_first_token도
+# LLM 호출 시작 기준이라 사용자 체감 TTFT를 대표하지 못했다. 라우터가
+# request_start_ts(요청 진입 시각)/gate_ms(게이트 소요)를 넘기면 스트리밍은
+# t_e2e_first_bubble_ms(요청 진입~첫 말풍선 yield 직전), 논스트림은
+# t_e2e_total_ms(요청 진입~응답 완성)를 turn_latency payload에 남긴다.
+
+
+@pytest.mark.asyncio
+async def test_stream_reply_records_t_gate_and_e2e_first_bubble(patch_deps, monkeypatch):
+    tracked = patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'])
+
+    recorded: list[dict] = []
+
+    async def _fake_record_event_async(event_type, room_id="", character_id="", user_id="", payload=None):
+        recorded.append(dict(event_type=event_type, payload=payload or {}))
+
+    monkeypatch.setattr(chat_service, "record_event_async", _fake_record_event_async)
+
+    import time as _time
+    _req_t0 = _time.monotonic() - 0.05  # 요청 진입이 50ms 전이었다고 가정
+
+    parts, done = await _collect(
+        chat_service.stream_reply(
+            **_base_kwargs(room_id="room-e2e"),
+            request_start_ts=_req_t0,
+            gate_ms=12.3,
+        )
+    )
+    assert done is not None
+    assert parts
+
+    latency_task = next((c for n, c in tracked if n == "turn-latency"), None)
+    assert latency_task is not None
+    await latency_task
+    await _close_untracked(tracked, "turn-latency")
+
+    payload = recorded[0]["payload"]
+    assert payload["t_gate_ms"] == 12.3
+    assert "t_e2e_first_bubble_ms" in payload
+    assert payload["t_e2e_first_bubble_ms"] >= 40  # ~50ms 경과가 반영돼야 함
+    # 논스트림 전용 필드는 스트리밍 payload에 섞이지 않는다
+    assert "t_e2e_total_ms" not in payload
+
+
+@pytest.mark.asyncio
+async def test_stream_reply_e2e_field_absent_without_request_start_ts(patch_deps, monkeypatch):
+    """request_start_ts 미전달(라우터 미배선/기존 호출부) → 기존 동작과 동일."""
+    tracked = patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'])
+
+    recorded: list[dict] = []
+
+    async def _fake_record_event_async(event_type, room_id="", character_id="", user_id="", payload=None):
+        recorded.append(dict(payload=payload or {}))
+
+    monkeypatch.setattr(chat_service, "record_event_async", _fake_record_event_async)
+
+    parts, done = await _collect(chat_service.stream_reply(**_base_kwargs(room_id="room-e2e-default")))
+    assert done is not None
+
+    latency_task = next((c for n, c in tracked if n == "turn-latency"), None)
+    await latency_task
+    await _close_untracked(tracked, "turn-latency")
+
+    payload = recorded[0]["payload"]
+    assert payload["t_gate_ms"] == 0.0
+    assert "t_e2e_first_bubble_ms" not in payload
+
+
+@pytest.mark.asyncio
+async def test_generate_reply_records_t_gate_and_e2e_total(patch_deps, monkeypatch):
+    tracked = patch_deps([])
+
+    async def _fake_create(**kwargs):
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(
+                    content='[{"text":"안녕","emotion":"HAPPY"}]'
+                )
+            )],
+            usage=types.SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+    monkeypatch.setattr(chat_service.client.chat.completions, "create", _fake_create)
+
+    recorded: list[dict] = []
+
+    async def _fake_record_event_async(event_type, room_id="", character_id="", user_id="", payload=None):
+        recorded.append(dict(payload=payload or {}))
+
+    monkeypatch.setattr(chat_service, "record_event_async", _fake_record_event_async)
+
+    import time as _time
+    _req_t0 = _time.monotonic() - 0.03
+
+    replies, _ = await chat_service.generate_reply(
+        **_base_kwargs(room_id="room-e2e-total"),
+        request_start_ts=_req_t0,
+        gate_ms=5.5,
+    )
+    assert replies
+
+    latency_task = next((c for n, c in tracked if n == "turn-latency"), None)
+    assert latency_task is not None
+    await latency_task
+    await _close_untracked(tracked, "turn-latency")
+
+    payload = recorded[0]["payload"]
+    assert payload["t_gate_ms"] == 5.5
+    assert "t_e2e_total_ms" in payload
+    assert payload["t_e2e_total_ms"] >= 20
+    assert "t_e2e_first_bubble_ms" not in payload
+
+
+@pytest.mark.asyncio
+async def test_generate_reply_e2e_field_absent_without_request_start_ts(patch_deps, monkeypatch):
+    tracked = patch_deps([])
+
+    async def _fake_create(**kwargs):
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content='[{"text":"안녕","emotion":"HAPPY"}]')
+            )],
+            usage=types.SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+    monkeypatch.setattr(chat_service.client.chat.completions, "create", _fake_create)
+
+    recorded: list[dict] = []
+
+    async def _fake_record_event_async(event_type, room_id="", character_id="", user_id="", payload=None):
+        recorded.append(dict(payload=payload or {}))
+
+    monkeypatch.setattr(chat_service, "record_event_async", _fake_record_event_async)
+
+    replies, _ = await chat_service.generate_reply(**_base_kwargs(room_id="room-e2e-total-default"))
+    assert replies
+
+    latency_task = next((c for n, c in tracked if n == "turn-latency"), None)
+    await latency_task
+    await _close_untracked(tracked, "turn-latency")
+
+    payload = recorded[0]["payload"]
+    assert payload["t_gate_ms"] == 0.0
+    assert "t_e2e_total_ms" not in payload

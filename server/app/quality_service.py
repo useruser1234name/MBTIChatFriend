@@ -36,12 +36,20 @@ async def score_response_async(
     affinity_level: int,
     room_id: str = "",
     character_id: str = "",
+    quick_score_value: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """gpt-4.1-mini 를 사용해 응답 품질 4가지 축을 0-10으로 평가.
 
     반환: {"mbti_consistency", "contextual_relevance",
            "emotional_naturalness", "engagement_quality",
            "quality_score"} 또는 실패 시 None
+
+    quick_score_value(2026-08-03 M4-①): 게이트(quick_score, 임계값 0.4)
+    판정에만 쓰이고 값 자체는 어디에도 남지 않아 분포를 알 수 없던 문제의
+    계측 수정. 호출부(chat_service._post_response_quality_check)가 이미
+    계산한 quick_score를 그대로 받아 quality_score 이벤트 payload에
+    "quick_score" 키로 함께 기록한다 — 게이트 임계값/판정 로직은 건드리지
+    않는 순수 계측 필드(기본값 None이면 기존 호출부와 동일하게 동작).
     """
     if not _client:
         return None
@@ -86,6 +94,7 @@ async def score_response_async(
             "quality_score": quality_score,
             "quality_issues": quality_issues,
             "ai_response": ai_response,
+            "quick_score": quick_score_value,
         }
 
         # metric_events 에 저장 (P2: 핫패스 async 전환 — 이 함수는 이미

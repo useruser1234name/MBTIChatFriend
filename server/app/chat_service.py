@@ -765,7 +765,7 @@ async def _quality_gate_regenerate(
     openai_cb,
     room_id: str,
     character_id: str,
-) -> Tuple[List[ReplyPart], str]:
+) -> Tuple[List[ReplyPart], str, float]:
     """품질 게이트: 저품질 응답(score < QUALITY_GATE_THRESHOLD) 감지 시 1회 재생성,
     점수 비교 후 더 좋은 쪽을 채택한다.
 
@@ -773,7 +773,11 @@ async def _quality_gate_regenerate(
     남기므로 별개 — 이 함수의 대상이 아님). 호출부에서 이미
     `score < QUALITY_GATE_THRESHOLD` 판정을 마친 뒤 호출됨을 전제로 한다.
 
-    Returns (replies, content) — 재시도가 원본보다 낫지 않으면 입력을 그대로 반환.
+    Returns (replies, content, effective_score) — 재시도가 원본보다 낫지 않으면
+    입력을 그대로 반환하고 effective_score도 원본 score를 유지한다.
+    effective_score(2026-08-03 M4-①): 실제로 채택된 응답의 quick_score —
+    게이트/재시도 로직은 그대로이며, 호출부가 quality_score 이벤트에
+    남길 최종 점수를 얻기 위해 추가된 반환값이다.
     """
     await _record_quality_gate_event(score, message, content, model_id, room_id, character_id)
     logger.info(f"품질 게이트 발동 (score={score}), 재생성 시도")
@@ -808,6 +812,7 @@ async def _quality_gate_regenerate(
         logger.warning("[CB] openai circuit OPEN — 품질 게이트 재시도 스킵")
         retry_response = None
 
+    effective_score = score
     if retry_response:
         retry_content = retry_response.choices[0].message.content or ""
         retry_replies = _parse_reply(retry_content)
@@ -821,12 +826,13 @@ async def _quality_gate_regenerate(
                 )
                 replies = retry_replies
                 content = retry_content
+                effective_score = retry_score
             else:
                 logger.info(
                     f"원본 유지 (orig={score} > retry={retry_score})"
                 )
 
-    return replies, content
+    return replies, content, effective_score
 
 
 async def _record_turn_latency_event(
@@ -840,6 +846,9 @@ async def _record_turn_latency_event(
     complexity: str = "",
     crisis_tier: int = 0,
     memory_cache_hit: bool = False,
+    t_gate_ms: float = 0.0,
+    t_e2e_first_bubble_ms: Optional[float] = None,
+    t_e2e_total_ms: Optional[float] = None,
 ) -> None:
     """턴 단계별 레이턴시(P1 계측)를 turn_latency 이벤트로 기록.
 
@@ -847,8 +856,6 @@ async def _record_turn_latency_event(
     동일하게 create_tracked_task로 fire-and-forget 스케줄되어 메인 응답
     경로를 블로킹하지 않는다. P2: record_event_async로 전환해 이 백그라운드
     태스크 내부에서도 이벤트 루프를 블로킹하지 않도록 정리했다.
-    t_gate(라우터 게이트 단계)는 이번 계측에 포함하지 않음 — 라우터
-    호출부까지 시그니처를 확장하는 대신 최소 변경으로 3구간만 계측.
 
     complexity(2026-08-03 P0-S2): 복잡도 분류기 판정("simple"|"complex").
     실제 사용 모델은 기존 model_id 필드가 그대로 담고 있으므로, 둘을 대조하면
@@ -862,6 +869,16 @@ async def _record_turn_latency_event(
     memory_cache_hit(2026-08-03 P1-S4): 기억 컨텍스트 조회가 DB 왕복 없이
     처리됐는지(positive 캐시/네거티브 캐시/postgres 비활성). t_memory_ms와
     대조하면 네거티브 캐시가 신규 방의 반복 조회를 실제로 없앴는지 검증된다.
+
+    2026-08-03 P1(회의 항목1): 기존에는 t_gate(라우터 게이트 단계)를 의도적으로
+    제외하고 t_first_token도 LLM 호출 시작 기준이라 사용자 체감 end-to-end
+    TTFT를 대표하지 못했다. 라우터(routers/chat.py)가 요청 진입 시각부터
+    측정한 t_gate_ms(게이트 단계 소요)와 t_e2e_first_bubble_ms(스트리밍,
+    요청 진입~첫 말풍선 SSE 전송 직전)/t_e2e_total_ms(논스트림, 요청 진입~
+    응답 완성)를 넘겨주면 payload에 포함한다. 라우터가 값을 넘기지 않는
+    호출부(기존 테스트 등)는 t_gate_ms=0.0, e2e 필드는 아예 payload에서
+    빠져 기존 동작과 동일하다 — 게이트/재생성 판정 로직에는 전혀 관여하지
+    않는 순수 계측 필드.
     """
     payload = {
         "model_id": model_id,
@@ -872,11 +889,16 @@ async def _record_turn_latency_event(
         "complexity": complexity,
         "crisis_tier": crisis_tier,
         "t_memory_cache_hit": bool(memory_cache_hit),
+        "t_gate_ms": round(t_gate_ms, 2),
     }
+    if t_e2e_first_bubble_ms is not None:
+        payload["t_e2e_first_bubble_ms"] = round(t_e2e_first_bubble_ms, 2)
+    if t_e2e_total_ms is not None:
+        payload["t_e2e_total_ms"] = round(t_e2e_total_ms, 2)
     logger.info(
-        "[latency] room=%s model=%s complexity=%s crisis_tier=%s streaming=%s memory=%.1fms(cache_hit=%s) rag=%.1fms first_token=%.1fms",
+        "[latency] room=%s model=%s complexity=%s crisis_tier=%s streaming=%s memory=%.1fms(cache_hit=%s) rag=%.1fms first_token=%.1fms gate=%.1fms",
         room_id, model_id, complexity, crisis_tier, streaming, t_memory_ms,
-        bool(memory_cache_hit), t_rag_ms, t_first_token_ms,
+        bool(memory_cache_hit), t_rag_ms, t_first_token_ms, t_gate_ms,
     )
     try:
         await record_event_async(
@@ -1217,6 +1239,22 @@ async def _assemble_prompt_and_model(
     return messages, model_id, ab_variant, active_client, lora_base_url, complexity
 
 
+def _extract_cached_tokens(usage) -> int:
+    """OpenAI usage 객체에서 prefix cache 히트 토큰 수를 안전하게 추출한다.
+
+    2026-08-03 P2(회의 항목2): `usage.prompt_tokens_details.cached_tokens`를
+    아무도 읽지 않아 prefix cache 히트율이 완전 미지였다. usage 자체가
+    없거나(목업/실패 응답) prompt_tokens_details가 없는 구버전 SDK/엔드포인트
+    (예: LoRA/Together AI)에서도 getattr 체인으로 안전하게 0을 반환한다.
+    """
+    if usage is None:
+        return 0
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is None:
+        return 0
+    return getattr(details, "cached_tokens", 0) or 0
+
+
 def _emit_background_metrics(
     response,
     model_id: str,
@@ -1229,6 +1267,7 @@ def _emit_background_metrics(
     mbti: str,
     affinity_level: int,
     complexity: str = "",
+    quick_score_value: Optional[float] = None,
 ) -> None:
     """LLM 응답 후 비용/AB 테스트/품질 평가를 백그라운드(fire-and-forget)로 기록.
 
@@ -1240,6 +1279,12 @@ def _emit_background_metrics(
     다르다. 모든 부수효과는 create_tracked_task로 스케줄링되며 태스크
     소유권은 background_tasks 모듈이 관리하므로 본문이 별도로 정리할
     필요가 없다(반환값 없음).
+
+    quick_score_value(2026-08-03 M4-①, 회의 항목3): 호출부(generate_reply)가
+    게이트 판정에 이미 사용한 quick_score 값을 그대로 전달받아 quality_score
+    payload에 실어 분포를 남긴다(재계산하지 않음). None이면(예: replies가
+    비어 quick_score를 계산하지 못한 경우) score_response_async에도 None이
+    그대로 전달된다.
     """
     # H-3: 비용 메트릭 백그라운드 기록
     usage = getattr(response, "usage", None)
@@ -1250,6 +1295,7 @@ def _emit_background_metrics(
             model_id=model_id,
             prompt_tokens=getattr(usage, "prompt_tokens", 0),
             completion_tokens=getattr(usage, "completion_tokens", 0),
+            cached_tokens=_extract_cached_tokens(usage),
         ), name="record-usage")
 
     # A/B 테스트 결과 기록 (백그라운드)
@@ -1276,6 +1322,7 @@ def _emit_background_metrics(
             affinity_level,
             room_id=room_id,
             character_id=character_id,
+            quick_score_value=quick_score_value,
         ),
         name="quality-check",
     )
@@ -1303,6 +1350,8 @@ async def generate_reply(
     time_context: str = "",
     crisis_tier: int = 0,
     crisis_hint: str = "",
+    request_start_ts: Optional[float] = None,
+    gate_ms: float = 0.0,
 ) -> Tuple[List[ReplyPart], int]:
     """LLM을 사용하여 대화 응답 생성, (replies, affinity_delta) 반환.
 
@@ -1315,6 +1364,12 @@ async def generate_reply(
     _build_crisis_hint 결과를 넘긴다. tier>=1이면 복잡도/A/B 판정과 무관하게
     상위 모델로 승격하고, hint는 시스템 프롬프트 맨 끝에 주입되어 캐릭터
     응답 자체가 위기 상황을 인지하게 한다. 기본값(0/"")이면 기존 동작 그대로.
+
+    request_start_ts/gate_ms(2026-08-03 P1, 회의 항목1): 라우터(routers/chat.py)가
+    요청 진입 시각(time.monotonic())과 게이트(_gate_user) 소요를 넘겨주면
+    turn_latency 이벤트에 t_e2e_total_ms(요청 진입~응답 완성)와 t_gate_ms를
+    함께 남긴다. 기본값(None/0.0)이면 두 필드 중 t_e2e_total_ms는 payload에서
+    빠지고 t_gate_ms는 0.0으로 기록되어 기존 동작과 동일하다 — 순수 계측용.
     """
 
     if conversation_history is None:
@@ -1442,10 +1497,13 @@ async def generate_reply(
         llm_call_count = 1
 
         # 품질 게이트: 매우 저품질 시 1회 재생성, 점수 비교 후 더 좋은 쪽 채택
+        # score(2026-08-03 M4-①): 최종적으로 채택된 응답의 quick_score를
+        # 아래 _emit_background_metrics까지 전달하기 위해 함수 스코프에 유지한다.
+        score: Optional[float] = None
         if replies:
             score = quick_score(message, content, mbti)
             if score < QUALITY_GATE_THRESHOLD:
-                replies, content = await _quality_gate_regenerate(
+                replies, content, score = await _quality_gate_regenerate(
                     replies, content, score, message, mbti, model_id, messages,
                     _active_client, _openai_cb, room_id, character_id,
                 )
@@ -1475,7 +1533,15 @@ async def generate_reply(
         _emit_background_metrics(
             response, model_id, room_id, character_id, _ab_variant, _elapsed_ms,
             message, result, mbti, affinity_level, complexity=_complexity,
+            quick_score_value=score,
         )
+
+        # P1(2026-08-03, 회의 항목1): 논스트림은 요청 진입~응답 완성(현재 시점)을
+        # t_e2e_total_ms로 계측한다. request_start_ts가 없으면(라우터 미배선/
+        # 기존 테스트) None으로 두어 payload에서 필드 자체가 빠진다.
+        _t_e2e_total_ms: Optional[float] = None
+        if request_start_ts is not None:
+            _t_e2e_total_ms = (time.monotonic() - request_start_ts) * 1000
 
         # P1: 턴 단계별 레이턴시 계측 기록 (t_first_token은 비스트리밍이므로
         # LLM 호출 전체 시간 _elapsed_ms로 대체)
@@ -1491,6 +1557,8 @@ async def generate_reply(
                 complexity=_complexity,
                 crisis_tier=crisis_tier,
                 memory_cache_hit=_mem.cache_hit,
+                t_gate_ms=gate_ms,
+                t_e2e_total_ms=_t_e2e_total_ms,
             ),
             name="turn-latency",
         )
@@ -1540,6 +1608,8 @@ async def stream_reply(
     time_context: str = "",
     crisis_tier: int = 0,
     crisis_hint: str = "",
+    request_start_ts: Optional[float] = None,
+    gate_ms: float = 0.0,
 ) -> AsyncGenerator[Union[ReplyPart, StreamDone], None]:
     """말풍선 점진 스트리밍 생성기.
 
@@ -1562,6 +1632,15 @@ async def stream_reply(
 
     crisis_tier/crisis_hint(2026-08-03 P0-S3): generate_reply와 동일 계약 —
     tier>=1이면 상위 모델 승격, hint는 시스템 프롬프트 꼬리에 주입.
+
+    request_start_ts/gate_ms(2026-08-03 P1, 회의 항목1): 라우터가 요청 진입
+    시각과 게이트 소요를 넘겨주면 t_e2e_first_bubble_ms(요청 진입~첫 말풍선
+    yield 직전)와 t_gate_ms를 turn_latency에 함께 남긴다. 첫 말풍선은 이
+    함수가 실제로 yield하는 시점을 기준으로 하므로, 위기(crisis) 문구처럼
+    라우터가 이 함수 호출 전에 별도로 먼저 yield하는 말풍선은 포함하지
+    않는다(비-crisis 턴이 절대다수라 근사치로 충분 — 순수 계측 필드).
+    기본값(None/0.0)이면 t_e2e_first_bubble_ms는 payload에서 빠지고
+    t_gate_ms는 0.0으로 기록되어 기존 동작과 동일하다.
     """
     if conversation_history is None:
         conversation_history = []
@@ -1613,6 +1692,8 @@ async def stream_reply(
 
     affinity_delta = 0
     full_text = ""
+    # M4-①(2026-08-03): step 12에서 계산해 step 14(품질 평가)까지 재사용한다.
+    _score: Optional[float] = None
     try:
         # 6. 기억 컨텍스트 (N턴 백그라운드 갱신 + 조회)
         mem_ctx = _mem.context
@@ -1670,6 +1751,9 @@ async def stream_reply(
         _t_start = time.monotonic()
         # P1 계측: LLM 호출 시작~첫 콘텐츠 청크 도착까지의 소요(t_first_token)
         _t_first_token_ms: Optional[float] = None
+        # P1(2026-08-03, 회의 항목1): 요청 진입~첫 말풍선 yield 직전까지의 소요.
+        # request_start_ts가 없으면(라우터 미배선/기존 테스트) None으로 남는다.
+        _t_e2e_first_bubble_ms: Optional[float] = None
         _stream_total_tokens = 0.0
         # P7: usage를 포함한 마지막 청크(비어있는 choices) 전체를 보관 —
         # api_usage 기록(_record_usage)에 prompt/completion_tokens가 필요.
@@ -1714,6 +1798,8 @@ async def stream_reply(
                 is_safe_part, _ = check_content(part.text)
                 if is_safe_part:
                     full_text += (" " if full_text else "") + part.text
+                    if _t_e2e_first_bubble_ms is None and request_start_ts is not None:
+                        _t_e2e_first_bubble_ms = (time.monotonic() - request_start_ts) * 1000
                     yield part
         _elapsed_ms = (time.monotonic() - _t_start) * 1000
         if _t_first_token_ms is None:
@@ -1726,13 +1812,17 @@ async def stream_reply(
                 is_safe_part, _ = check_content(part.text)
                 if is_safe_part:
                     full_text += (" " if full_text else "") + part.text
+                    if _t_e2e_first_bubble_ms is None and request_start_ts is not None:
+                        _t_e2e_first_bubble_ms = (time.monotonic() - request_start_ts) * 1000
                     yield part
 
         # 11. 그래도 비었으면 안전 기본 응답
         if not full_text:
+            if _t_e2e_first_bubble_ms is None and request_start_ts is not None:
+                _t_e2e_first_bubble_ms = (time.monotonic() - request_start_ts) * 1000
             yield ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
 
-        # 12. 저품질 텔레메트리 (재생성 없음)
+        # 12. 저품질 텔레메트리 (재생성 없음) — _score는 M4-①(step 14)에서 재사용
         if full_text:
             _score = quick_score(message, parser.raw or full_text, mbti)
             if _score < QUALITY_GATE_THRESHOLD:
@@ -1747,12 +1837,13 @@ async def stream_reply(
             warn_message="[stream] 호감도 분석 실패, 키워드 폴백",
         )
 
-        # 14. 백그라운드 품질 평가
+        # 14. 백그라운드 품질 평가 (quick_score_value: M4-①, step 12 결과 재사용)
         if full_text:
             create_tracked_task(
                 _post_response_quality_check(
                     message, full_text, mbti, affinity_level,
                     room_id=room_id, character_id=character_id,
+                    quick_score_value=_score,
                 ),
                 name="quality-check",
             )
@@ -1786,6 +1877,7 @@ async def stream_reply(
                 prompt_tokens=getattr(_stream_usage, "prompt_tokens", 0),
                 completion_tokens=getattr(_stream_usage, "completion_tokens", 0),
                 endpoint="stream",
+                cached_tokens=_extract_cached_tokens(_stream_usage),
             ), name="record-usage")
 
         # 16. P1: 턴 단계별 레이턴시 계측 기록
@@ -1801,6 +1893,8 @@ async def stream_reply(
                 complexity=_complexity,
                 crisis_tier=crisis_tier,
                 memory_cache_hit=_mem.cache_hit,
+                t_gate_ms=gate_ms,
+                t_e2e_first_bubble_ms=_t_e2e_first_bubble_ms,
             ),
             name="turn-latency",
         )
@@ -1845,6 +1939,7 @@ async def _record_usage(
     prompt_tokens: int,
     completion_tokens: int,
     endpoint: str = "chat",
+    cached_tokens: int = 0,
 ) -> None:
     """OpenAI API 사용량 비동기 기록 (H-3).
 
@@ -1852,6 +1947,10 @@ async def _record_usage(
     (하위 호환). P7: stream_reply가 endpoint="stream"으로 호출해 SSE 턴도
     api_usage에 구분 기록되도록 한다(이전에는 스트림 경로가 전혀 기록하지
     않아 _gate_user의 일일 예산/한도 계산이 SSE 트래픽을 누락했음).
+
+    cached_tokens(2026-08-03 P2, 회의 항목2): prefix cache 히트 토큰 수
+    (기본값 0 — 호출부가 넘기지 않으면 기존과 동일). 호출부에서
+    `_extract_cached_tokens`로 안전 추출한 값을 그대로 전달받는다.
     """
     try:
         # 지연 임포트: 순환/기동 순서 회피
@@ -1865,6 +1964,7 @@ async def _record_usage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 endpoint=endpoint,
+                cached_tokens=cached_tokens,
             )
     except Exception as e:
         logger.warning(f"API 사용량 기록 실패: {e}")
@@ -1924,8 +2024,14 @@ async def _post_response_quality_check(
     affinity_level: int,
     room_id: str = "",
     character_id: str = "",
+    quick_score_value: Optional[float] = None,
 ) -> None:
-    """응답 전송 후 fire-and-forget 으로 실행되는 품질 평가."""
+    """응답 전송 후 fire-and-forget 으로 실행되는 품질 평가.
+
+    quick_score_value(2026-08-03 M4-①): 호출부가 이미 계산한 quick_score를
+    score_response_async까지 그대로 전달해 quality_score 이벤트 payload에
+    남긴다(기본값 None — 기존 호출부/테스트는 영향 없음).
+    """
     try:
         await score_response_async(
             user_msg=user_msg,
@@ -1934,6 +2040,7 @@ async def _post_response_quality_check(
             affinity_level=affinity_level,
             room_id=room_id,
             character_id=character_id,
+            quick_score_value=quick_score_value,
         )
         if character_id:
             await check_diversity_async(character_id, ai_response, room_id=room_id)

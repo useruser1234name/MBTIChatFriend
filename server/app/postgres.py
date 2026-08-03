@@ -170,6 +170,13 @@ def init_postgres_schema() -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """,
+        # P2(2026-08-03, 회의 항목2): prefix cache 히트 토큰 수 계측 컬럼 추가.
+        # 기존 배포 환경은 CREATE TABLE IF NOT EXISTS가 재실행되지 않으므로
+        # ALTER TABLE ... ADD COLUMN IF NOT EXISTS로 별도 추가한다
+        # (response_feedback.user_id 추가와 동일 패턴).
+        """
+        ALTER TABLE api_usage ADD COLUMN IF NOT EXISTS cached_tokens INTEGER NOT NULL DEFAULT 0
+        """,
         """
         CREATE INDEX IF NOT EXISTS idx_api_usage_created_at
         ON api_usage(created_at DESC)
