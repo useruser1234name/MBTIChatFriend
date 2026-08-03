@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -188,6 +189,43 @@ class UserPreferences @Inject constructor(
             prefs.remove(stringPreferencesKey("expr_task_$characterId"))
         }
     }
+
+    // ── R1: 선톡(캐릭터가 먼저 말 걸기) 상태 ─────────────────────────────────
+    // 서버가 chat done/REST 응답으로 내려주는 next_hook과 마지막 대화 시각을
+    // 캐릭터별로 보관한다. Room 스키마 변경 없이 프로세스 재시작에도 유지되도록
+    // expr_task_$characterId와 동일한 "동적 키" DataStore 패턴을 따른다.
+    private fun nextHookKey(characterId: Long) = stringPreferencesKey("next_hook_$characterId")
+    private fun usedNextHookKey(characterId: Long) = stringPreferencesKey("next_hook_used_$characterId")
+    private fun lastChatAtKey(characterId: Long) = longPreferencesKey("last_chat_at_$characterId")
+
+    suspend fun setNextHook(characterId: Long, hook: String) {
+        context.dataStore.edit { prefs -> prefs[nextHookKey(characterId)] = hook }
+    }
+
+    suspend fun getNextHook(characterId: Long): String =
+        context.dataStore.data.map { prefs -> prefs[nextHookKey(characterId)] ?: "" }.first()
+
+    /**
+     * 선톡으로 소비한 훅을 기록하고 보관 훅을 제거한다.
+     * 소비 기록을 영속화하는 이유: 서버가 같은 next_hook을 다시 내려주더라도
+     * 동일한 훅으로 두 번 선톡하지 않기 위함(1회성 보장).
+     */
+    suspend fun consumeNextHook(characterId: Long, hook: String) {
+        context.dataStore.edit { prefs ->
+            prefs[usedNextHookKey(characterId)] = hook
+            prefs.remove(nextHookKey(characterId))
+        }
+    }
+
+    suspend fun getUsedNextHook(characterId: Long): String =
+        context.dataStore.data.map { prefs -> prefs[usedNextHookKey(characterId)] ?: "" }.first()
+
+    suspend fun setLastChatAt(characterId: Long, epochMs: Long) {
+        context.dataStore.edit { prefs -> prefs[lastChatAtKey(characterId)] = epochMs }
+    }
+
+    suspend fun getLastChatAt(characterId: Long): Long =
+        context.dataStore.data.map { prefs -> prefs[lastChatAtKey(characterId)] ?: 0L }.first()
 
     val isOpenBetaBannerDismissed: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.OPEN_BETA_BANNER_DISMISSED] ?: false

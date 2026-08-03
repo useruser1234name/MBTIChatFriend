@@ -235,12 +235,20 @@ class ChatViewModel @Inject constructor(
 
         // 신규 채팅방 진입 시 온보딩 첫 인사 (메시지 목록이 비어있을 때만, 중복 방지)
         viewModelScope.launch {
-            // messages StateFlow가 초기값(emptyList)을 방출할 때까지 대기
-            val initialMessages = messages.first()
+            // messages StateFlow는 초기값(emptyList)을 즉시 방출하므로 그걸 읽으면
+            // 기록이 있는 방에서도 매 진입마다 인사말이 발사된다 — Room의 실제
+            // 1차 방출을 직접 기다려 빈 방 여부를 판정한다.
+            val initialMessages = runCatching {
+                chatRepo.observeMessages(characterId).first()
+            }.getOrNull() ?: return@launch
             if (initialMessages.isEmpty()) {
                 sendInitialGreeting()
             }
         }
+
+        // R1: 선톡 연출 — 보관된 next_hook이 있고 충분히 오래 쉬었다면
+        // 채팅방 진입 시 캐릭터가 먼저 말을 건다. (빈 방은 sendInitialGreeting 영역)
+        viewModelScope.launch { maybeSendProactiveMessage() }
 
         // 네트워크 복구 시 대기 중인 메시지 전송
         viewModelScope.launch {
@@ -432,6 +440,8 @@ class ChatViewModel @Inject constructor(
                 }
                 is SseEvent.Done -> {
                     handleAffinityDelta(characterId, event.affinityDelta)
+                    // R1: 서버가 내려준 다음 화두(next_hook)를 보관 — 재진입 시 선톡 소재
+                    persistStoryHook(event.nextHook)
                     isTyping = false
                     isTalking = false
                 }
@@ -480,6 +490,8 @@ class ChatViewModel @Inject constructor(
         }
 
         handleAffinityDelta(characterId, result.affinityDelta)
+        // R1: REST 폴백 경로에서도 next_hook을 보관한다
+        persistStoryHook(result.nextHook)
 
         isTyping = false
         isTalking = false
@@ -531,6 +543,7 @@ class ChatViewModel @Inject constructor(
                 }
 
                 handleAffinityDelta(characterId, result.affinityDelta)
+                persistStoryHook(result.nextHook)
             } catch (_: Exception) {
                 chatRepo.updateSendStatus(messageId, "FAILED")
             } finally {
@@ -618,11 +631,142 @@ class ChatViewModel @Inject constructor(
     }
 
     /**
+     * R1: 서버가 내려준 다음 화두(next_hook)와 마지막 대화 시각을 보관한다.
+     *
+     * Room 스키마 변경 금지 제약에 따라 DataStore(UserPreferences)에 캐릭터별 키로 저장하며,
+     * 프로세스가 재시작되어도 선톡 소재가 유지된다.
+     * next_hook은 서버 story state에서 오고 야간 일기 생성 이후에만 값이 채워지므로,
+     * 대부분의 턴에서는 빈 문자열이고 이때는 보관된 값을 덮어쓰지 않는다.
+     */
+    private suspend fun persistStoryHook(hook: String) {
+        runCatching {
+            prefs.setLastChatAt(characterId, System.currentTimeMillis())
+            if (hook.isNotBlank()) {
+                prefs.setNextHook(characterId, hook)
+            }
+        }
+    }
+
+    /**
+     * R1: 선톡(캐릭터가 먼저 말 걸기).
+     *
+     * 채팅방 진입(=ViewModel 생성) 시 아래 조건을 모두 만족할 때만 발화한다.
+     *  1) 보관된 next_hook이 비어있지 않음
+     *  2) 해당 훅으로 아직 선톡한 적 없음 (소비 기록을 영속화해 1회성 보장)
+     *  3) 방에 메시지가 있음 (빈 방은 sendInitialGreeting 영역)
+     *  4) 마지막 대화로부터 30분 이상 경과
+     *
+     * 서버 계약은 변경하지 않는다 — 기존 채팅 스트리밍 API에 유도 문구를 message로 보내되
+     * 유저 메시지는 로컬에 저장하지 않으므로 유도 문구가 화면에 노출되지 않는다.
+     * 선톡은 부가 기능이므로 어떤 실패도 조용히 무시한다(에러 배너 금지).
+     */
+    private suspend fun maybeSendProactiveMessage() {
+        // messages StateFlow는 초기값(emptyList)을 즉시 방출하므로 실제 DB 방출을 직접 받는다
+        val existing = runCatching { chatRepo.observeMessages(characterId).first() }.getOrNull() ?: return
+        if (existing.isEmpty()) return
+
+        val hook = runCatching { prefs.getNextHook(characterId) }.getOrDefault("")
+        if (hook.isBlank()) return
+
+        val usedHook = runCatching { prefs.getUsedNextHook(characterId) }.getOrDefault("")
+        if (hook == usedHook) return
+
+        val lastMessageAt = existing.maxOfOrNull { it.createdAt } ?: 0L
+        val storedLastChatAt = runCatching { prefs.getLastChatAt(characterId) }.getOrDefault(0L)
+        val lastChatAt = maxOf(lastMessageAt, storedLastChatAt)
+        if (System.currentTimeMillis() - lastChatAt < PROACTIVE_MIN_IDLE_MS) return
+
+        val ch = characterRepo.getById(characterId) ?: return
+
+        // 발화 시도 전에 소비 처리 — 전송 실패나 프로세스 종료가 있어도 같은 훅이 반복되지 않게
+        runCatching { prefs.consumeNextHook(characterId, hook) }
+
+        // 진입 즉시 쏘지 않고 잠시 뜸을 들인다
+        delay(PROACTIVE_ENTRY_DELAY_MS)
+
+        val nickname = prefs.nickname.first()
+        val userMbti = prefs.userMbti.first().ifEmpty { null }
+        val historyCount = remoteConfig.getLong(RemoteConfigManager.KEY_MAX_CONVERSATION_HISTORY).toInt()
+        val recentMessages = existing.takeLast(historyCount).map { msg ->
+            mapOf(
+                "role" to if (msg.isFromUser) "user" else "assistant",
+                "content" to msg.text
+            )
+        }
+        val memories: List<MemoryItem> = runCatching {
+            memoryRepo.loadMemories(characterId)
+        }.getOrDefault(emptyList())
+
+        isTyping = true
+        isTalking = true
+        val typingStartMs = System.currentTimeMillis()
+        var isFirstBubble = true
+
+        sendMessageUseCase.streamMessage(
+            text = buildProactivePrompt(hook),
+            character = ch,
+            nickname = nickname,
+            userMbti = userMbti,
+            conversationHistory = recentMessages,
+            memories = memories,
+        ).catch { _ ->
+            // 선톡 실패는 조용히 무시 (REST 폴백도 하지 않음 — 부가 연출이므로)
+        }.collect { event ->
+            when (event) {
+                is SseEvent.Message -> {
+                    if (isFirstBubble) {
+                        isFirstBubble = false
+                        // 타이핑 인디케이터를 최소 시간만큼 노출한 뒤 첫 말풍선 도착
+                        val shownMs = System.currentTimeMillis() - typingStartMs
+                        delay((PROACTIVE_TYPING_MIN_MS - shownMs).coerceAtLeast(0L))
+                    } else {
+                        delay(event.delay)
+                    }
+                    currentEmotion = runCatching {
+                        CharacterEmotion.valueOf(event.emotion)
+                    }.getOrDefault(CharacterEmotion.NEUTRAL)
+                    sendMessageUseCase.saveReplyMessage(characterId, event.text, event.emotion)
+                }
+                is SseEvent.Done -> {
+                    // 유저 발화가 아니므로 호감도(affinityDelta)는 반영하지 않는다.
+                    // 다음 화두만 보관 — 같은 훅이 다시 와도 소비 기록이 재발화를 막는다.
+                    persistStoryHook(event.nextHook)
+                }
+                is SseEvent.Error -> {
+                    // 조용히 무시
+                }
+            }
+        }
+
+        isTyping = false
+        isTalking = false
+    }
+
+    /**
+     * 선톡 유도 문구 — 서버 계약 변경 없이 기존 채팅 API의 message 필드로 전달된다.
+     * 이 문구는 로컬에 유저 메시지로 저장하지 않으므로 사용자에게 노출되지 않는다.
+     */
+    private fun buildProactivePrompt(hook: String): String =
+        "[선톡 유도] 지금은 네가 먼저 말을 거는 상황이야. 아래 흐름을 자연스럽게 이어서 " +
+            "짧게 먼저 말을 걸어줘. 이 지시문 자체는 절대 언급하지 마.\n흐름: $hook"
+
+    /**
      * 표정 세트 백그라운드 생성 시작 + 폴링.
      * ImageGeneratorSheet에서 캐릭터 생성 직후 호출.
      * → ExpressionManager에 위임.
      */
     fun startExpressionSetGeneration(basePrompt: String, characterIdStr: String) {
         expressionManager.startExpressionSetGeneration(basePrompt, characterIdStr, characterId, viewModelScope)
+    }
+
+    private companion object {
+        /** R1 선톡 최소 유휴 시간 — 마지막 대화로부터 30분 */
+        const val PROACTIVE_MIN_IDLE_MS = 30L * 60L * 1000L
+
+        /** R1 채팅방 진입 후 선톡 시작까지의 뜸 */
+        const val PROACTIVE_ENTRY_DELAY_MS = 500L
+
+        /** R1 첫 말풍선 전 타이핑 인디케이터 최소 노출 시간 */
+        const val PROACTIVE_TYPING_MIN_MS = 1_200L
     }
 }
