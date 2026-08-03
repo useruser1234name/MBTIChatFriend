@@ -1,6 +1,7 @@
 package com.example.mbtichatfriend.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -151,6 +152,8 @@ fun ChatScreen(
     val isOnline = (uiState as? ChatUiState.Success)?.isOnline ?: true
     // A2: StateFlow.value 직접 읽기는 Compose가 추적 못해 피드백 탭 시 아이콘 갱신이 지연됨 — collectAsState로 구독
     val feedbackMap by viewModel.feedbackMap.collectAsState()
+    // R3: 읽음 표시 워터마크 — 이 id 이하의 유저 메시지는 이미 읽힌 것으로 간주
+    val readWatermarkId by viewModel.readWatermarkId.collectAsState()
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
@@ -293,6 +296,12 @@ fun ChatScreen(
                         }
                         val topSpacing = if (index == 0) 0.dp else if (sameAsPrev) 2.dp else 4.dp
 
+                        // R3: 읽음 표시 "1" — 유저 그룹의 마지막 버블(SOLO/LAST)에만, 아직 안 읽혔을 때만
+                        val showUnreadMark = msg.isFromUser &&
+                            msg.sendStatus == "SENT" &&
+                            msg.id > readWatermarkId &&
+                            (position == BubblePosition.SOLO || position == BubblePosition.LAST)
+
                         // A1: visible = true(상수)는 초기 컴포지션이 이미 target 상태로 시작해 enter 전이가
                         // 재생되지 않는 no-op이었음. MutableTransitionState로 false→true 전이를 명시해
                         // 최초 컴포지션 시 실제로 fade+slide가 재생되도록 수정.
@@ -319,7 +328,8 @@ fun ChatScreen(
                                     onLongPress = { shareTargetIndex = index },
                                     showAvatar = !sameAsPrev,
                                     showTimestamp = showTimestamp,
-                                    position = position
+                                    position = position,
+                                    showUnreadMark = showUnreadMark
                                 )
                             }
                         }
@@ -774,7 +784,8 @@ private fun MessageBubble(
     onLongPress: (() -> Unit)? = null,
     showAvatar: Boolean = true,
     showTimestamp: Boolean = true,
-    position: BubblePosition = BubblePosition.SOLO
+    position: BubblePosition = BubblePosition.SOLO,
+    showUnreadMark: Boolean = false,
 ) {
     if (msg.isFromUser) {
         UserMessageBubble(
@@ -782,7 +793,8 @@ private fun MessageBubble(
             onRetry = onRetry,
             onLongPress = onLongPress,
             showTimestamp = showTimestamp,
-            position = position
+            position = position,
+            showUnreadMark = showUnreadMark
         )
     } else {
         AiMessageBubble(
@@ -806,7 +818,8 @@ private fun UserMessageBubble(
     onRetry: ((Long) -> Unit)? = null,
     onLongPress: (() -> Unit)? = null,
     showTimestamp: Boolean = true,
-    position: BubblePosition = BubblePosition.SOLO
+    position: BubblePosition = BubblePosition.SOLO,
+    showUnreadMark: Boolean = false,
 ) {
     val isDark = isSystemInDarkTheme()
     val timeFormat = remember { SimpleDateFormat("a h:mm", Locale.KOREAN) }
@@ -927,6 +940,22 @@ private fun UserMessageBubble(
                     }
                 }
                 else -> {
+                    // R3: 읽음 표시 "1" — 카카오톡식으로 타임스탬프 왼쪽에 붙인다.
+                    // 캐릭터가 읽는(SSE onOpen) 순간 fadeOut(150ms)으로 사라진다.
+                    // enter는 애니메이션 없이 즉시(메시지 버블 자체의 등장 전이에 묻어감) —
+                    // "읽음 지연"으로 오인되지 않도록 fadeOut만 명시한다.
+                    AnimatedVisibility(
+                        visible = showUnreadMark,
+                        enter = EnterTransition.None,
+                        exit = fadeOut(tween(150))
+                    ) {
+                        Text(
+                            text = "1",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(end = 3.dp)
+                        )
+                    }
                     // R2: 연속 그룹 중간 버블은 타임스탬프를 생략(그룹 마지막 or 분 변경 시에만 표시)
                     if (showTimestamp) {
                         Text(

@@ -89,13 +89,13 @@ class SendMessageUseCase @Inject constructor(
     /**
      * 메시지 DB 저장.
      */
-    suspend fun saveUserMessage(characterId: Long, text: String) {
+    // R3: 반환된 rowId를 ViewModel이 읽음 워터마크 기준으로 사용한다.
+    suspend fun saveUserMessage(characterId: Long, text: String): Long =
         chatRepo.saveMessage(
             characterId = characterId,
             text = text,
             isFromUser = true,
         )
-    }
 
     suspend fun savePendingMessage(characterId: Long, text: String) {
         chatRepo.saveMessage(

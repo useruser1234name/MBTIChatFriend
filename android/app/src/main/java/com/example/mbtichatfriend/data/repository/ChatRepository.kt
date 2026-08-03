@@ -36,13 +36,14 @@ class ChatRepository @Inject constructor(
     fun observeMessages(characterId: Long): Flow<List<MessageEntity>> =
         dao.observeByCharacter(characterId)
 
+    // R3: rowId 반환 — saveUserMessage가 읽음 워터마크 기준점으로 사용
     suspend fun saveMessage(
         characterId: Long,
         text: String,
         isFromUser: Boolean,
         emotion: String? = null,
         sendStatus: String = "SENT"
-    ) {
+    ): Long =
         dao.insert(
             MessageEntity(
                 characterId = characterId,
@@ -52,7 +53,6 @@ class ChatRepository @Inject constructor(
                 sendStatus = sendStatus
             )
         )
-    }
 
     /**
      * SSE 스트리밍으로 메시지 수신

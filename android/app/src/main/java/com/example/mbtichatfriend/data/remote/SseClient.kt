@@ -30,6 +30,13 @@ sealed class SseEvent {
         val roomId: String = ""
     ) : SseEvent()
     data class Error(val message: String) : SseEvent()
+
+    /**
+     * R3: SSE 연결이 실제로 수립된 시점(EventSourceListener.onOpen).
+     * "캐릭터가 메시지를 읽었다"의 근사치로 사용 — 읽음 처리는 이 이벤트 수신 즉시 이뤄져야 하며
+     * 첫 토큰/버블 도착까지 기다리지 않는다(읽음 지연 금지).
+     */
+    object Opened : SseEvent()
 }
 
 @Singleton
@@ -80,6 +87,11 @@ class SseClient @Inject constructor(
             .build()
 
         val listener = object : EventSourceListener() {
+            override fun onOpen(eventSource: EventSource, response: okhttp3.Response) {
+                // R3: 연결 수립 = 읽음. 지연 없이 즉시 방출한다.
+                trySend(SseEvent.Opened)
+            }
+
             override fun onEvent(
                 eventSource: EventSource,
                 id: String?,

@@ -114,6 +114,22 @@ class ChatViewModel @Inject constructor(
     private val _isLottieAnimating = MutableStateFlow(false)
     val isLottieAnimating: StateFlow<Boolean> = _isLottieAnimating.asStateFlow()
 
+    /**
+     * R3: 읽음 표시 워터마크 — "이 id 이하의 유저 메시지는 모두 읽힘".
+     * 메시지별 맵 대신 단일 워터마크만 유지한다(회의 스펙: 화면 재진입 시엔 전부 읽음 취급이
+     * 자연스러우므로 세션 로컬 값이면 충분 — Room 영속화하지 않는다).
+     * ChatScreen은 `msg.id > readWatermarkId`인 유저 메시지에만 "1"을 그린다.
+     */
+    private val _readWatermarkId = MutableStateFlow(0L)
+    val readWatermarkId: StateFlow<Long> = _readWatermarkId.asStateFlow()
+
+    /** id가 워터마크보다 클 때만 전진 — 역행(더 이전 값으로 되돌림) 방지 */
+    private fun markRead(messageId: Long) {
+        if (messageId > _readWatermarkId.value) {
+            _readWatermarkId.value = messageId
+        }
+    }
+
     // 세션 피드백 시트 표시 여부 — QS 조건(10분 이상 OR 3턴 이상) 충족 시 세션 종료 때 true
     private val _showFeedbackSheet = MutableStateFlow(false)
     val showFeedbackSheet: StateFlow<Boolean> = _showFeedbackSheet.asStateFlow()
@@ -345,7 +361,7 @@ class ChatViewModel @Inject constructor(
                 checkSessionLimit(buildRoomId())
             }
 
-            sendMessageUseCase.saveUserMessage(characterId, trimmed)
+            val userMessageId = sendMessageUseCase.saveUserMessage(characterId, trimmed)
             userMessageCount++
 
             analyticsRepository.track(
@@ -395,7 +411,7 @@ class ChatViewModel @Inject constructor(
             }.getOrDefault(emptyList())
 
             // SSE 스트리밍 시도
-            sendWithSse(trimmed, ch, nickname, userMbti, recentMessages, memories)
+            sendWithSse(trimmed, ch, nickname, userMbti, recentMessages, memories, userMessageId)
         }
     }
 
@@ -406,6 +422,7 @@ class ChatViewModel @Inject constructor(
         userMbti: String?,
         conversationHistory: List<Map<String, String>>,
         memories: List<MemoryItem>,
+        userMessageId: Long,
     ) {
         var sseSucceeded = false
 
@@ -417,11 +434,15 @@ class ChatViewModel @Inject constructor(
             conversationHistory = conversationHistory,
             memories = memories,
         ).catch { _ ->
-            // SSE 실패 시 REST 폴백
-            fallbackToRest(message, character, nickname, userMbti, conversationHistory, memories)
+            // SSE 실패 시 REST 폴백 (연결조차 못 열었으므로 onOpen 미수신 — REST 폴백 경로가 즉시 읽음 처리)
+            fallbackToRest(message, character, nickname, userMbti, conversationHistory, memories, userMessageId)
             sseSucceeded = true // 폴백이 처리했으므로 중복 방지
         }.collect { event ->
             when (event) {
+                is SseEvent.Opened -> {
+                    // R3: 연결 수립 = 읽음. 첫 토큰을 기다리지 않고 즉시 워터마크를 전진시킨다.
+                    markRead(userMessageId)
+                }
                 is SseEvent.Message -> {
                     sseSucceeded = true
                     // 서버 딜레이와 별도로, 클라이언트에서도 버블 간 텀 적용
@@ -447,7 +468,7 @@ class ChatViewModel @Inject constructor(
                 }
                 is SseEvent.Error -> {
                     if (!sseSucceeded) {
-                        fallbackToRest(message, character, nickname, userMbti, conversationHistory, memories)
+                        fallbackToRest(message, character, nickname, userMbti, conversationHistory, memories, userMessageId)
                     } else {
                         isTyping = false
                         isTalking = false
@@ -468,7 +489,10 @@ class ChatViewModel @Inject constructor(
         userMbti: String?,
         conversationHistory: List<Map<String, String>>,
         memories: List<MemoryItem>,
+        userMessageId: Long,
     ) {
+        // R3: REST 폴백 경로는 onOpen 신호가 없으므로 요청 전송 시점에 즉시 읽음 처리(근사 허용)
+        markRead(userMessageId)
         val result = sendMessageUseCase.sendMessageRest(
             text = message,
             character = character,
@@ -521,6 +545,8 @@ class ChatViewModel @Inject constructor(
 
             try {
                 isTyping = true
+                // R3: 재전송도 REST 경로 — 요청 전송 시점에 즉시 읽음 처리(근사 허용)
+                markRead(messageId)
                 val result = sendMessageUseCase.sendMessageRest(
                     text = pending.text,
                     character = ch,
@@ -713,6 +739,9 @@ class ChatViewModel @Inject constructor(
             // 선톡 실패는 조용히 무시 (REST 폴백도 하지 않음 — 부가 연출이므로)
         }.collect { event ->
             when (event) {
+                is SseEvent.Opened -> {
+                    // 캐릭터 선톡 — 유저 메시지가 아니므로 읽음 워터마크와 무관, 무시
+                }
                 is SseEvent.Message -> {
                     if (isFirstBubble) {
                         isFirstBubble = false

@@ -164,6 +164,9 @@ class VoiceCallViewModel @Inject constructor(
                 callState = VoiceCallState.IDLE
             }.collect { event ->
                 when (event) {
+                    is SseEvent.Opened -> {
+                        // R3: 읽음 표시는 텍스트 채팅 화면 전용 — 음성 통화 화면은 무시
+                    }
                     is SseEvent.Message -> {
                         val emotion = try {
                             CharacterEmotion.valueOf(event.emotion)

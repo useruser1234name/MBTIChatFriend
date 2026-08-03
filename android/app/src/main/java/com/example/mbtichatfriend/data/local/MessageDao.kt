@@ -11,8 +11,9 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE characterId = :characterId ORDER BY createdAt ASC")
     fun observeByCharacter(characterId: Long): Flow<List<MessageEntity>>
 
+    // R3: 반환값(rowId)이 필요 — 방금 저장한 유저 메시지의 id를 읽음 워터마크에 사용한다.
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(message: MessageEntity)
+    suspend fun insert(message: MessageEntity): Long
 
     @Query("DELETE FROM messages WHERE characterId = :characterId")
     suspend fun deleteByCharacter(characterId: Long)
