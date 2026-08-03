@@ -24,14 +24,29 @@ class ABTestConfig:
     character_filter: str = ""  # 특정 캐릭터 MBTI에만 적용 (빈 문자열이면 전체 적용)
 
 
+# ── model_routing 정책 키 ───────────────────────────────────────────────────
+# 2026-08-03 회의 P0-S2: model_routing 실험은 더 이상 "어떤 모델 ID를 쓸지"를
+# 배정하지 않는다. 이전 정의(variant_a="gpt-4.1-mini", variant_b="gpt-4.1")는
+# chat_service._route_model이 variant 문자열을 그대로 모델 ID로 반환하는 구조와
+# 맞물려, 캐릭터별 sha256 해시로 모델을 영구 고정시켰다(복잡도 분류기가 아예
+# 실행되지 않음 → 심층 상담도 mini, "ㅇㅇ" 한 마디에도 4.1).
+#
+# 이제 variant는 복잡도 라우팅 위에 얹는 **정책 오버레이**를 뜻한다:
+#   MODEL_ROUTING_COMPLEXITY      대조군 — _classify_message_complexity 결과 그대로
+#   MODEL_ROUTING_ALWAYS_COMPLEX  실험군 — 복잡도와 무관하게 상위(complex) 모델 강제
+MODEL_ROUTING_EXPERIMENT_ID = "model_routing"
+MODEL_ROUTING_COMPLEXITY = "complexity_routing"
+MODEL_ROUTING_ALWAYS_COMPLEX = "always_complex"
+
+
 # ── 전역 실험 정의 ──────────────────────────────────────────────────────────
 
 EXPERIMENTS: Dict[str, ABTestConfig] = {
-    "model_routing": ABTestConfig(
-        experiment_id="model_routing",
-        variant_a="gpt-4.1-mini",  # 대조군
-        variant_b="gpt-4.1",       # 실험군
-        traffic_split=0.3,          # 30%에게 gpt-4.1 제공
+    MODEL_ROUTING_EXPERIMENT_ID: ABTestConfig(
+        experiment_id=MODEL_ROUTING_EXPERIMENT_ID,
+        variant_a=MODEL_ROUTING_COMPLEXITY,      # 대조군: 복잡도 라우팅 유지
+        variant_b=MODEL_ROUTING_ALWAYS_COMPLEX,  # 실험군: 상위 모델 강제
+        traffic_split=0.3,                        # 30%에게 상위 모델 강제 정책
         active=True,
     )
 }

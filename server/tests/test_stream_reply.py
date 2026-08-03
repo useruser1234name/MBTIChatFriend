@@ -261,13 +261,23 @@ async def test_streaming_records_ab_result_when_character_id_set(patch_deps, mon
     assert ab_task is not None, "character_id가 있으면 record-ab-result 태스크가 스케줄되어야 함"
     await ab_task
 
-    assert len(recorded) == 2
+    # 2026-08-03 P0-S2: 라우팅 계측 메트릭 2종(complexity_complex/used_complex_model)이
+    # 추가되어 기존 2종 → 4종으로 늘었다.
+    assert len(recorded) == 4
     for rec in recorded:
         # mutation 방어: user_id/character_id가 빈 문자열이 아닌 실제 값이어야 함
         assert rec["user_id"] == "test-char-ab"
         assert rec["character_id"] == "test-char-ab"
         assert rec["experiment_id"] == "model_routing"
-    assert {r["metric_name"] for r in recorded} == {"total_tokens", "response_time_ms"}
+    assert {r["metric_name"] for r in recorded} == {
+        "total_tokens",
+        "response_time_ms",
+        "complexity_complex",
+        "used_complex_model",
+    }
+    # "안녕"(simple) 턴이므로 분류기 판정은 complex가 아니어야 한다.
+    by_metric = {r["metric_name"]: r["value"] for r in recorded}
+    assert by_metric["complexity_complex"] == 0.0
 
     for name, coro in tracked:
         if name != "record-ab-result":

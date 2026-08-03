@@ -609,36 +609,71 @@ def _build_chat_messages(
     return messages
 
 
+def _route_model_with_complexity(
+    character_id: str, message: str, history_len: int
+) -> Tuple[str, Optional[str], str]:
+    """모델 선택: 복잡도 라우팅이 기준선, A/B는 그 위의 정책 오버레이.
+
+    Returns (model_id, ab_variant, complexity).
+    complexity 는 계측용("simple" | "complex") — 분류기 판정과 실제 사용 모델을
+    사후에 대조할 수 있도록 turn_latency / A/B 결과 기록에 함께 남긴다.
+
+    2026-08-03 회의 P0-S2 이전에는 character_id가 있으면(라우터에서 사실상 항상
+    채워짐) A/B variant 문자열을 그대로 모델 ID로 반환해 복잡도 분류기가 아예
+    실행되지 않았다 — 캐릭터별 sha256 해시로 모델이 영구 고정되어 심층 상담도
+    mini로, "ㅇㅇ" 한 마디에도 4.1로 갔고 A/B 결과도 캐릭터 고정 배정에 교란됐다.
+
+    현재 순서:
+      1) 복잡도 분류를 **항상** 실행 → base 모델 결정
+      2) 파인튜닝 모델이 있으면 그것을 우선(기존 동작 유지)
+      3) A/B variant는 정책으로만 작동 — MODEL_ROUTING_ALWAYS_COMPLEX 배정 시
+         base를 상위 모델로 승격, 대조군은 복잡도 라우팅 결과 그대로
+    """
+    try:
+        complexity = _classify_message_complexity(message, history_len)
+    except Exception as _cls_err:  # pragma: no cover - 순수 문자열 연산이라 사실상 도달 불가
+        logger.warning("[Routing] 복잡도 분류 실패, simple로 폴백: %s", _cls_err)
+        complexity = "simple"
+    base_model = LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE
+
+    finetuned_model = get_model_for_character(character_id) if character_id else None
+    if finetuned_model and finetuned_model != LLM_MODEL_COMPLEX:
+        return finetuned_model, None, complexity  # 파인튜닝 모델 우선
+
+    if not character_id:
+        return base_model, None, complexity
+
+    try:
+        # 지연 임포트: 순환/기동 순서 회피
+        from .ab_test import (
+            MODEL_ROUTING_ALWAYS_COMPLEX,
+            MODEL_ROUTING_EXPERIMENT_ID,
+            get_ab_manager,
+        )
+        ab_variant = get_ab_manager().assign_variant(
+            user_id=character_id,
+            experiment_id=MODEL_ROUTING_EXPERIMENT_ID,
+        )
+    except Exception as _ab_err:
+        logger.warning("[AB] variant 배정 실패, 복잡도 라우팅 결과 유지: %s", _ab_err)
+        return base_model, None, complexity
+
+    model_id = LLM_MODEL_COMPLEX if ab_variant == MODEL_ROUTING_ALWAYS_COMPLEX else base_model
+    logger.info(
+        "[AB] model_routing: character_id=%s complexity=%s variant=%s → model=%s",
+        character_id, complexity, ab_variant, model_id,
+    )
+    return model_id, ab_variant, complexity
+
+
 def _route_model(
     character_id: str, message: str, history_len: int
 ) -> Tuple[str, Optional[str]]:
-    """모델 선택: 파인튜닝 우선 → A/B variant → 복잡도 라우팅.
-
-    Returns (model_id, ab_variant). ab_variant 는 결과 기록용(없으면 None).
-    """
-    finetuned_model = get_model_for_character(character_id) if character_id else None
-    if finetuned_model and finetuned_model != LLM_MODEL_COMPLEX:
-        return finetuned_model, None  # 파인튜닝 모델 우선
-
-    try:
-        if character_id:
-            # 지연 임포트: 순환/기동 순서 회피
-            from .ab_test import get_ab_manager
-            ab_variant = get_ab_manager().assign_variant(
-                user_id=character_id,
-                experiment_id="model_routing",
-            )
-            logger.info(
-                "[AB] model_routing: character_id=%s → variant=%s",
-                character_id, ab_variant,
-            )
-            return ab_variant, ab_variant
-        complexity = _classify_message_complexity(message, history_len)
-        return (LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE), None
-    except Exception as _ab_err:
-        logger.warning("[AB] variant 배정 실패, 복잡도 라우팅으로 fallback: %s", _ab_err)
-        complexity = _classify_message_complexity(message, history_len)
-        return (LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE), None
+    """_route_model_with_complexity의 (model_id, ab_variant) 뷰 — 기존 계약 유지."""
+    model_id, ab_variant, _complexity = _route_model_with_complexity(
+        character_id, message, history_len
+    )
+    return model_id, ab_variant
 
 
 async def _record_quality_gate_event(
@@ -757,6 +792,7 @@ async def _record_turn_latency_event(
     t_memory_ms: float,
     t_rag_ms: float,
     t_first_token_ms: float,
+    complexity: str = "",
 ) -> None:
     """턴 단계별 레이턴시(P1 계측)를 turn_latency 이벤트로 기록.
 
@@ -766,6 +802,10 @@ async def _record_turn_latency_event(
     태스크 내부에서도 이벤트 루프를 블로킹하지 않도록 정리했다.
     t_gate(라우터 게이트 단계)는 이번 계측에 포함하지 않음 — 라우터
     호출부까지 시그니처를 확장하는 대신 최소 변경으로 3구간만 계측.
+
+    complexity(2026-08-03 P0-S2): 복잡도 분류기 판정("simple"|"complex").
+    실제 사용 모델은 기존 model_id 필드가 그대로 담고 있으므로, 둘을 대조하면
+    분류기 정확도와 A/B 정책 오버레이의 승격 빈도를 사후 검증할 수 있다.
     """
     payload = {
         "model_id": model_id,
@@ -773,10 +813,11 @@ async def _record_turn_latency_event(
         "t_memory_ms": round(t_memory_ms, 2),
         "t_rag_ms": round(t_rag_ms, 2),
         "t_first_token_ms": round(t_first_token_ms, 2),
+        "complexity": complexity,
     }
     logger.info(
-        "[latency] room=%s model=%s streaming=%s memory=%.1fms rag=%.1fms first_token=%.1fms",
-        room_id, model_id, streaming, t_memory_ms, t_rag_ms, t_first_token_ms,
+        "[latency] room=%s model=%s complexity=%s streaming=%s memory=%.1fms rag=%.1fms first_token=%.1fms",
+        room_id, model_id, complexity, streaming, t_memory_ms, t_rag_ms, t_first_token_ms,
     )
     try:
         await record_event_async(
@@ -1036,16 +1077,17 @@ async def _assemble_prompt_and_model(
     character_id: str,
     log_lora_routing: bool = True,
     time_context: str = "",
-) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, Optional[str]]:
-    """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/AB/복잡도) + LoRA 클라이언트 해석.
+) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, Optional[str], str]:
+    """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/복잡도/AB 오버레이) + LoRA 클라이언트 해석.
 
     generate_reply/stream_reply가 공유(S13/S14 잔여 본문 분할). 논스트림
     경로만 라우팅 성공 시 info 로그를 남기므로(기존 동작) log_lora_routing
     으로 _resolve_reply_client(S11) 호출 시 로그 여부를 제어한다
     (generate_reply=True, stream_reply=False).
-    Returns (messages, model_id, ab_variant, active_client, lora_base_url).
+    Returns (messages, model_id, ab_variant, active_client, lora_base_url, complexity).
     lora_base_url은 stream_reply가 stream_options 분기에 사용한다
     (generate_reply는 사용하지 않지만 반환값 형태는 통일한다).
+    complexity는 계측 전용(turn_latency / A/B 결과 기록)이다.
     time_context(C4)는 그대로 _build_chat_messages → build_system_prompt로
     전달한다(동적 꼬리 전용 파라미터, 정적 프리픽스 불변).
     """
@@ -1070,8 +1112,8 @@ async def _assemble_prompt_and_model(
         time_context=time_context,
     )
 
-    # 모델 선택 (Phase 5: 복잡도 기반 라우팅 + A/B 테스트 overlay)
-    model_id, ab_variant = _route_model(
+    # 모델 선택 (복잡도 기반 라우팅이 기준선 + A/B 정책 오버레이)
+    model_id, ab_variant, complexity = _route_model_with_complexity(
         character_id, message, len(conversation_history)
     )
 
@@ -1080,7 +1122,7 @@ async def _assemble_prompt_and_model(
         model_id, ab_variant, log_lora_routing=log_lora_routing
     )
 
-    return messages, model_id, ab_variant, active_client, lora_base_url
+    return messages, model_id, ab_variant, active_client, lora_base_url, complexity
 
 
 def _emit_background_metrics(
@@ -1094,6 +1136,7 @@ def _emit_background_metrics(
     result: List[ReplyPart],
     mbti: str,
     affinity_level: int,
+    complexity: str = "",
 ) -> None:
     """LLM 응답 후 비용/AB 테스트/품질 평가를 백그라운드(fire-and-forget)로 기록.
 
@@ -1121,12 +1164,14 @@ def _emit_background_metrics(
     if ab_variant and character_id:
         total_tokens = getattr(usage, "total_tokens", 0) if usage else 0
         create_tracked_task(_record_ab_result(
-            experiment_id="model_routing",
+            experiment_id="model_routing",  # ab_test.MODEL_ROUTING_EXPERIMENT_ID
             variant=ab_variant,
             user_id=character_id,
             character_id=character_id,
             tokens=float(total_tokens),
             response_time_ms=elapsed_ms,
+            complexity=complexity,
+            model_id=model_id,
         ), name="record-ab-result")
 
     # 백그라운드 품질 평가 (사용자 지연 0)
@@ -1255,7 +1300,7 @@ async def generate_reply(
         # ──────────────────────────────────────────────────────────────
 
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
-        messages, model_id, _ab_variant, _active_client, _lora_base_url = await _assemble_prompt_and_model(
+        messages, model_id, _ab_variant, _active_client, _lora_base_url, _complexity = await _assemble_prompt_and_model(
             mbti, speech_style, relationship, nickname, character_name, affinity_level,
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
@@ -1326,7 +1371,7 @@ async def generate_reply(
 
         _emit_background_metrics(
             response, model_id, room_id, character_id, _ab_variant, _elapsed_ms,
-            message, result, mbti, affinity_level,
+            message, result, mbti, affinity_level, complexity=_complexity,
         )
 
         # P1: 턴 단계별 레이턴시 계측 기록 (t_first_token은 비스트리밍이므로
@@ -1340,6 +1385,7 @@ async def generate_reply(
                 t_memory_ms=_t_memory_ms,
                 t_rag_ms=_t_rag_ms,
                 t_first_token_ms=_elapsed_ms,
+                complexity=_complexity,
             ),
             name="turn-latency",
         )
@@ -1487,7 +1533,7 @@ async def stream_reply(
 
         # 8. 프롬프트 + 모델 라우팅 (공유 헬퍼, S13/S14) — 스트리밍은 LoRA 라우팅
         # info 로그를 남기지 않는 기존 동작 유지(log_lora_routing=False).
-        messages, model_id, _ab_variant, active_client, _lora_base_url = await _assemble_prompt_and_model(
+        messages, model_id, _ab_variant, active_client, _lora_base_url, _complexity = await _assemble_prompt_and_model(
             mbti, speech_style, relationship, nickname, character_name, affinity_level,
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
@@ -1604,12 +1650,14 @@ async def stream_reply(
         # character_id를 user_id로 사용해 기록한다.
         if _ab_variant and character_id:
             create_tracked_task(_record_ab_result(
-                experiment_id="model_routing",
+                experiment_id="model_routing",  # ab_test.MODEL_ROUTING_EXPERIMENT_ID
                 variant=_ab_variant,
                 user_id=character_id,
                 character_id=character_id,
                 tokens=_stream_total_tokens,
                 response_time_ms=_elapsed_ms,
+                complexity=_complexity,
+                model_id=model_id,
             ), name="record-ab-result")
 
         # 15b. P7: SSE 턴도 api_usage에 기록 — 이전에는 스트림 경로가 전혀
@@ -1638,6 +1686,7 @@ async def stream_reply(
                 t_memory_ms=_t_memory_ms,
                 t_rag_ms=_t_rag_ms,
                 t_first_token_ms=_t_first_token_ms,
+                complexity=_complexity,
             ),
             name="turn-latency",
         )
@@ -1714,34 +1763,42 @@ async def _record_ab_result(
     character_id: str,
     tokens: float,
     response_time_ms: float,
+    complexity: str = "",
+    model_id: str = "",
 ) -> None:
     """A/B 테스트 메트릭(토큰 수·응답시간)을 백그라운드에서 기록 (DATA-B 신예린).
 
     P2: ab.record_result는 동기 psycopg 호출(ab_test.py)이라 이 fire-and-forget
     태스크 안에서도 이벤트 루프를 블로킹한다 — asyncio.to_thread로 감싼다.
+
+    2026-08-03 P0-S2: complexity/model_id가 주어지면 라우팅 계측 메트릭 2종을
+    추가로 남긴다(ab_test_results는 metric_value가 숫자라 0/1 인디케이터로 기록).
+      complexity_complex  분류기가 complex로 판정한 비율(variant별 평균)
+      used_complex_model  실제로 상위 모델을 쓴 비율
+    대조군에서는 두 값이 일치해야 하고, 오버레이 variant에서는 used_complex_model
+    이 1.0로 고정된다 — 분류기 정확도/승격 빈도를 사후 대조할 수 있다.
     """
     try:
         # 지연 임포트: 순환/기동 순서 회피
         from .ab_test import get_ab_manager
         ab = get_ab_manager()
-        await asyncio.to_thread(
-            ab.record_result,
-            experiment_id=experiment_id,
-            variant=variant,
-            metric_name="total_tokens",
-            value=tokens,
-            user_id=user_id,
-            character_id=character_id,
-        )
-        await asyncio.to_thread(
-            ab.record_result,
-            experiment_id=experiment_id,
-            variant=variant,
-            metric_name="response_time_ms",
-            value=response_time_ms,
-            user_id=user_id,
-            character_id=character_id,
-        )
+        metrics: List[Tuple[str, float]] = [
+            ("total_tokens", tokens),
+            ("response_time_ms", response_time_ms),
+        ]
+        if complexity:
+            metrics.append(("complexity_complex", 1.0 if complexity == "complex" else 0.0))
+            metrics.append(("used_complex_model", 1.0 if model_id == LLM_MODEL_COMPLEX else 0.0))
+        for metric_name, value in metrics:
+            await asyncio.to_thread(
+                ab.record_result,
+                experiment_id=experiment_id,
+                variant=variant,
+                metric_name=metric_name,
+                value=value,
+                user_id=user_id,
+                character_id=character_id,
+            )
     except Exception as e:
         logger.warning(f"[AB] 결과 기록 실패: {e}")
 
