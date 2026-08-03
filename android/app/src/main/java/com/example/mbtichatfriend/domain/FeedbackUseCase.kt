@@ -18,6 +18,16 @@ class FeedbackUseCase @Inject constructor(
     private val _feedbackMap = MutableStateFlow<Map<Long, String>>(emptyMap())
     val feedbackMap: StateFlow<Map<Long, String>> = _feedbackMap
 
+    /**
+     * A3: 채팅방 진입 시 Room에 저장된 피드백을 일괄 조회해 feedbackMap을 복원한다.
+     * 기존에 담겨있던 항목(예: 동일 세션 내 이미 로드된 값)은 덮어쓰지 않고 병합한다.
+     */
+    suspend fun restoreFeedback(characterId: Long) {
+        val saved = chatRepository.getFeedbackForCharacter(characterId)
+        if (saved.isEmpty()) return
+        _feedbackMap.value = saved + _feedbackMap.value
+    }
+
     suspend fun submitFeedback(
         messageId: Long,
         feedbackType: String,

@@ -198,6 +198,12 @@ class ChatViewModel @Inject constructor(
     private var userMessageCount = 0
 
     init {
+        // A3: Room에 저장된 피드백을 복원 — 화면 재진입/프로세스 재시작 시 아이콘 표시 소실 및
+        // 멱등 가드 리셋(중복 제출 가능) 방지
+        viewModelScope.launch {
+            feedbackUseCase.restoreFeedback(characterId)
+        }
+
         // 기존 expressionSet 로드 또는 진행 중인 생성 작업 폴링 → ExpressionManager에 위임
         expressionManager.loadExistingExpressionSet(characterId, viewModelScope)
 

@@ -190,6 +190,14 @@ class ChatRepository @Inject constructor(
     }
 
     /**
+     * A3: 채팅방(캐릭터) 단위로 저장된 피드백을 messageId → feedbackType 맵으로 일괄 조회.
+     * 화면 재진입/프로세스 재시작 시 FeedbackUseCase.feedbackMap을 복원하는 용도.
+     */
+    suspend fun getFeedbackForCharacter(characterId: Long): Map<Long, String> {
+        return feedbackDao.getByCharacterId(characterId).associate { it.messageId to it.feedbackType }
+    }
+
+    /**
      * Self-Regulation: 세션 사용 시간 및 연속 접속 점검.
      * PSY-B 최은혜 + PM-B 손민준 설계 (4차 회의 합의).
      */
