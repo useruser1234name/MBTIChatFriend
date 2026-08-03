@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections import OrderedDict
 from typing import Dict, List, Optional
 
@@ -41,6 +42,49 @@ _SENSITIVE_VALUE_PATTERNS = [
 # 캐시 최대 크기
 _MAX_SUMMARIES = 200
 _MAX_MEMORIES = 200
+
+# ── 네거티브 캐시(2026-08-03 P1-S4) ────────────────────────────────────────
+# 배경: conversation_memory에 아직 행이 없는 방(= 첫 요약 이전의 모든 신규 방)은
+# _load_from_db가 아무것도 캐싱하지 않아 매 턴 DB를 다시 조회했다. 그 조회 중
+# 일부가 TTFT 직렬 경로에 있어 첫 토큰이 늦어졌다.
+# "행 없음"도 기억하되, 다중 워커에서 다른 워커가 방금 저장한 요약을 오래 못 보는
+# stale을 막기 위해 영구 캐시가 아니라 짧은 TTL로만 유지한다. 기존 positive 캐시
+# (_conversation_summaries/_character_memories, FIFO eviction)와는 별도 dict라
+# _MAX_SUMMARIES FIFO 정책과 충돌하지 않는다.
+_NEGATIVE_TTL_SECONDS = 60.0
+_MAX_NEGATIVE = 500
+_negative_until: Dict[str, float] = {}
+
+
+def _negative_cache_valid(key: str, now: float) -> bool:
+    """key가 유효한 네거티브 마킹(=DB에 행 없음)을 갖고 있는지. 만료분은 즉시 정리."""
+    until = _negative_until.get(key)
+    if until is None:
+        return False
+    if until > now:
+        return True
+    _negative_until.pop(key, None)
+    return False
+
+
+def _mark_negative(key: str, now: float) -> None:
+    _negative_until.pop(key, None)  # 재삽입으로 FIFO 순서 갱신
+    _negative_until[key] = now + _NEGATIVE_TTL_SECONDS
+    _prune_negative(now)
+
+
+def _clear_negative(key: str) -> None:
+    """요약/팩트가 저장되었으므로 '행 없음' 마킹을 즉시 해제."""
+    _negative_until.pop(key, None)
+
+
+def _prune_negative(now: float) -> None:
+    if len(_negative_until) <= _MAX_NEGATIVE:
+        return
+    for expired in [k for k, until in _negative_until.items() if until <= now]:
+        _negative_until.pop(expired, None)
+    while len(_negative_until) > _MAX_NEGATIVE:
+        _negative_until.pop(next(iter(_negative_until)))
 
 
 def _normalize_fact_key(key: str) -> str:
@@ -174,12 +218,20 @@ def _resolve_memory_keys(
     return primary_key, fallback_keys
 
 
-async def _load_from_db(key: str, fallback_keys: Optional[list[str]] = None) -> None:
-    """PostgreSQL에서 캐시로 로드 (cold start 시) - async"""
+async def _load_from_db(key: str, fallback_keys: Optional[list[str]] = None) -> bool:
+    """PostgreSQL에서 캐시로 로드 (cold start 시) - async
+
+    Returns:
+        True면 이번 호출이 DB 왕복 없이 처리됨(positive 캐시 히트 / 유효한 네거티브
+        캐시 / postgres 비활성). False면 fetchone을 최소 1회 실행했다.
+    """
     if not postgres_enabled():
-        return
+        return True
     if key in _conversation_summaries:
-        return  # 이미 캐시에 있음
+        return True  # 이미 캐시에 있음
+    now = time.monotonic()
+    if _negative_cache_valid(key, now):
+        return True  # DB에 행이 없다는 걸 최근에 확인함 — 재조회 생략
 
     candidate_keys = [key] + [candidate for candidate in (fallback_keys or []) if candidate]
     for candidate_key in candidate_keys:
@@ -202,8 +254,13 @@ async def _load_from_db(key: str, fallback_keys: Optional[list[str]] = None) -> 
                 _character_memories[key] = []
         else:
             _character_memories[key] = []
+        _clear_negative(key)
         _evict_if_needed()
-        return
+        return False
+
+    # 어떤 후보 키로도 행이 없음 → 짧은 TTL 동안 기억해 매 턴 재조회를 막는다.
+    _mark_negative(key, now)
+    return False
 
 
 async def _save_to_db(key: str) -> None:
@@ -212,6 +269,8 @@ async def _save_to_db(key: str) -> None:
         return
     summary = _conversation_summaries.get(key, "")
     facts = _character_memories.get(key, [])
+    # 행이 생겼으므로 '행 없음' 마킹을 즉시 해제 — 저장 직후 조회가 새 값을 본다.
+    _clear_negative(key)
     await asyncio.to_thread(
         execute,
         """
@@ -478,6 +537,33 @@ async def extract_episodes(
         return []
 
 
+def is_memory_cached(
+    character_name: str = "",
+    nickname: str = "",
+    *,
+    user: Optional[dict] = None,
+    room_id: str = "",
+    character_id: str = "",
+) -> bool:
+    """다음 build_memory_context 호출이 DB 왕복 없이 처리되는지 (계측용, sync/무부하).
+
+    True 조건: postgres 비활성 / positive 캐시 보유 / 유효한 네거티브 마킹 보유.
+    turn_latency 이벤트의 t_memory_cache_hit이 이 값을 사용한다.
+    """
+    if not postgres_enabled():
+        return True
+    key, _ = _resolve_memory_keys(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    if key in _conversation_summaries:
+        return True
+    return _negative_cache_valid(key, time.monotonic())
+
+
 async def build_memory_context(
     character_name: str,
     nickname: str,
@@ -486,21 +572,21 @@ async def build_memory_context(
     room_id: str = "",
     character_id: str = "",
 ) -> str:
-    """프롬프트에 포함할 기억 컨텍스트 생성 (캐릭터 시점)"""
-    summary = await get_existing_summary(
+    """프롬프트에 포함할 기억 컨텍스트 생성 (캐릭터 시점)
+
+    P1-S4: summary/facts를 각각 로드해 fetchone을 2회 쓰던 것을 키 1회 해석 +
+    _load_from_db 1회로 합쳤다(결과는 기존과 동치 — 두 로드가 같은 키를 조회했음).
+    """
+    key, fallback_keys = _resolve_memory_keys(
         character_name,
         nickname,
         user=user,
         room_id=room_id,
         character_id=character_id,
     )
-    facts = await get_existing_facts(
-        character_name,
-        nickname,
-        user=user,
-        room_id=room_id,
-        character_id=character_id,
-    )
+    await _load_from_db(key, fallback_keys)
+    summary = _conversation_summaries.get(key, "")
+    facts = _character_memories.get(key, [])
 
     parts = []
     if summary:

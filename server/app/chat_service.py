@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import AsyncGenerator, List, Optional, Tuple, Union
+from typing import AsyncGenerator, List, NamedTuple, Optional, Tuple, Union
 
 from openai import AsyncOpenAI
 
@@ -29,7 +29,13 @@ from .prompts import build_system_prompt, build_diary_prompt, build_memory_extra
 from .user_preference import derive_user_style, render_preference_section
 from .vector_store import get_store
 from .finetune_service import get_model_for_character
-from .memory_service import summarize_conversation, extract_facts, extract_episodes, build_memory_context
+from .memory_service import (
+    summarize_conversation,
+    extract_facts,
+    extract_episodes,
+    build_memory_context,
+    is_memory_cached,
+)
 from .quality_service import (
     check_diversity_async,
     classify_quality_issues,
@@ -833,6 +839,7 @@ async def _record_turn_latency_event(
     t_first_token_ms: float,
     complexity: str = "",
     crisis_tier: int = 0,
+    memory_cache_hit: bool = False,
 ) -> None:
     """턴 단계별 레이턴시(P1 계측)를 turn_latency 이벤트로 기록.
 
@@ -851,6 +858,10 @@ async def _record_turn_latency_event(
     분류기 원판정 그대로 두고 이 필드를 추가했으므로,
     complexity="simple" & crisis_tier>=1 & model_id=상위모델 조합으로
     "위기 승격이 실제 일어난 턴"을 사후에 정확히 셀 수 있다.
+
+    memory_cache_hit(2026-08-03 P1-S4): 기억 컨텍스트 조회가 DB 왕복 없이
+    처리됐는지(positive 캐시/네거티브 캐시/postgres 비활성). t_memory_ms와
+    대조하면 네거티브 캐시가 신규 방의 반복 조회를 실제로 없앴는지 검증된다.
     """
     payload = {
         "model_id": model_id,
@@ -860,10 +871,12 @@ async def _record_turn_latency_event(
         "t_first_token_ms": round(t_first_token_ms, 2),
         "complexity": complexity,
         "crisis_tier": crisis_tier,
+        "t_memory_cache_hit": bool(memory_cache_hit),
     }
     logger.info(
-        "[latency] room=%s model=%s complexity=%s crisis_tier=%s streaming=%s memory=%.1fms rag=%.1fms first_token=%.1fms",
-        room_id, model_id, complexity, crisis_tier, streaming, t_memory_ms, t_rag_ms, t_first_token_ms,
+        "[latency] room=%s model=%s complexity=%s crisis_tier=%s streaming=%s memory=%.1fms(cache_hit=%s) rag=%.1fms first_token=%.1fms",
+        room_id, model_id, complexity, crisis_tier, streaming, t_memory_ms,
+        bool(memory_cache_hit), t_rag_ms, t_first_token_ms,
     )
     try:
         await record_event_async(
@@ -1018,6 +1031,21 @@ def _safety_check_input(message: str) -> Optional[Tuple[List[ReplyPart], int]]:
     return None
 
 
+class MemoryFetch(NamedTuple):
+    """_spawn_parallel_analysis의 memory_context 조회 결과 + 상태(P1-S4).
+
+    context: 조회된 기억 컨텍스트(기억이 없으면 정당하게 빈 문자열).
+    ok: 조회가 정상 완료됐는지. False는 "예외로 실패" 뿐이며, 이때만 호출부가
+        방어적으로 재조회한다(빈 문자열이 정당한 결과인 신규 방에서 같은
+        함수를 TTFT 직렬 경로에서 한 번 더 부르던 낭비 제거).
+    cache_hit: 이 조회가 DB 왕복 없이 처리됐는지(계측용).
+    """
+
+    context: str
+    ok: bool
+    cache_hit: bool
+
+
 async def _spawn_parallel_analysis(
     message: str,
     mbti: str,
@@ -1028,7 +1056,7 @@ async def _spawn_parallel_analysis(
     nickname: str,
     character_id: str,
     room_id: str,
-) -> Tuple[Optional[asyncio.Task], int, str]:
+) -> Tuple[Optional[asyncio.Task], int, MemoryFetch]:
     """메모리 컨텍스트 태스크 + 호감도 분석 태스크를 관리(클라이언트 있을 때만).
 
     클라이언트가 없으면 즉시 키워드 기반 호감도를 계산한다.
@@ -1052,15 +1080,25 @@ async def _spawn_parallel_analysis(
     소유한다 — 헬퍼 안에서 await/취소하지 않는다. 클라이언트가 없을 때의
     처리(목업 응답 생성)는 두 호출부가 서로 다르므로(generate_reply는
     return, stream_reply는 yield 후 return) 호출부에서 각자 담당한다.
-    Returns (affinity_task, affinity_delta, pre_mem_ctx).
+    Returns (affinity_task, affinity_delta, MemoryFetch).
     """
     affinity_delta = 0
     pre_mem_ctx = ""
+    mem_ok = True
+    mem_cache_hit = True
 
     # 메모리 컨텍스트를 태스크로 시작 — 호출부가 이미 만들어 둔 RAG task와
     # 동시에 진행된다(RAG task는 이 함수 호출 전에 이미 스레드에서 실행 중).
     mem_task: Optional[asyncio.Task] = None
     if character_name and nickname:
+        # 계측(P1-S4): 조회 *전에* 캐시 상태를 확인해야 "이 턴이 캐시에서
+        # 처리됐는지"를 알 수 있다. 순수 in-memory 조회라 부하가 없다.
+        mem_cache_hit = is_memory_cached(
+            character_name,
+            nickname,
+            room_id=room_id,
+            character_id=character_id,
+        )
         mem_task = asyncio.create_task(
             build_memory_context(
                 character_name,
@@ -1077,6 +1115,7 @@ async def _spawn_parallel_analysis(
             except Exception as e:
                 logger.warning(f"[P6] 메모리 컨텍스트 조회 실패, 빈 컨텍스트로 대체: {e}")
                 pre_mem_ctx = ""
+                mem_ok = False
     finally:
         # await가 정상 반환/Exception 둘 다에서 mem_task는 이미 done 상태다.
         # 이 finally는 외부 취소(CancelledError)로 await 자체가 중단된
@@ -1099,7 +1138,7 @@ async def _spawn_parallel_analysis(
             message, affinity_level, conversation_history, user_mbti, mbti
         )
 
-    return affinity_task, affinity_delta, pre_mem_ctx
+    return affinity_task, affinity_delta, MemoryFetch(pre_mem_ctx, mem_ok, mem_cache_hit)
 
 
 async def _assemble_prompt_and_model(
@@ -1312,7 +1351,7 @@ async def generate_reply(
     # P1 계측: memory task 대기 소요(t_memory) — P6 이후에는 RAG 대기와
     # 겹치므로 t_memory+t_rag를 더 이상 "직렬 합"으로 해석하면 안 된다.
     _t_memory_start = time.perf_counter()
-    affinity_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
+    affinity_task, affinity_delta, _mem = await _spawn_parallel_analysis(
         message, mbti, affinity_level, conversation_history, user_mbti,
         character_name, nickname, character_id, room_id,
     )
@@ -1325,7 +1364,7 @@ async def generate_reply(
     # 4. LLM 호출
     try:
         # 대화 요약 기억 (memory_service): 10메시지마다 요약/핵심정보 갱신 (백그라운드)
-        mem_ctx = _pre_mem_ctx  # 이미 조회한 memory_context 재사용
+        mem_ctx = _mem.context  # 이미 조회한 memory_context 재사용
         if character_name and nickname and conversation_history:
             if _should_extract_memory(_orig_history_len):
                 create_tracked_task(
@@ -1338,7 +1377,10 @@ async def generate_reply(
                     ),
                     name="memory-extraction",
                 )
-            if not mem_ctx:
+            # P1-S4: 빈 문자열은 "기억이 아직 없는 방"에서 정당한 결과다. 예외로
+            # 실패했을 때(_mem.ok=False)만 방어적으로 재조회한다 — 신규 방에서
+            # 같은 함수를 TTFT 직렬 경로에서 한 번 더 부르던 낭비 제거.
+            if not mem_ctx and not _mem.ok:
                 mem_ctx = await build_memory_context(
                     character_name,
                     nickname,
@@ -1448,6 +1490,7 @@ async def generate_reply(
                 t_first_token_ms=_elapsed_ms,
                 complexity=_complexity,
                 crisis_tier=crisis_tier,
+                memory_cache_hit=_mem.cache_hit,
             ),
             name="turn-latency",
         )
@@ -1555,7 +1598,7 @@ async def stream_reply(
     # P1 계측: memory task 대기 소요(t_memory) — P6 이후에는 RAG 대기와
     # 겹치므로 t_memory+t_rag를 더 이상 "직렬 합"으로 해석하면 안 된다.
     _t_memory_start = time.perf_counter()
-    affinity_task, affinity_delta, _pre_mem_ctx = await _spawn_parallel_analysis(
+    affinity_task, affinity_delta, _mem = await _spawn_parallel_analysis(
         message, mbti, affinity_level, conversation_history, user_mbti,
         character_name, nickname, character_id, room_id,
     )
@@ -1572,7 +1615,7 @@ async def stream_reply(
     full_text = ""
     try:
         # 6. 기억 컨텍스트 (N턴 백그라운드 갱신 + 조회)
-        mem_ctx = _pre_mem_ctx
+        mem_ctx = _mem.context
         if character_name and nickname and conversation_history:
             if _should_extract_memory(_orig_history_len):
                 create_tracked_task(
@@ -1582,7 +1625,8 @@ async def stream_reply(
                     ),
                     name="memory-extraction",
                 )
-            if not mem_ctx:
+            # P1-S4: 정당한 빈 결과는 재조회하지 않는다(generate_reply와 동일 규칙).
+            if not mem_ctx and not _mem.ok:
                 mem_ctx = await build_memory_context(
                     character_name, nickname, room_id=room_id, character_id=character_id,
                 )
@@ -1756,6 +1800,7 @@ async def stream_reply(
                 t_first_token_ms=_t_first_token_ms,
                 complexity=_complexity,
                 crisis_tier=crisis_tier,
+                memory_cache_hit=_mem.cache_hit,
             ),
             name="turn-latency",
         )
