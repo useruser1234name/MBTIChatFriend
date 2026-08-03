@@ -460,8 +460,19 @@ async def _finalize_chat_turn(
     }
 
 
-async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
-    """논스트림 경로: 준비 → 전체 응답 생성 → 후처리."""
+async def _run_chat_pipeline(
+    req: ChatRequest,
+    user: Optional[dict],
+    crisis_tier: int = 0,
+    crisis_hint: str = "",
+) -> dict:
+    """논스트림 경로: 준비 → 전체 응답 생성 → 후처리.
+
+    crisis_tier/crisis_hint(2026-08-03 P0-S3): 위기 감지 결과를 생성 경로까지
+    전달한다. 이전에는 select_model_for_crisis 결과가 로그·이벤트 payload에만
+    쓰이고 generate_reply에 넘어가지 않아 Tier1 턴도 mini로 처리될 수 있었고,
+    위기 대응 지침은 도달 불가한 LoRA 경로에만 붙어 사실상 미적용이었다.
+    """
     prep = await _prepare_chat_turn(req, user)
     replies, affinity_delta = await generate_reply(
         message=req.message,
@@ -476,6 +487,8 @@ async def _run_chat_pipeline(req: ChatRequest, user: Optional[dict]) -> dict:
         character_id=prep["effective_character_id"],
         memories=prep["merged_memories"],
         time_context=build_time_context(req.client_local_hour),
+        crisis_tier=crisis_tier,
+        crisis_hint=crisis_hint,
     )
     return await _finalize_chat_turn(
         req,
@@ -559,7 +572,13 @@ async def send_message(
     selected_model = select_model_for_crisis(crisis_result)
     logger.info(f"[ModelRouting] crisis_level={crisis_result['level']}, model={selected_model}")
 
-    result = await _run_chat_pipeline(req, user)
+    # 위기 유형 분류 → 시스템 프롬프트 추가 지침 (P0-S3: 논스트림 경로에도 생성·전달)
+    crisis_type_hint = _build_crisis_hint(req.message, req.mbti, is_crisis, crisis_tier)
+    _effective_tier = crisis_tier if is_crisis else 0
+
+    result = await _run_chat_pipeline(
+        req, user, crisis_tier=_effective_tier, crisis_hint=crisis_type_hint
+    )
 
     replies = result["replies"]
     if is_crisis:
@@ -679,6 +698,8 @@ async def _openai_event_generator(
     record_crisis,
     message_event,
     done_event,
+    crisis_tier: int = 0,
+    crisis_hint: str = "",
 ):
     """OpenAI 경로 SSE 제너레이터: 말풍선이 완결되는 즉시 전송해 TTFB를 단축한다.
 
@@ -687,6 +708,9 @@ async def _openai_event_generator(
     done_event(_done_event)는 클로저로 캡처하던 값을 명시적 파라미터로
     전환했다. SSE 이벤트 이름("message"/"done")·data JSON 구조·예외 시
     폴백 이벤트·yield 순서는 원본과 동일.
+
+    crisis_tier/crisis_hint(2026-08-03 P0-S3): 위기 감지 결과를 stream_reply로
+    전달해 모델 승격 + 위기 지침 주입이 실제로 적용되게 한다.
     """
     prep = await _prepare_chat_turn(req, user)
     room_id = prep["room_id"]
@@ -713,6 +737,8 @@ async def _openai_event_generator(
             memories=prep["merged_memories"],
             room_id=room_id,
             time_context=build_time_context(req.client_local_hour),
+            crisis_tier=crisis_tier,
+            crisis_hint=crisis_hint,
         ):
             if isinstance(item, StreamDone):
                 affinity_delta = item.affinity_delta
@@ -767,6 +793,7 @@ async def stream_message(
 
     # 위기 유형 분류 및 시스템 프롬프트 추가 지침 생성 (공유 헬퍼, S16)
     crisis_type_hint = _build_crisis_hint(req.message, req.mbti, is_crisis, crisis_tier)
+    _effective_tier = crisis_tier if is_crisis else 0
 
     # 위기 개입 문구: 세션당 1회 (히스토리에 이미 권유 문구 있으면 생략)
     _insert_crisis = is_crisis and not _crisis_referral_already_shown(req.conversation_history)
@@ -819,7 +846,10 @@ async def stream_message(
 
     if _use_lora_stream:
         # LoRA 경로: 전체 파이프라인으로 replies/메타 확보 후 토큰 스트리밍 (기존 동작 유지)
-        result = await _run_chat_pipeline(req, user)
+        # 폴백 replies도 위기 인지 상태로 생성되도록 crisis 정보를 함께 전달한다.
+        result = await _run_chat_pipeline(
+            req, user, crisis_tier=_effective_tier, crisis_hint=crisis_type_hint
+        )
         replies = list(result["replies"])
         if _crisis_reply is not None:
             replies = [_crisis_reply] + replies
@@ -833,6 +863,7 @@ async def stream_message(
     # OpenAI 경로: 말풍선 점진 스트리밍 (완결되는 즉시 전송해 TTFB 단축)
     return EventSourceResponse(_openai_event_generator(
         req, user, _crisis_reply, _record_crisis, _message_event, _done_event,
+        crisis_tier=_effective_tier, crisis_hint=crisis_type_hint,
     ))
 
 

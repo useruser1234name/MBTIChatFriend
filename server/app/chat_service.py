@@ -37,7 +37,7 @@ from .quality_service import (
     score_response_async,
 )
 from .metrics_service import record_event_async
-from .model_routing import resolve_model_endpoint
+from .model_routing import resolve_model_endpoint, select_model_for_crisis
 
 logger = logging.getLogger(__name__)
 
@@ -560,6 +560,7 @@ def _build_chat_messages(
     conversation_history: List[HistoryMessage],
     message: str,
     time_context: str = "",
+    crisis_hint: str = "",
 ) -> List[dict]:
     """시스템 프롬프트 + safety + 히스토리 + 현재 메시지로 messages 배열 조립.
 
@@ -567,6 +568,15 @@ def _build_chat_messages(
     정합성을 한 곳에서 보장한다. time_context(C4, 시간대 인지)는
     build_system_prompt의 동적 꼬리 파라미터로 그대로 전달한다 — mood와
     달리 별도 system 메시지가 아니라 프롬프트 본문 안에 들어간다.
+
+    crisis_hint(2026-08-03 P0-S3): 라우터의 _build_crisis_hint가 만든 위기
+    대응 지침(검증/마음챙김/마이크로 행동 등). system 메시지의 **맨 끝**,
+    safety_prompt 뒤에 그대로 이어붙인다 —
+      (i) 정적 프리픽스 뒤의 동적 꼬리라 prefix caching에 영향이 없고,
+      (ii) recency 덕에 지시 준수율이 가장 높다.
+    빈 문자열이면 기존 프롬프트와 바이트 단위로 동일하다(골든 테스트 불변).
+    이전에는 이 지침이 LoRA 제너레이터에만 전달됐고 그 경로가 도달 불가라
+    실질적으로 어디에도 적용되지 않았다.
     """
     # 유저 발화 스타일 미러링(개인화 되먹임 MVP). 규칙 기반·LLM 미호출.
     # 여기 도달하는 conversation_history는 호출부(generate_reply/stream_reply)에서
@@ -595,6 +605,9 @@ def _build_chat_messages(
     # safety_prompt는 거의 변하지 않으므로 정적 system_prompt에 인라인하여 prefix caching 효율 극대화
     safety_prompt = get_safety_system_prompt()
     combined_prompt = f"{system_prompt}\n\n{safety_prompt}" if safety_prompt else system_prompt
+    # 위기 지침은 항상 맨 끝(동적 꼬리) — 빈 문자열이면 위 문자열과 완전히 동일
+    if crisis_hint:
+        combined_prompt = f"{combined_prompt}{crisis_hint}"
     messages: List[dict] = [{"role": "system", "content": combined_prompt}]
     # mood만 별도 system 메시지로 분리 (동적 블록)
     if mood:
@@ -609,12 +622,36 @@ def _build_chat_messages(
     return messages
 
 
+def _apply_crisis_override(model_id: str, crisis_tier: int) -> str:
+    """위기 턴이면 모델을 상위 모델로 승격한다(2026-08-03 P0-S3).
+
+    판정은 model_routing.select_model_for_crisis 를 그대로 재사용해 이중
+    구현을 피한다 — 그 함수의 의도(위기 턴은 파인튜닝/A/B 배정과 무관하게
+    상위 OpenAI 모델로 보낸다)를 여기서도 동일하게 따른다. 다만 알 수 없는
+    tier 값으로 인한 **강등**은 절대 일어나지 않도록 승격 방향만 허용한다.
+
+    이전에는 라우터가 select_model_for_crisis 결과를 로그/이벤트 payload에만
+    쓰고 생성 경로에 넘기지 않아, Tier1 자해 신호 턴도 mini로 처리될 수 있었다.
+    """
+    if crisis_tier < 1:
+        return model_id
+    crisis_model = select_model_for_crisis({"level": crisis_tier})
+    if crisis_model != LLM_MODEL_COMPLEX or crisis_model == model_id:
+        return model_id
+    logger.info(
+        "[Crisis] 위기 감지(tier=%s) → 모델 승격: %s → %s",
+        crisis_tier, model_id, crisis_model,
+    )
+    return crisis_model
+
+
 def _route_model_with_complexity(
-    character_id: str, message: str, history_len: int
+    character_id: str, message: str, history_len: int, crisis_tier: int = 0
 ) -> Tuple[str, Optional[str], str]:
     """모델 선택: 복잡도 라우팅이 기준선, A/B는 그 위의 정책 오버레이.
 
     Returns (model_id, ab_variant, complexity).
+    crisis_tier>=1 이면 모든 분기의 결과를 상위 모델로 승격한다(P0-S3).
     complexity 는 계측용("simple" | "complex") — 분류기 판정과 실제 사용 모델을
     사후에 대조할 수 있도록 turn_latency / A/B 결과 기록에 함께 남긴다.
 
@@ -638,10 +675,11 @@ def _route_model_with_complexity(
 
     finetuned_model = get_model_for_character(character_id) if character_id else None
     if finetuned_model and finetuned_model != LLM_MODEL_COMPLEX:
-        return finetuned_model, None, complexity  # 파인튜닝 모델 우선
+        # 파인튜닝 모델 우선 — 단 위기 턴은 상위 모델로 승격(select_model_for_crisis 의도)
+        return _apply_crisis_override(finetuned_model, crisis_tier), None, complexity
 
     if not character_id:
-        return base_model, None, complexity
+        return _apply_crisis_override(base_model, crisis_tier), None, complexity
 
     try:
         # 지연 임포트: 순환/기동 순서 회피
@@ -656,9 +694,10 @@ def _route_model_with_complexity(
         )
     except Exception as _ab_err:
         logger.warning("[AB] variant 배정 실패, 복잡도 라우팅 결과 유지: %s", _ab_err)
-        return base_model, None, complexity
+        return _apply_crisis_override(base_model, crisis_tier), None, complexity
 
     model_id = LLM_MODEL_COMPLEX if ab_variant == MODEL_ROUTING_ALWAYS_COMPLEX else base_model
+    model_id = _apply_crisis_override(model_id, crisis_tier)
     logger.info(
         "[AB] model_routing: character_id=%s complexity=%s variant=%s → model=%s",
         character_id, complexity, ab_variant, model_id,
@@ -793,6 +832,7 @@ async def _record_turn_latency_event(
     t_rag_ms: float,
     t_first_token_ms: float,
     complexity: str = "",
+    crisis_tier: int = 0,
 ) -> None:
     """턴 단계별 레이턴시(P1 계측)를 turn_latency 이벤트로 기록.
 
@@ -806,6 +846,11 @@ async def _record_turn_latency_event(
     complexity(2026-08-03 P0-S2): 복잡도 분류기 판정("simple"|"complex").
     실제 사용 모델은 기존 model_id 필드가 그대로 담고 있으므로, 둘을 대조하면
     분류기 정확도와 A/B 정책 오버레이의 승격 빈도를 사후 검증할 수 있다.
+
+    crisis_tier(2026-08-03 P0-S3): 위기 감지 tier(0=비위기). complexity는
+    분류기 원판정 그대로 두고 이 필드를 추가했으므로,
+    complexity="simple" & crisis_tier>=1 & model_id=상위모델 조합으로
+    "위기 승격이 실제 일어난 턴"을 사후에 정확히 셀 수 있다.
     """
     payload = {
         "model_id": model_id,
@@ -814,10 +859,11 @@ async def _record_turn_latency_event(
         "t_rag_ms": round(t_rag_ms, 2),
         "t_first_token_ms": round(t_first_token_ms, 2),
         "complexity": complexity,
+        "crisis_tier": crisis_tier,
     }
     logger.info(
-        "[latency] room=%s model=%s complexity=%s streaming=%s memory=%.1fms rag=%.1fms first_token=%.1fms",
-        room_id, model_id, complexity, streaming, t_memory_ms, t_rag_ms, t_first_token_ms,
+        "[latency] room=%s model=%s complexity=%s crisis_tier=%s streaming=%s memory=%.1fms rag=%.1fms first_token=%.1fms",
+        room_id, model_id, complexity, crisis_tier, streaming, t_memory_ms, t_rag_ms, t_first_token_ms,
     )
     try:
         await record_event_async(
@@ -1077,6 +1123,8 @@ async def _assemble_prompt_and_model(
     character_id: str,
     log_lora_routing: bool = True,
     time_context: str = "",
+    crisis_tier: int = 0,
+    crisis_hint: str = "",
 ) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, Optional[str], str]:
     """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/복잡도/AB 오버레이) + LoRA 클라이언트 해석.
 
@@ -1090,6 +1138,10 @@ async def _assemble_prompt_and_model(
     complexity는 계측 전용(turn_latency / A/B 결과 기록)이다.
     time_context(C4)는 그대로 _build_chat_messages → build_system_prompt로
     전달한다(동적 꼬리 전용 파라미터, 정적 프리픽스 불변).
+
+    crisis_tier/crisis_hint(2026-08-03 P0-S3): 라우터가 detect_crisis_v2 /
+    _build_crisis_hint 로 계산해 넘긴다. tier는 모델 승격에, hint는 시스템
+    프롬프트 꼬리 주입에 쓰인다. 둘 다 기본값(0/"")이면 기존 동작과 동일.
     """
     messages = _build_chat_messages(
         mbti=mbti,
@@ -1110,11 +1162,12 @@ async def _assemble_prompt_and_model(
         conversation_history=conversation_history,
         message=message,
         time_context=time_context,
+        crisis_hint=crisis_hint,
     )
 
-    # 모델 선택 (복잡도 기반 라우팅이 기준선 + A/B 정책 오버레이)
+    # 모델 선택 (복잡도 기반 라우팅이 기준선 + A/B 정책 오버레이 + 위기 승격)
     model_id, ab_variant, complexity = _route_model_with_complexity(
-        character_id, message, len(conversation_history)
+        character_id, message, len(conversation_history), crisis_tier=crisis_tier
     )
 
     # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
@@ -1209,6 +1262,8 @@ async def generate_reply(
     room_id: str = "",
     owner_uid: str = "",
     time_context: str = "",
+    crisis_tier: int = 0,
+    crisis_hint: str = "",
 ) -> Tuple[List[ReplyPart], int]:
     """LLM을 사용하여 대화 응답 생성, (replies, affinity_delta) 반환.
 
@@ -1216,6 +1271,11 @@ async def generate_reply(
     문구로 미리 변환해 넘긴다("" 이면 시간 블록 자체가 프롬프트에 삽입되지
     않음, 기존 동작과 동일). build_system_prompt의 동적 꼬리 파라미터로만
     전달되므로 정적 프리픽스(prefix caching 대상)에는 영향 없다.
+
+    crisis_tier/crisis_hint(2026-08-03 P0-S3): 라우터가 detect_crisis_v2 /
+    _build_crisis_hint 결과를 넘긴다. tier>=1이면 복잡도/A/B 판정과 무관하게
+    상위 모델로 승격하고, hint는 시스템 프롬프트 맨 끝에 주입되어 캐릭터
+    응답 자체가 위기 상황을 인지하게 한다. 기본값(0/"")이면 기존 동작 그대로.
     """
 
     if conversation_history is None:
@@ -1305,6 +1365,7 @@ async def generate_reply(
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
             character_id, time_context=time_context,
+            crisis_tier=crisis_tier, crisis_hint=crisis_hint,
         )
 
         _t_start = time.monotonic()
@@ -1386,6 +1447,7 @@ async def generate_reply(
                 t_rag_ms=_t_rag_ms,
                 t_first_token_ms=_elapsed_ms,
                 complexity=_complexity,
+                crisis_tier=crisis_tier,
             ),
             name="turn-latency",
         )
@@ -1433,6 +1495,8 @@ async def stream_reply(
     room_id: str = "",
     owner_uid: str = "",
     time_context: str = "",
+    crisis_tier: int = 0,
+    crisis_hint: str = "",
 ) -> AsyncGenerator[Union[ReplyPart, StreamDone], None]:
     """말풍선 점진 스트리밍 생성기.
 
@@ -1452,6 +1516,9 @@ async def stream_reply(
 
     time_context(C4): generate_reply와 동일 — 라우터가 미리 변환한 시간대
     문구를 build_system_prompt 동적 꼬리로만 전달한다.
+
+    crisis_tier/crisis_hint(2026-08-03 P0-S3): generate_reply와 동일 계약 —
+    tier>=1이면 상위 모델 승격, hint는 시스템 프롬프트 꼬리에 주입.
     """
     if conversation_history is None:
         conversation_history = []
@@ -1538,6 +1605,7 @@ async def stream_reply(
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
             character_id, log_lora_routing=False, time_context=time_context,
+            crisis_tier=crisis_tier, crisis_hint=crisis_hint,
         )
 
         # 9. 스트리밍 호출 + 증분 파싱
@@ -1687,6 +1755,7 @@ async def stream_reply(
                 t_rag_ms=_t_rag_ms,
                 t_first_token_ms=_t_first_token_ms,
                 complexity=_complexity,
+                crisis_tier=crisis_tier,
             ),
             name="turn-latency",
         )
