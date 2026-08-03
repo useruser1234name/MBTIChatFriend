@@ -1,6 +1,7 @@
 package com.example.mbtichatfriend.ui.chat
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
@@ -145,6 +146,8 @@ fun ChatScreen(
     val messages = (uiState as? ChatUiState.Success)?.messages ?: emptyList()
     val character = (uiState as? ChatUiState.Success)?.character
     val isOnline = (uiState as? ChatUiState.Success)?.isOnline ?: true
+    // A2: StateFlow.value 직접 읽기는 Compose가 추적 못해 피드백 탭 시 아이콘 갱신이 지연됨 — collectAsState로 구독
+    val feedbackMap by viewModel.feedbackMap.collectAsState()
     val listState = rememberLazyListState()
     var input by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
@@ -258,8 +261,16 @@ fun ChatScreen(
                 ) {
                     items(messages, key = { it.id }) { msg ->
                         val index = messages.indexOf(msg)
+                        // A1: visible = true(상수)는 초기 컴포지션이 이미 target 상태로 시작해 enter 전이가
+                        // 재생되지 않는 no-op이었음. MutableTransitionState로 false→true 전이를 명시해
+                        // 최초 컴포지션 시 실제로 fade+slide가 재생되도록 수정.
+                        // (LazyColumn 리사이클로 화면 밖으로 나갔다 재구성되면 remember가 초기화되어
+                        //  재생될 수 있음 — 의도적으로 허용)
+                        val visibleState = remember(msg.id) {
+                            MutableTransitionState(false).apply { targetState = true }
+                        }
                         AnimatedVisibility(
-                            visible = true,
+                            visibleState = visibleState,
                             enter = fadeIn(tween(300)) + slideInVertically(
                                 initialOffsetY = { 40 },
                                 animationSpec = spring(stiffness = Spring.StiffnessLow)
@@ -270,7 +281,7 @@ fun ChatScreen(
                                 avatarId = avatarId,
                                 avatar = avatar,
                                 onRetry = { messageId -> viewModel.retrySend(messageId) },
-                                feedback = viewModel.feedbackMap.value[msg.id],
+                                feedback = feedbackMap[msg.id],
                                 onFeedback = { messageId, type -> viewModel.submitFeedback(messageId, type) },
                                 onLongPress = { shareTargetIndex = index }
                             )
