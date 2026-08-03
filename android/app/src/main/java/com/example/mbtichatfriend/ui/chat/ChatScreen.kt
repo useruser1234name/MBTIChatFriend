@@ -12,6 +12,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.foundation.shape.CircleShape
@@ -82,6 +84,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -256,11 +259,40 @@ fun ChatScreen(
                         // U8: 접근성 — 새 메시지(응답) 도착 시 TalkBack이 자동으로 낭독하도록
                         .semantics { liveRegion = LiveRegionMode.Polite },
                     state = listState,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    // R2: 그룹 내부(2dp)/그룹 경계(4dp) 간격이 다르므로 균일 spacedBy 대신
+                    // 각 아이템에 개별 top padding을 주는 방식으로 전환 (아래 itemsIndexed 참고)
                 ) {
-                    items(messages, key = { it.id }) { msg ->
-                        val index = messages.indexOf(msg)
+                    // A6: messages.indexOf(msg) O(n²) 대신 itemsIndexed로 인덱스를 직접 받는다
+                    // (롱프레스 공유 인덱스 용도는 그대로 유지)
+                    itemsIndexed(messages, key = { _, msg -> msg.id }) { index, msg ->
+                        val prevMsg = messages.getOrNull(index - 1)
+                        val nextMsg = messages.getOrNull(index + 1)
+                        // R2: 같은 발화자 + 20초 이내 연속 메시지를 하나의 그룹으로 취급
+                        val sameAsPrev = prevMsg != null &&
+                            prevMsg.isFromUser == msg.isFromUser &&
+                            (msg.createdAt - prevMsg.createdAt) in 0..GROUP_WINDOW_MS
+                        val sameAsNext = nextMsg != null &&
+                            nextMsg.isFromUser == msg.isFromUser &&
+                            (nextMsg.createdAt - msg.createdAt) in 0..GROUP_WINDOW_MS
+                        val position = when {
+                            !sameAsPrev && !sameAsNext -> BubblePosition.SOLO
+                            !sameAsPrev && sameAsNext -> BubblePosition.FIRST
+                            sameAsPrev && sameAsNext -> BubblePosition.MIDDLE
+                            else -> BubblePosition.LAST
+                        }
+                        // 스트리밍 중인 마지막 AI 버블은 다음 버블이 곧 도착할 수 있으므로
+                        // 타임스탬프 확정을 보류한다 — 다음 버블 도착 또는 타이핑 종료 시 자연 갱신
+                        val hideForActiveTyping = !msg.isFromUser &&
+                            index == messages.lastIndex && viewModel.isTyping
+                        val showTimestamp = when {
+                            hideForActiveTyping -> false
+                            !sameAsNext -> true
+                            // 그룹 중이라도 분(minute)이 바뀌면 표시
+                            else -> minuteBucket(msg.createdAt) != minuteBucket(nextMsg!!.createdAt)
+                        }
+                        val topSpacing = if (index == 0) 0.dp else if (sameAsPrev) 2.dp else 4.dp
+
                         // A1: visible = true(상수)는 초기 컴포지션이 이미 target 상태로 시작해 enter 전이가
                         // 재생되지 않는 no-op이었음. MutableTransitionState로 false→true 전이를 명시해
                         // 최초 컴포지션 시 실제로 fade+slide가 재생되도록 수정.
@@ -269,27 +301,37 @@ fun ChatScreen(
                         val visibleState = remember(msg.id) {
                             MutableTransitionState(false).apply { targetState = true }
                         }
-                        AnimatedVisibility(
-                            visibleState = visibleState,
-                            enter = fadeIn(tween(300)) + slideInVertically(
-                                initialOffsetY = { 40 },
-                                animationSpec = spring(stiffness = Spring.StiffnessLow)
-                            )
-                        ) {
-                            MessageBubble(
-                                msg = msg,
-                                avatarId = avatarId,
-                                avatar = avatar,
-                                onRetry = { messageId -> viewModel.retrySend(messageId) },
-                                feedback = feedbackMap[msg.id],
-                                onFeedback = { messageId, type -> viewModel.submitFeedback(messageId, type) },
-                                onLongPress = { shareTargetIndex = index }
-                            )
+                        Column(modifier = Modifier.padding(top = topSpacing)) {
+                            AnimatedVisibility(
+                                visibleState = visibleState,
+                                enter = fadeIn(tween(300)) + slideInVertically(
+                                    initialOffsetY = { 40 },
+                                    animationSpec = spring(stiffness = Spring.StiffnessLow)
+                                )
+                            ) {
+                                MessageBubble(
+                                    msg = msg,
+                                    avatarId = avatarId,
+                                    avatar = avatar,
+                                    onRetry = { messageId -> viewModel.retrySend(messageId) },
+                                    feedback = feedbackMap[msg.id],
+                                    onFeedback = { messageId, type -> viewModel.submitFeedback(messageId, type) },
+                                    onLongPress = { shareTargetIndex = index },
+                                    showAvatar = !sameAsPrev,
+                                    showTimestamp = showTimestamp,
+                                    position = position
+                                )
+                            }
                         }
                     }
 
                     if (viewModel.isTyping) {
-                        item { TypingBubble(avatarId, avatar) }
+                        item {
+                            // 타이핑 인디케이터는 항상 그룹 경계(4dp) 간격으로 취급
+                            Column(modifier = Modifier.padding(top = 4.dp)) {
+                                TypingBubble(avatarId, avatar)
+                            }
+                        }
                     }
                 }
             }
@@ -304,7 +346,9 @@ fun ChatScreen(
                 },
                 onChipClick = { chipText ->
                     viewModel.send(chipText)
-                }
+                },
+                // R5: 대화 스타터 칩 조건 노출 — 첫 대화(메시지 0개)만 기본 노출
+                hasMessages = messages.isNotEmpty()
             )
         }
 
@@ -727,13 +771,18 @@ private fun MessageBubble(
     onRetry: ((Long) -> Unit)? = null,
     feedback: String? = null,
     onFeedback: ((Long, String) -> Unit)? = null,
-    onLongPress: (() -> Unit)? = null
+    onLongPress: (() -> Unit)? = null,
+    showAvatar: Boolean = true,
+    showTimestamp: Boolean = true,
+    position: BubblePosition = BubblePosition.SOLO
 ) {
     if (msg.isFromUser) {
         UserMessageBubble(
             msg = msg,
             onRetry = onRetry,
-            onLongPress = onLongPress
+            onLongPress = onLongPress,
+            showTimestamp = showTimestamp,
+            position = position
         )
     } else {
         AiMessageBubble(
@@ -742,7 +791,10 @@ private fun MessageBubble(
             avatar = avatar,
             feedback = feedback,
             onFeedback = onFeedback,
-            onLongPress = onLongPress
+            onLongPress = onLongPress,
+            showAvatar = showAvatar,
+            showTimestamp = showTimestamp,
+            position = position
         )
     }
 }
@@ -752,7 +804,9 @@ private fun MessageBubble(
 private fun UserMessageBubble(
     msg: ChatMessage,
     onRetry: ((Long) -> Unit)? = null,
-    onLongPress: (() -> Unit)? = null
+    onLongPress: (() -> Unit)? = null,
+    showTimestamp: Boolean = true,
+    position: BubblePosition = BubblePosition.SOLO
 ) {
     val isDark = isSystemInDarkTheme()
     val timeFormat = remember { SimpleDateFormat("a h:mm", Locale.KOREAN) }
@@ -772,7 +826,8 @@ private fun UserMessageBubble(
     ) {
         Box {
             Surface(
-                shape = RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp),
+                // R2: 연속 그룹 위치에 따라 모서리 라운드 축소(이어치기 표현)
+                shape = bubbleShape(position, isUser = true),
                 color = if (msg.sendStatus == "FAILED") userBubbleColor.copy(alpha = 0.6f) else userBubbleColor,
                 shadowElevation = 1.dp,
                 modifier = Modifier
@@ -872,12 +927,15 @@ private fun UserMessageBubble(
                     }
                 }
                 else -> {
-                    Text(
-                        text = timeText,
-                        style = MaterialTheme.typography.labelSmall,
-                        // U8: 접근성 — 저대비 타임스탬프 0.6 → 0.75
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                    )
+                    // R2: 연속 그룹 중간 버블은 타임스탬프를 생략(그룹 마지막 or 분 변경 시에만 표시)
+                    if (showTimestamp) {
+                        Text(
+                            text = timeText,
+                            style = MaterialTheme.typography.labelSmall,
+                            // U8: 접근성 — 저대비 타임스탬프 0.6 → 0.75
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        )
+                    }
                 }
             }
         }
@@ -892,7 +950,10 @@ private fun AiMessageBubble(
     avatar: CharacterAvatar? = null,
     feedback: String? = null,
     onFeedback: ((Long, String) -> Unit)? = null,
-    onLongPress: (() -> Unit)? = null
+    onLongPress: (() -> Unit)? = null,
+    showAvatar: Boolean = true,
+    showTimestamp: Boolean = true,
+    position: BubblePosition = BubblePosition.SOLO
 ) {
     val isDark = isSystemInDarkTheme()
     val timeFormat = remember { SimpleDateFormat("a h:mm", Locale.KOREAN) }
@@ -923,7 +984,10 @@ private fun AiMessageBubble(
         verticalAlignment = Alignment.Top
     ) {
         // 캐릭터 아바타 (감정 이모지 or Compose 캐릭터)
-        if (avatarId.startsWith("v2:")) {
+        // R2: 연속 그룹의 첫 버블에만 아바타 표시, 나머지는 아바타 폭만큼 빈 공간 유지(들여쓰기)
+        if (!showAvatar) {
+            Spacer(Modifier.size(36.dp))
+        } else if (avatarId.startsWith("v2:")) {
             CharacterFace(
                 avatarId = avatarId,
                 modifier = Modifier
@@ -960,7 +1024,8 @@ private fun AiMessageBubble(
         Column {
             Box {
                 Surface(
-                    shape = RoundedCornerShape(20.dp, 20.dp, 20.dp, 4.dp),
+                    // R2: 연속 그룹 위치에 따라 모서리 라운드 축소(이어치기 표현)
+                    shape = bubbleShape(position, isUser = false),
                     color = emotionBubbleColor,
                     border = emotionBorder,
                     tonalElevation = 1.dp,
@@ -1004,12 +1069,15 @@ private fun AiMessageBubble(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
             ) {
-                Text(
-                    text = timeText,
-                    style = MaterialTheme.typography.labelSmall,
-                    // U8: 접근성 — 저대비 타임스탬프 0.6 → 0.75
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                )
+                // R2: 연속 그룹 중간 버블은 타임스탬프를 생략(그룹 마지막 or 분 변경 시에만 표시)
+                if (showTimestamp) {
+                    Text(
+                        text = timeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        // U8: 접근성 — 저대비 타임스탬프 0.6 → 0.75
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    )
+                }
 
                 // 피드백 아이콘 (500ms 후 fade-in)
                 if (onFeedback != null) {
@@ -1156,6 +1224,7 @@ private fun ChatInputBar(
     onSend: () -> Unit,
     starterChips: List<String> = emptyList(),
     onChipClick: (String) -> Unit = {},
+    hasMessages: Boolean = false,
 ) {
     val sendEnabled = input.isNotBlank()
     val sendScale by animateFloatAsState(
@@ -1163,35 +1232,54 @@ private fun ChatInputBar(
         label = "sendScale"
     )
 
+    // R5: 대화 스타터 칩 조건 노출 — 첫 대화(메시지 0개)만 기본 노출, 대화 시작 후엔 입력창
+    // 포커스 시에만 표시. hasMessages가 false→true로 바뀌는 순간(첫 전송) remember 키가
+    // 갱신되어 자동으로 숨김 상태(!hasMessages = false)로 리셋된다.
+    var chipsVisible by remember(hasMessages) { mutableStateOf(!hasMessages) }
+    val hideChipsOnSend = {
+        if (hasMessages) chipsVisible = false
+    }
+
     Surface(
         tonalElevation = 3.dp,
         color = MaterialTheme.colorScheme.surface,
         shadowElevation = 4.dp
     ) {
         Column {
-            // 대화 스타터 chip — 항상 노출 (26차 스프린트)
             val chips = starterChips.ifEmpty {
                 listOf("오늘 하루 어땠어?", "나 고민이 있어", "재미있는 얘기 해줘!")
             }
-            LazyRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(horizontal = 4.dp)
+            AnimatedVisibility(
+                visible = chipsVisible,
+                enter = slideInVertically(
+                    initialOffsetY = { -it / 2 },
+                    animationSpec = tween(200)
+                ) + fadeIn(tween(200)),
+                exit = slideOutVertically(
+                    targetOffsetY = { -it / 2 },
+                    animationSpec = tween(150)
+                ) + fadeOut(tween(150))
             ) {
-                items(chips) { chipText ->
-                    SuggestionChip(
-                        onClick = { onChipClick(chipText) },
-                        label = {
-                            Text(
-                                text = chipText,
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1
-                            )
-                        },
-                        shape = RoundedCornerShape(20.dp),
-                    )
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
+                ) {
+                    items(chips) { chipText ->
+                        SuggestionChip(
+                            onClick = { onChipClick(chipText) },
+                            label = {
+                                Text(
+                                    text = chipText,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1
+                                )
+                            },
+                            shape = RoundedCornerShape(20.dp),
+                        )
+                    }
                 }
             }
 
@@ -1204,7 +1292,14 @@ private fun ChatInputBar(
                 OutlinedTextField(
                     value = input,
                     onValueChange = onInputChange,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        // R5: 입력창 포커스/포커스 해제에 따라 칩 노출 토글(첫 대화 상태는 무조건 노출 유지)
+                        .onFocusChanged { focusState ->
+                            if (hasMessages) {
+                                chipsVisible = focusState.isFocused
+                            }
+                        },
                     placeholder = {
                         Text(
                             "메시지를 입력하세요",
@@ -1222,11 +1317,21 @@ private fun ChatInputBar(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
                     ),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { if (sendEnabled) onSend() })
+                    keyboardActions = KeyboardActions(onSend = {
+                        if (sendEnabled) {
+                            onSend()
+                            hideChipsOnSend()
+                        }
+                    })
                 )
                 Spacer(Modifier.width(8.dp))
                 IconButton(
-                    onClick = { if (sendEnabled) onSend() },
+                    onClick = {
+                        if (sendEnabled) {
+                            onSend()
+                            hideChipsOnSend()
+                        }
+                    },
                     enabled = sendEnabled,
                     modifier = Modifier
                         .size(48.dp)
@@ -1246,6 +1351,35 @@ private fun ChatInputBar(
                     )
                 }
             }
+        }
+    }
+}
+
+// R2: 연속 말풍선 그룹핑 — 같은 발화자의 메시지가 이 간격(ms) 이내로 연달아 오면 한 그룹으로 취급
+private const val GROUP_WINDOW_MS = 20_000L
+
+// R2: 그룹 내 버블의 위치. 아바타 노출/타임스탬프 노출/모서리 라운드 결정에 쓰인다.
+private enum class BubblePosition { SOLO, FIRST, MIDDLE, LAST }
+
+private fun minuteBucket(epochMs: Long): Long = epochMs / 60_000L
+
+// R2: 그룹 위치별 모서리 라운드 — 카카오톡식 이어치기. "발화자 쪽"은 유저=우측(end), AI=좌측(start).
+// SOLO/FIRST: 기존 모양 그대로(발화자 쪽 하단만 4dp). MIDDLE: 발화자 쪽 상/하단 모두 4dp.
+// LAST: 발화자 쪽 상단만 4dp(이전 버블과 이어짐), 하단은 20dp(그룹의 끝을 닫음).
+private fun bubbleShape(position: BubblePosition, isUser: Boolean): RoundedCornerShape {
+    val full = 20.dp
+    val small = 4.dp
+    return if (isUser) {
+        when (position) {
+            BubblePosition.SOLO, BubblePosition.FIRST -> RoundedCornerShape(full, full, small, full)
+            BubblePosition.MIDDLE -> RoundedCornerShape(full, small, small, full)
+            BubblePosition.LAST -> RoundedCornerShape(full, small, full, full)
+        }
+    } else {
+        when (position) {
+            BubblePosition.SOLO, BubblePosition.FIRST -> RoundedCornerShape(full, full, full, small)
+            BubblePosition.MIDDLE -> RoundedCornerShape(small, full, full, small)
+            BubblePosition.LAST -> RoundedCornerShape(small, full, full, full)
         }
     }
 }
