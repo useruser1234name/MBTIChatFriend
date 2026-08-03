@@ -772,7 +772,7 @@ FEW_SHOT_EXAMPLES = {
             {"user": "오늘 힘든 일 있었어", "assistant": [{"text": "괜찮아, 내가 여기 있잖아", "emotion": "WORRIED"}, {"text": "다 말해줘... 내가 안아줄게", "emotion": "LOVE"}]},
         ],
     },
-    "ST": {  # ISTJ, ISFJ, ESTJ, ESFJ
+    "SJ": {  # ISTJ, ISFJ, ESTJ, ESFJ
         "low": [
             {"user": "안녕하세요", "assistant": [{"text": "네, 안녕하세요.", "emotion": "NEUTRAL"}, {"text": "편하게 말해도 됩니다.", "emotion": "NEUTRAL"}]},
             {"user": "오늘 뭐 했어?", "assistant": [{"text": "일 좀 하고 정리하고 있었어요.", "emotion": "NEUTRAL"}]},
@@ -786,7 +786,7 @@ FEW_SHOT_EXAMPLES = {
             {"user": "나 힘들어", "assistant": [{"text": "뭔 일이야", "emotion": "WORRIED"}, {"text": "내가 옆에 있을게. 약속", "emotion": "LOVE"}]},
         ],
     },
-    "SF": {  # ISTP, ISFP, ESTP, ESFP
+    "SP": {  # ISTP, ISFP, ESTP, ESFP
         "low": [
             {"user": "안녕!", "assistant": [{"text": "안녕~! ㅎㅎ", "emotion": "HAPPY"}, {"text": "우리 친해지자!", "emotion": "PLAYFUL"}]},
             {"user": "뭐 하고 있어?", "assistant": [{"text": "나? 그냥 놀고 있었어 ㅋㅋ", "emotion": "PLAYFUL"}]},
@@ -803,9 +803,23 @@ FEW_SHOT_EXAMPLES = {
 }
 
 
+def _few_shot_group(mbti: str) -> str:
+    """Few-shot 예시 선택 전용 MBTI 그룹 분류 (NT/NF/SJ/SP).
+
+    `get_mbti_group`(NT/NF/ST/SF, 궁합·호감도 가중치용 정본)과는 다른 축이다.
+    few-shot 예시는 판단/인식(J/P) 성향에 따라 말투가 갈리므로(SJ=차분·보살핌형,
+    SP=활발·놀이형), S 유형은 T/F가 아니라 J/P로 재분류해서 예시를 고른다.
+    NT/NF는 get_mbti_group과 동일하게 유지한다.
+    """
+    group = _get_mbti_group(mbti)
+    if group in ("NT", "NF"):
+        return group
+    return "SJ" if mbti[3:4] == "J" else "SP"
+
+
 def _build_few_shot_section(mbti: str, affinity_level: int) -> str:
     """MBTI 그룹 + 호감도 기반 few-shot 예시 생성"""
-    group = _get_mbti_group(mbti)
+    group = _few_shot_group(mbti)
     tier = "low" if affinity_level <= 2 else "mid" if affinity_level == 3 else "high"
     examples = FEW_SHOT_EXAMPLES.get(group, {}).get(tier, [])
     if not examples:
