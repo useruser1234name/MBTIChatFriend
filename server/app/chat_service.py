@@ -2219,15 +2219,44 @@ def _mock_diary(mbti: str, nickname: str, affinity_level: int) -> str:
     return mock_diaries.get(group, mock_diaries["NF"])
 
 
-def _calculate_delay(text: str) -> int:
-    """텍스트 길이에 따른 자연스러운 딜레이 계산"""
+# 감정별 딜레이 가중치: 즉각 반응(놀람/화남)은 짧게, 머뭇거림(걱정/슬픔)은 길게
+_EMOTION_DELAY_MULTIPLIER = {
+    "SURPRISED": 0.85,
+    "ANGRY": 0.85,
+    "WORRIED": 1.2,
+    "SAD": 1.2,
+}
+
+_DELAY_MIN_MS = 300
+_DELAY_MAX_MS = 3500
+_FIRST_BUBBLE_EXTRA_MIN_MS = 300
+_FIRST_BUBBLE_EXTRA_MAX_MS = 500
+
+
+def _calculate_delay(text: str, emotion: str = "", is_first_bubble: bool = False) -> int:
+    """텍스트 길이 기반 기본 딜레이에 지터/감정 가중치/첫 버블 가산을 적용.
+
+    - 기본값: 5자 이하 800ms, 20자 이하 1200ms, 이후 length*60+500 (최대 3000ms)
+    - ±15% 랜덤 지터 (base * uniform(0.85, 1.15))
+    - 감정별 배수: SURPRISED/ANGRY 0.85배(즉각 반응), WORRIED/SAD 1.2배(머뭇거림)
+    - 멀티 버블 응답의 첫 버블은 +300~500ms (생각 시작하는 텀)
+    - 최종 범위는 [300ms, 3500ms]로 clamp
+    """
     length = len(text)
     if length <= 5:  # 짧은 리액션 (ㅋㅋ, 헐, 응)
-        return 800
+        base = 800.0
     elif length <= 20:
-        return 1200
+        base = 1200.0
     else:
-        return min(length * 60 + 500, 3000)
+        base = float(min(length * 60 + 500, 3000))
+
+    base *= _EMOTION_DELAY_MULTIPLIER.get(emotion, 1.0)
+    delay = base * random.uniform(0.85, 1.15)
+
+    if is_first_bubble:
+        delay += random.uniform(_FIRST_BUBBLE_EXTRA_MIN_MS, _FIRST_BUBBLE_EXTRA_MAX_MS)
+
+    return int(max(_DELAY_MIN_MS, min(delay, _DELAY_MAX_MS)))
 
 
 def _parse_reply(content: str) -> List[ReplyPart]:
@@ -2251,7 +2280,8 @@ def _parse_reply(content: str) -> List[ReplyPart]:
                     emotion = item.get("emotion", "NEUTRAL")
                     if emotion not in valid_emotions:
                         emotion = "NEUTRAL"
-                    replies.append(ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text)))
+                    is_first = not replies
+                    replies.append(ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text, emotion, is_first)))
             if replies:
                 return replies
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -2274,7 +2304,8 @@ def _parse_reply(content: str) -> List[ReplyPart]:
                         emotion = item.get("emotion", "NEUTRAL")
                         if emotion not in valid_emotions:
                             emotion = "NEUTRAL"
-                        replies.append(ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text)))
+                        is_first = not replies
+                        replies.append(ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text, emotion, is_first)))
                 if replies:
                     return replies
     except (json.JSONDecodeError, KeyError, TypeError):
@@ -2291,7 +2322,8 @@ def _parse_reply(content: str) -> List[ReplyPart]:
                 if text:
                     if emotion not in valid_emotions:
                         emotion = "NEUTRAL"
-                    replies.append(ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text)))
+                    is_first = not replies
+                    replies.append(ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text, emotion, is_first)))
             if replies:
                 return replies
     except Exception:
@@ -2303,8 +2335,8 @@ def _parse_reply(content: str) -> List[ReplyPart]:
         sentences = [content.strip()]
 
     return [
-        ReplyPart(text=s, emotion="NEUTRAL", delay=_calculate_delay(s))
-        for s in sentences if s
+        ReplyPart(text=s, emotion="NEUTRAL", delay=_calculate_delay(s, "NEUTRAL", i == 0))
+        for i, s in enumerate(sentences) if s
     ]
 
 
@@ -2395,7 +2427,8 @@ class IncrementalReplyParser:
         emotion = d.get("emotion", "NEUTRAL")
         if emotion not in self._VALID_EMOTIONS:
             emotion = "NEUTRAL"
-        return ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text))
+        is_first = self.emitted_count == 0
+        return ReplyPart(text=text, emotion=emotion, delay=_calculate_delay(text, emotion, is_first))
 
 
 # ── MBTI 그룹별 목업 응답 ──────────────────────────────────────
