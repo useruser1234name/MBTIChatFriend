@@ -9,6 +9,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from ..auth_middleware import require_auth_always, verify_firebase_token
+from ..metrics_service import get_session_stats
 from ..models import FeedbackRequest, QualityDashboardResponse
 from ..postgres import execute as pg_execute
 from ..postgres_async import get_async_db
@@ -138,6 +139,22 @@ async def get_feedback_summary(room_id: str):
         room_id,
     )
     return {"count": row["count"] if row else 0, "avg_rating": row["avg_rating"] if row else None}
+
+
+@router.get("/metrics/session-stats")
+async def session_stats(
+    days: int = 7,
+    group_by: str = "room",
+    user: Optional[dict] = Depends(verify_firebase_token),
+):
+    """세션 통계 조회 — 30분 gap 휴리스틱으로 metric_events(chat_turn/app_open)에서
+    세션을 파생(P3, 2026-08-03 회의). 신규 계측 없이 조회 계층에서만 집계한다.
+
+    group_by: "room"(room_id 기준) 또는 "user"(user_id 기준).
+    """
+    if group_by not in ("room", "user"):
+        raise HTTPException(status_code=400, detail="group_by must be 'room' or 'user'")
+    return get_session_stats(days=days, group_by=group_by)
 
 
 @router.get("/finetune/audit")
