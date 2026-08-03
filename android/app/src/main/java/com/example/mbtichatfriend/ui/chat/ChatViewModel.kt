@@ -108,6 +108,32 @@ class ChatViewModel @Inject constructor(
     var isTalking by mutableStateOf(false)
         private set
 
+    /**
+     * R9: 전송 후 4초가 지나도 첫 버블이 도착하지 않으면 true로 전환 — ChatScreen이
+     * "생각하는 중..." → "조금만 기다려줘..."로 문구를 바꾸는 데 사용.
+     * 첫 Message/Error/Done 수신 시 타이머가 취소되며 false로 리셋된다. 선톡(maybeSendProactiveMessage)
+     * 경로에는 적용하지 않는다.
+     */
+    var longWait by mutableStateOf(false)
+        private set
+
+    private var longWaitJob: kotlinx.coroutines.Job? = null
+
+    private fun startLongWaitTimer() {
+        longWaitJob?.cancel()
+        longWait = false
+        longWaitJob = viewModelScope.launch {
+            delay(LONG_WAIT_THRESHOLD_MS)
+            longWait = true
+        }
+    }
+
+    private fun cancelLongWaitTimer() {
+        longWaitJob?.cancel()
+        longWaitJob = null
+        longWait = false
+    }
+
     /** messageId → feedbackType ("thumbs_up" | "thumbs_down") — FeedbackUseCase에 위임 */
     val feedbackMap = feedbackUseCase.feedbackMap
 
@@ -134,8 +160,9 @@ class ChatViewModel @Inject constructor(
     private val _showFeedbackSheet = MutableStateFlow(false)
     val showFeedbackSheet: StateFlow<Boolean> = _showFeedbackSheet.asStateFlow()
 
-    // 세션 시작 시각 (ms) — 피드백 QS 시간 조건 판정용
-    private val sessionStartMs = System.currentTimeMillis()
+    // 세션 시작 시각 (ms) — 피드백 QS 시간 조건 판정용.
+    // R4: ChatScreen에서도 "이번 세션에서 새로 도착한 메시지" 판정에 재사용하므로 공개.
+    val sessionStartMs = System.currentTimeMillis()
 
     // 세션 피드백(별점) 제출용 세션 식별자 — ViewModel(=화면) 생명주기와 1:1
     private val sessionId: String = java.util.UUID.randomUUID().toString()
@@ -379,6 +406,8 @@ class ChatViewModel @Inject constructor(
             isTyping = true
             isTalking = true
             errorMessage = null
+            // R9: 첫 버블 도착까지 4초가 걸리면 대기 문구를 전환
+            startLongWaitTimer()
 
             val ch = characterRepo.getById(characterId) ?: return@launch
             val nickname = prefs.nickname.first()
@@ -445,6 +474,8 @@ class ChatViewModel @Inject constructor(
                 }
                 is SseEvent.Message -> {
                     sseSucceeded = true
+                    // R9: 첫 버블이 도착했으므로 대기 문구 타이머 취소
+                    cancelLongWaitTimer()
                     // 서버 딜레이와 별도로, 클라이언트에서도 버블 간 텀 적용
                     delay(event.delay)
                     val emotion = try {
@@ -460,6 +491,8 @@ class ChatViewModel @Inject constructor(
                     }
                 }
                 is SseEvent.Done -> {
+                    // R9: 안전망 — Message 없이 바로 Done이 오는 경우까지 커버
+                    cancelLongWaitTimer()
                     handleAffinityDelta(characterId, event.affinityDelta)
                     // R1: 서버가 내려준 다음 화두(next_hook)를 보관 — 재진입 시 선톡 소재
                     persistStoryHook(event.nextHook)
@@ -468,8 +501,10 @@ class ChatViewModel @Inject constructor(
                 }
                 is SseEvent.Error -> {
                     if (!sseSucceeded) {
+                        // 대기 문구 타이머는 REST 폴백이 이어받아 계속 판단하므로 취소하지 않는다
                         fallbackToRest(message, character, nickname, userMbti, conversationHistory, memories, userMessageId)
                     } else {
+                        cancelLongWaitTimer()
                         isTyping = false
                         isTalking = false
                     }
@@ -478,6 +513,7 @@ class ChatViewModel @Inject constructor(
         }
 
         // Flow가 완료되었는데 아직 타이핑 중이면 해제
+        cancelLongWaitTimer()
         isTyping = false
         isTalking = false
     }
@@ -501,6 +537,8 @@ class ChatViewModel @Inject constructor(
             conversationHistory = conversationHistory,
             memories = memories,
         )
+        // R9: REST 응답이 도착했으므로 대기 문구 타이머 취소
+        cancelLongWaitTimer()
 
         for (reply in result.replies) {
             delay(reply.delay)
@@ -797,5 +835,8 @@ class ChatViewModel @Inject constructor(
 
         /** R1 첫 말풍선 전 타이핑 인디케이터 최소 노출 시간 */
         const val PROACTIVE_TYPING_MIN_MS = 1_200L
+
+        /** R9 대기 문구 전환까지의 임계 시간 — 전송 후 이 시간 동안 첫 버블이 없으면 longWait=true */
+        const val LONG_WAIT_THRESHOLD_MS = 4_000L
     }
 }

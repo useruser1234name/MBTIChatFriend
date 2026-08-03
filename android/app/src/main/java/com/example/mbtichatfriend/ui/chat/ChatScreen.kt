@@ -78,7 +78,11 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import kotlinx.coroutines.launch
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -160,6 +164,8 @@ fun ChatScreen(
     var showClearDialog by remember { mutableStateOf(false) }
     var shareTargetIndex by remember { mutableStateOf<Int?>(null) }
     val context = LocalContext.current
+    // R4: 햅틱 피드백 — 전송 시 tick, 수신 시 그룹당 1회(아래 itemsIndexed에서 사용)
+    val haptics = LocalHapticFeedback.current
 
     // U3-1: 자동 스크롤 강제 해소 — 사용자가 위로 스크롤 중이면 새 메시지가 와도 끌어내리지 않는다.
     // "하단 근처"는 마지막-1 아이템까지 화면에 보이는지로 판정(리스트가 비었으면 근처로 간주).
@@ -183,6 +189,29 @@ fun ChatScreen(
         if (isNearBottom || justSentByUser) {
             listState.animateScrollToItem(messages.lastIndex)
         }
+    }
+
+    // R6: 새 메시지 pill — 스크롤이 하단 근처가 아니어서 자동 스크롤이 조용히 스킵된 동안
+    // AI 응답이 도착한 개수를 센다. 순수 로컬 상태(ViewModel 변경 불필요).
+    var unseenCount by remember { mutableStateOf(0) }
+    var lastMessageCount by remember { mutableStateOf(messages.size) }
+    val coroutineScope = rememberCoroutineScope()
+    LaunchedEffect(messages.size) {
+        val delta = messages.size - lastMessageCount
+        if (delta > 0) {
+            val last = messages.lastOrNull()
+            if (!isNearBottom && last != null && !last.isFromUser) {
+                unseenCount += delta
+            }
+        } else if (delta < 0) {
+            // 대화 초기화 등으로 메시지가 줄어든 경우 카운트 리셋
+            unseenCount = 0
+        }
+        lastMessageCount = messages.size
+    }
+    // 하단 근처로 복귀하면(직접 스크롤 등) pill을 닫는다
+    LaunchedEffect(isNearBottom) {
+        if (isNearBottom) unseenCount = 0
     }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -237,7 +266,8 @@ fun ChatScreen(
 
             AffinityProgressBar(affinityScore = character?.affinityScore)
 
-            OfflineBanner(isOnline = isOnline)
+            // R8: 오프라인 배너 카피를 캐릭터 MBTI 그룹 목소리로
+            OfflineBanner(isOnline = isOnline, mbti = character?.mbti)
 
             // 캐릭터 애니메이션 영역
             CharacterAnimationArea(
@@ -248,17 +278,24 @@ fun ChatScreen(
                 affinityLevel = character?.affinityLevel ?: 1,
                 expressionUrls = viewModel.expressionUrls,
                 isTalking = viewModel.isTalking,
-                mbti = character?.mbti ?: ""
+                mbti = character?.mbti ?: "",
+                // R9: 4초 이상 대기 시 문구 전환
+                longWait = viewModel.longWait
             )
 
             // 채팅 영역
             if (messages.isEmpty() && !viewModel.isTyping) {
                 EmptyChatPlaceholder(characterName = character?.name)
             } else {
+            // R6: 새 메시지 pill을 LazyColumn 위에 오버레이하기 위해 Box로 감싼다
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
                 LazyColumn(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
+                        .fillMaxSize()
                         // U8: 접근성 — 새 메시지(응답) 도착 시 TalkBack이 자동으로 낭독하도록
                         .semantics { liveRegion = LiveRegionMode.Polite },
                     state = listState,
@@ -310,6 +347,16 @@ fun ChatScreen(
                         val visibleState = remember(msg.id) {
                             MutableTransitionState(false).apply { targetState = true }
                         }
+
+                        // R4: 수신 햅틱 — 새 AI 메시지가 그룹의 첫 버블로 추가될 때 1회만.
+                        // "이번 세션에서 새로 도착한 메시지"만 대상으로 해 화면 재진입 시
+                        // 과거 메시지를 다시 훑을 때는 울리지 않는다.
+                        LaunchedEffect(msg.id) {
+                            if (!msg.isFromUser && !sameAsPrev && msg.createdAt > viewModel.sessionStartMs) {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                        }
+
                         Column(modifier = Modifier.padding(top = topSpacing)) {
                             AnimatedVisibility(
                                 visibleState = visibleState,
@@ -329,7 +376,8 @@ fun ChatScreen(
                                     showAvatar = !sameAsPrev,
                                     showTimestamp = showTimestamp,
                                     position = position,
-                                    showUnreadMark = showUnreadMark
+                                    showUnreadMark = showUnreadMark,
+                                    mbti = character?.mbti
                                 )
                             }
                         }
@@ -344,6 +392,37 @@ fun ChatScreen(
                         }
                     }
                 }
+
+                // R6: 새 메시지 pill — 하단(입력창 바로 위) 오버레이
+                // 바깥 Column(ColumnScope)의 암시적 리시버와 겹쳐 오버로드가 모호해지므로
+                // 최상위 top-level AnimatedVisibility를 명시적으로 지정한다.
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = unseenCount > 0,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 8.dp),
+                    enter = fadeIn(tween(200)) + slideInVertically(
+                        initialOffsetY = { it / 2 },
+                        animationSpec = tween(200)
+                    ),
+                    exit = fadeOut(tween(150)) + slideOutVertically(
+                        targetOffsetY = { it / 2 },
+                        animationSpec = tween(150)
+                    )
+                ) {
+                    NewMessagePill(
+                        count = unseenCount,
+                        onClick = {
+                            coroutineScope.launch {
+                                if (messages.isNotEmpty()) {
+                                    listState.animateScrollToItem(messages.lastIndex)
+                                }
+                            }
+                            unseenCount = 0
+                        }
+                    )
+                }
+            }
             }
 
             // 입력 바 (대화 스타터 chip 포함, 26차 스프린트)
@@ -543,14 +622,15 @@ private fun AffinityProgressBar(affinityScore: Int?) {
 }
 
 @Composable
-private fun OfflineBanner(isOnline: Boolean) {
+private fun OfflineBanner(isOnline: Boolean, mbti: String? = null) {
     AnimatedVisibility(visible = !isOnline) {
         Surface(
             color = AccentRed.copy(alpha = 0.9f),
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text = "오프라인 - 메시지는 연결 시 자동 전송됩니다",
+                // R8: 시스템 톤 정적 문구 대신 캐릭터 MBTI 그룹 목소리로
+                text = offlineBannerText(mbti),
                 style = MaterialTheme.typography.labelMedium,
                 color = Color.White,
                 textAlign = TextAlign.Center,
@@ -559,6 +639,24 @@ private fun OfflineBanner(isOnline: Boolean) {
                     .padding(vertical = 6.dp)
             )
         }
+    }
+}
+
+// R6: 새 메시지 pill — 입력창 위 오버레이. 탭 시 최신 메시지로 스크롤.
+@Composable
+private fun NewMessagePill(count: Int, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.primary,
+        shadowElevation = 3.dp,
+        modifier = Modifier.clickable(onClick = onClick)
+    ) {
+        Text(
+            text = "새 메시지 ${count}개 ↓",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onPrimary,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+        )
     }
 }
 
@@ -693,7 +791,9 @@ private fun CharacterAnimationArea(
     affinityLevel: Int = 1,
     expressionUrls: Map<String, String>? = null,
     isTalking: Boolean = false,
-    mbti: String = ""
+    mbti: String = "",
+    // R9: 4초 이상 대기 시 "생각하는 중..." → "조금만 기다려줘..."로 전환
+    longWait: Boolean = false
 ) {
     // C7: MBTI별 유휴 모션 프로파일 (mbti가 비어있거나 인식 불가면 기존 동작과 동일한 기본값)
     val motionProfile = remember(mbti) { motionProfileForMbti(mbti) }
@@ -758,7 +858,8 @@ private fun CharacterAnimationArea(
 
             if (isTyping) {
                 Text(
-                    text = "생각하는 중...",
+                    // R9: 대기가 길어지면 문구를 바꿔 체감 대기시간을 줄인다
+                    text = if (longWait) "조금만 기다려줘..." else "생각하는 중...",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -786,6 +887,7 @@ private fun MessageBubble(
     showTimestamp: Boolean = true,
     position: BubblePosition = BubblePosition.SOLO,
     showUnreadMark: Boolean = false,
+    mbti: String? = null,
 ) {
     if (msg.isFromUser) {
         UserMessageBubble(
@@ -794,7 +896,8 @@ private fun MessageBubble(
             onLongPress = onLongPress,
             showTimestamp = showTimestamp,
             position = position,
-            showUnreadMark = showUnreadMark
+            showUnreadMark = showUnreadMark,
+            mbti = mbti
         )
     } else {
         AiMessageBubble(
@@ -820,6 +923,7 @@ private fun UserMessageBubble(
     showTimestamp: Boolean = true,
     position: BubblePosition = BubblePosition.SOLO,
     showUnreadMark: Boolean = false,
+    mbti: String? = null,
 ) {
     val isDark = isSystemInDarkTheme()
     val timeFormat = remember { SimpleDateFormat("a h:mm", Locale.KOREAN) }
@@ -905,7 +1009,8 @@ private fun UserMessageBubble(
                     )
                     Spacer(Modifier.width(4.dp))
                     Text(
-                        text = "전송 실패",
+                        // R8: 시스템 톤 "전송 실패" 대신 캐릭터 MBTI 그룹 목소리로
+                        text = failedSendText(mbti),
                         style = MaterialTheme.typography.labelSmall,
                         color = AccentRed
                     )
@@ -1260,6 +1365,8 @@ private fun ChatInputBar(
         targetValue = if (sendEnabled) 1f else 0.85f,
         label = "sendScale"
     )
+    // R4: 전송 시 가벼운 햅틱 tick — 버튼/IME 액션 양쪽
+    val haptics = LocalHapticFeedback.current
 
     // R5: 대화 스타터 칩 조건 노출 — 첫 대화(메시지 0개)만 기본 노출, 대화 시작 후엔 입력창
     // 포커스 시에만 표시. hasMessages가 false→true로 바뀌는 순간(첫 전송) remember 키가
@@ -1348,6 +1455,7 @@ private fun ChatInputBar(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = {
                         if (sendEnabled) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onSend()
                             hideChipsOnSend()
                         }
@@ -1357,6 +1465,7 @@ private fun ChatInputBar(
                 IconButton(
                     onClick = {
                         if (sendEnabled) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             onSend()
                             hideChipsOnSend()
                         }
@@ -1452,6 +1561,42 @@ private fun emotionBubbleDark(emotion: CharacterEmotion): Color = when (emotion)
     CharacterEmotion.WORRIED -> EmotionWorriedBubbleDark
     CharacterEmotion.TOUCHED -> EmotionTouchedBubbleDark
     else -> AiBubbleDark
+}
+
+// R8: 오프라인/전송 실패 카피의 캐릭터 보이스화 — MBTI 4그룹(NT/NF/SJ/SP) 축은
+// prompts.py의 few-shot 그룹과 동일. S 그룹은 mbti[3](J/P)로 다시 나눈다.
+private fun mbtiVoiceGroup(mbti: String): String {
+    val m = mbti.uppercase()
+    if (m.length < 4) return "NF"
+    return when {
+        m[1] == 'N' && m[2] == 'T' -> "NT"
+        m[1] == 'N' && m[2] == 'F' -> "NF"
+        m[1] == 'S' && m[3] == 'J' -> "SJ"
+        m[1] == 'S' && m[3] == 'P' -> "SP"
+        else -> "NF"
+    }
+}
+
+private fun offlineBannerText(mbti: String?): String {
+    if (mbti.isNullOrBlank()) return "오프라인 - 메시지는 연결 시 자동 전송됩니다"
+    return when (mbtiVoiceGroup(mbti)) {
+        "NF" -> "연결이 끊겼나봐... 다시 만나면 바로 얘기하자!"
+        "NT" -> "연결이 끊겼습니다. 복구되면 이어서 하죠."
+        "SJ" -> "연결이 불안정해요. 메시지는 연결되면 바로 보낼게요."
+        "SP" -> "어? 인터넷 끊겼나?! 돌아오면 바로 보낼게 ㅎㅎ"
+        else -> "오프라인 - 메시지는 연결 시 자동 전송됩니다"
+    }
+}
+
+private fun failedSendText(mbti: String?): String {
+    if (mbti.isNullOrBlank()) return "전송 실패"
+    return when (mbtiVoiceGroup(mbti)) {
+        "NF" -> "잘 안 갔나봐 ㅠㅠ"
+        "NT" -> "전송 실패"
+        "SJ" -> "전송이 안 됐어요"
+        "SP" -> "어? 안 갔네?!"
+        else -> "전송 실패"
+    }
 }
 
 private fun emotionBorderColor(emotion: CharacterEmotion): Color = when (emotion) {
