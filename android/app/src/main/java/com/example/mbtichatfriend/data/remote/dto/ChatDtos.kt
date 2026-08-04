@@ -40,6 +40,26 @@ data class ChatRequest(
     @Json(name = "situation") val situation: String = ""
 )
 
+// R1: 선톡(캐릭터 선발화) 전용 요청 — /api/v1/chat/proactive.
+// ChatRequest와 필드 구성은 거의 같지만 message 대신 hook(다음 대화 흐름 힌트)만
+// 보낸다. 유도 문구 합성은 서버 책임(routers/chat.build_proactive_message).
+@JsonClass(generateAdapter = false)
+data class ProactiveChatRequest(
+    val hook: String,
+    @Json(name = "mbti") val mbti: String,
+    @Json(name = "speech_style") val speechStyle: String,
+    @Json(name = "relationship") val relationship: String,
+    @Json(name = "nickname") val nickname: String,
+    @Json(name = "affinity_level") val affinityLevel: Int = 1,
+    @Json(name = "conversation_history") val conversationHistory: List<Map<String, String>> = emptyList(),
+    @Json(name = "user_mbti") val userMbti: String? = null,
+    @Json(name = "character_name") val characterName: String = "",
+    @Json(name = "character_id") val characterId: String = "",
+    val memories: List<MemoryItem> = emptyList(),
+    @Json(name = "user_role") val userRole: String = "",
+    @Json(name = "situation") val situation: String = ""
+)
+
 @JsonClass(generateAdapter = false)
 data class ChatResponse(
     val replies: List<ReplyPart>,

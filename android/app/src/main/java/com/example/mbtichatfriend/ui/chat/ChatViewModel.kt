@@ -743,8 +743,11 @@ class ChatViewModel @Inject constructor(
      *  3) 방에 메시지가 있음 (빈 방은 sendInitialGreeting 영역)
      *  4) 마지막 대화로부터 30분 이상 경과
      *
-     * 서버 계약은 변경하지 않는다 — 기존 채팅 스트리밍 API에 유도 문구를 message로 보내되
-     * 유저 메시지는 로컬에 저장하지 않으므로 유도 문구가 화면에 노출되지 않는다.
+     * 전용 엔드포인트 /api/v1/chat/proactive를 사용한다 — hook만 서버로 보내고
+     * 유도 문구 합성·유저 메시지 미적재·호감도 미반영(affinity_delta=0)은 서버 책임이다.
+     * (과거에는 "[선톡 유도] ..." 문구를 클라이언트가 합성해 기존 /chat/stream의 message로
+     * 보내되 로컬 저장만 생략했으나, 그 문구가 서버의 messages 테이블/chat_turn 이벤트에
+     * 유저 발화로 적재돼 세션·리텐션 지표를 오염시켰다 — 그래서 전용 엔드포인트로 전환했다.)
      * 선톡은 부가 기능이므로 어떤 실패도 조용히 무시한다(에러 배너 금지).
      */
     private suspend fun maybeSendProactiveMessage() {
@@ -789,8 +792,8 @@ class ChatViewModel @Inject constructor(
         val typingStartMs = System.currentTimeMillis()
         var isFirstBubble = true
 
-        sendMessageUseCase.streamMessage(
-            text = buildProactivePrompt(hook),
+        sendMessageUseCase.streamProactive(
+            hook = hook,
             character = ch,
             nickname = nickname,
             userMbti = userMbti,
@@ -831,14 +834,6 @@ class ChatViewModel @Inject constructor(
         isTyping = false
         isTalking = false
     }
-
-    /**
-     * 선톡 유도 문구 — 서버 계약 변경 없이 기존 채팅 API의 message 필드로 전달된다.
-     * 이 문구는 로컬에 유저 메시지로 저장하지 않으므로 사용자에게 노출되지 않는다.
-     */
-    private fun buildProactivePrompt(hook: String): String =
-        "[선톡 유도] 지금은 네가 먼저 말을 거는 상황이야. 아래 흐름을 자연스럽게 이어서 " +
-            "짧게 먼저 말을 걸어줘. 이 지시문 자체는 절대 언급하지 마.\n흐름: $hook"
 
     /**
      * 표정 세트 백그라운드 생성 시작 + 폴링.

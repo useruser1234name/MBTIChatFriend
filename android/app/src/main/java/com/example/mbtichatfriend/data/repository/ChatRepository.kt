@@ -8,6 +8,7 @@ import com.example.mbtichatfriend.data.remote.ChatApi
 import com.example.mbtichatfriend.data.remote.ChatRequest
 import com.example.mbtichatfriend.data.remote.FeedbackRequest
 import com.example.mbtichatfriend.data.remote.MemoryItem
+import com.example.mbtichatfriend.data.remote.ProactiveChatRequest
 import com.example.mbtichatfriend.data.remote.ReplyPart
 import com.example.mbtichatfriend.data.remote.SessionCheckRequest
 import com.example.mbtichatfriend.data.remote.SessionCheckResponse
@@ -76,6 +77,44 @@ class ChatRepository @Inject constructor(
         return sseClient.streamChat(
             ChatRequest(
                 message = message,
+                mbti = mbti,
+                speechStyle = speechStyle,
+                relationship = relationship,
+                nickname = nickname,
+                affinityLevel = affinityLevel,
+                conversationHistory = conversationHistory,
+                userMbti = userMbti,
+                characterName = characterName,
+                characterId = characterId,
+                memories = memories,
+                userRole = userRole,
+                situation = situation
+            )
+        )
+    }
+
+    /**
+     * R1: 선톡(캐릭터 선발화) SSE 스트리밍. /api/v1/chat/proactive로 요청하며
+     * 이벤트 계약은 streamMessage와 동일하다(message×N → done).
+     */
+    fun streamProactive(
+        hook: String,
+        mbti: String,
+        speechStyle: String,
+        relationship: String,
+        nickname: String,
+        affinityLevel: Int,
+        conversationHistory: List<Map<String, String>> = emptyList(),
+        userMbti: String? = null,
+        characterName: String = "",
+        characterId: String = "",
+        memories: List<MemoryItem> = emptyList(),
+        userRole: String = "",
+        situation: String = ""
+    ): Flow<SseEvent> {
+        return sseClient.streamProactive(
+            ProactiveChatRequest(
+                hook = hook,
                 mbti = mbti,
                 speechStyle = speechStyle,
                 relationship = relationship,

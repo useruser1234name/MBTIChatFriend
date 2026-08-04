@@ -45,31 +45,48 @@ class SseClient @Inject constructor(
 ) {
     private val baseUrl = BuildConfig.BASE_URL.trimEnd('/')
 
-    fun streamChat(request: ChatRequest): Flow<SseEvent> = callbackFlow {
-        val json = JSONObject().apply {
-            put("message", request.message)
-            put("mbti", request.mbti)
-            put("speech_style", request.speechStyle)
-            put("relationship", request.relationship)
-            put("nickname", request.nickname)
-            put("affinity_level", request.affinityLevel)
+    /**
+     * /chat/stream 과 /chat/proactive가 공유하는 필드를 JSONObject에 채운다.
+     * 차이는 message(전자) vs hook(후자) 하나뿐이므로 호출부에서 그 필드만 추가로 put한다.
+     */
+    private fun putCommonFields(
+        json: JSONObject,
+        mbti: String,
+        speechStyle: String,
+        relationship: String,
+        nickname: String,
+        affinityLevel: Int,
+        conversationHistory: List<Map<String, String>>,
+        userMbti: String?,
+        characterName: String,
+        characterId: String,
+        memories: List<MemoryItem>,
+        userRole: String,
+        situation: String,
+    ) {
+        json.apply {
+            put("mbti", mbti)
+            put("speech_style", speechStyle)
+            put("relationship", relationship)
+            put("nickname", nickname)
+            put("affinity_level", affinityLevel)
             val historyArray = org.json.JSONArray()
-            request.conversationHistory.forEach { map ->
+            conversationHistory.forEach { map ->
                 val obj = JSONObject()
                 map.forEach { (k, v) -> obj.put(k, v) }
                 historyArray.put(obj)
             }
             put("conversation_history", historyArray)
-            request.userMbti?.let { put("user_mbti", it) }
-            if (request.characterName.isNotEmpty()) {
-                put("character_name", request.characterName)
+            userMbti?.let { put("user_mbti", it) }
+            if (characterName.isNotEmpty()) {
+                put("character_name", characterName)
             }
-            if (request.characterId.isNotEmpty()) {
-                put("character_id", request.characterId)
+            if (characterId.isNotEmpty()) {
+                put("character_id", characterId)
             }
-            if (request.memories.isNotEmpty()) {
+            if (memories.isNotEmpty()) {
                 val memoriesArray = org.json.JSONArray()
-                request.memories.forEach { item ->
+                memories.forEach { item ->
                     val memObj = JSONObject()
                     memObj.put("key", item.key)
                     memObj.put("value", item.value)
@@ -78,13 +95,60 @@ class SseClient @Inject constructor(
                 put("memories", memoriesArray)
             }
             // M2: "내 역할"/"지금 상황" — 빈 문자열이어도 항상 포함(서버가 빈 값을 무시)
-            put("user_role", request.userRole)
-            put("situation", request.situation)
+            put("user_role", userRole)
+            put("situation", situation)
         }
+    }
 
+    fun streamChat(request: ChatRequest): Flow<SseEvent> {
+        val json = JSONObject().apply { put("message", request.message) }
+        putCommonFields(
+            json = json,
+            mbti = request.mbti,
+            speechStyle = request.speechStyle,
+            relationship = request.relationship,
+            nickname = request.nickname,
+            affinityLevel = request.affinityLevel,
+            conversationHistory = request.conversationHistory,
+            userMbti = request.userMbti,
+            characterName = request.characterName,
+            characterId = request.characterId,
+            memories = request.memories,
+            userRole = request.userRole,
+            situation = request.situation,
+        )
+        return openStream("$baseUrl/api/v1/chat/stream", json)
+    }
+
+    /**
+     * R1: 선톡(캐릭터 선발화) 전용 스트림. /chat/proactive는 /chat/stream과 SSE 이벤트
+     * 계약이 동일하다(message×N → done). message 대신 hook을 보내며, 서버가
+     * 유도 문구 합성·유저 메시지 미적재·호감도 미반영(affinity_delta=0)을 책임진다.
+     */
+    fun streamProactive(request: ProactiveChatRequest): Flow<SseEvent> {
+        val json = JSONObject().apply { put("hook", request.hook) }
+        putCommonFields(
+            json = json,
+            mbti = request.mbti,
+            speechStyle = request.speechStyle,
+            relationship = request.relationship,
+            nickname = request.nickname,
+            affinityLevel = request.affinityLevel,
+            conversationHistory = request.conversationHistory,
+            userMbti = request.userMbti,
+            characterName = request.characterName,
+            characterId = request.characterId,
+            memories = request.memories,
+            userRole = request.userRole,
+            situation = request.situation,
+        )
+        return openStream("$baseUrl/api/v1/chat/proactive", json)
+    }
+
+    private fun openStream(url: String, json: JSONObject): Flow<SseEvent> = callbackFlow {
         val body = json.toString().toRequestBody("application/json".toMediaType())
         val httpRequest = Request.Builder()
-            .url("$baseUrl/api/v1/chat/stream")
+            .url(url)
             .post(body)
             .header("Accept", "text/event-stream")
             .build()

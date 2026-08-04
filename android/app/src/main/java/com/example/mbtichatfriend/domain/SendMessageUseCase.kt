@@ -87,6 +87,42 @@ class SendMessageUseCase @Inject constructor(
     }
 
     /**
+     * R1: 선톡(캐릭터 선발화) 전용 SSE 스트리밍 — /chat/proactive.
+     * message 대신 hook만 전달한다(유도 문구 합성은 서버 책임). userRole/situation은
+     * streamMessage와 동일하게 DataStore의 중앙 저장값을 재사용한다.
+     *
+     * @param hook 다음 대화 흐름 힌트(서버 story state의 next_hook). 빈 값이면
+     *   서버가 기본 안부 흐름으로 폴백한다.
+     */
+    fun streamProactive(
+        hook: String,
+        character: CharacterEntity,
+        nickname: String,
+        userMbti: String?,
+        conversationHistory: List<Map<String, String>>,
+        memories: List<MemoryItem>,
+    ): Flow<SseEvent> = flow {
+        val (role, situation) = loadRoleAndSituation(character.id)
+        emitAll(
+            chatRepo.streamProactive(
+                hook = hook,
+                mbti = character.mbti,
+                speechStyle = character.speechStyle,
+                relationship = character.relationship,
+                nickname = nickname,
+                affinityLevel = character.affinityLevel,
+                conversationHistory = conversationHistory,
+                userMbti = userMbti,
+                characterName = character.name,
+                characterId = character.id.toString(),
+                memories = memories,
+                userRole = role,
+                situation = situation,
+            )
+        )
+    }
+
+    /**
      * REST 폴백 — SSE 실패 시 사용.
      */
     suspend fun sendMessageRest(
