@@ -1087,6 +1087,7 @@ async def _spawn_parallel_analysis(
     nickname: str,
     character_id: str,
     room_id: str,
+    skip_affinity: bool = False,
 ) -> Tuple[Optional[asyncio.Task], int, MemoryFetch]:
     """메모리 컨텍스트 태스크 + 호감도 분석 태스크를 관리(클라이언트 있을 때만).
 
@@ -1106,6 +1107,10 @@ async def _spawn_parallel_analysis(
     추적·취소할 필요가 없다(고아 태스크 방지를 함수 경계 안에서 보장).
     실패 시 폴백은 RAG의 _merge_rag_results와 동일한 패턴(빈 컨텍스트로
     대체 + 경고 로그)을 따른다.
+
+    skip_affinity(선톡/proactive 경로): 유저 발화가 없는 턴이라 호감도 변화의
+    대상이 아니다 — 분석 태스크를 아예 만들지 않고 delta를 0으로 고정한다
+    (LLM 호출 1회 절약). 기본값 False면 기존 동작과 완전히 동일하다.
 
     affinity_task는 기존과 동일하게(예외 시 취소 책임 포함) 호출부가
     소유한다 — 헬퍼 안에서 await/취소하지 않는다. 클라이언트가 없을 때의
@@ -1154,7 +1159,11 @@ async def _spawn_parallel_analysis(
         if mem_task is not None and not mem_task.done():
             mem_task.cancel()
 
-    if client:
+    if skip_affinity:
+        # 선톡 경로: 유저 발화가 없으므로 분석하지 않고 delta 0 고정.
+        affinity_task = None
+        affinity_delta = 0
+    elif client:
         recent_context = _build_recent_context(conversation_history)
         # 호감도 분석을 비동기 태스크로 시작 (메인 LLM 호출과 병렬 실행)
         affinity_task = asyncio.create_task(
@@ -1636,6 +1645,7 @@ async def stream_reply(
     gate_ms: float = 0.0,
     user_role: str = "",
     situation: str = "",
+    skip_affinity: bool = False,
 ) -> AsyncGenerator[Union[ReplyPart, StreamDone], None]:
     """말풍선 점진 스트리밍 생성기.
 
@@ -1670,6 +1680,10 @@ async def stream_reply(
 
     user_role/situation(2026-08-03 P3-M2): generate_reply와 동일 계약 —
     시스템 프롬프트 "# 관계" 직후에 장면 블록으로 주입, 빈 값이면 무변화.
+
+    skip_affinity(선톡/proactive): message가 유저 발화가 아니라 서버가 합성한
+    선발화 유도 문구인 경우 호감도 분석을 건너뛰고 StreamDone.affinity_delta를
+    0으로 고정한다. 기본값 False면 기존 동작과 완전히 동일하다.
     """
     if conversation_history is None:
         conversation_history = []
@@ -1709,6 +1723,7 @@ async def stream_reply(
     affinity_task, affinity_delta, _mem = await _spawn_parallel_analysis(
         message, mbti, affinity_level, conversation_history, user_mbti,
         character_name, nickname, character_id, room_id,
+        skip_affinity=skip_affinity,
     )
     _t_memory_ms = (time.perf_counter() - _t_memory_start) * 1000
 
@@ -1802,7 +1817,8 @@ async def stream_reply(
             # generate_reply의 CircuitOpenError 폴백(_mock_reply)과 동일한 사용자 경험.
             # 이 시점엔 아직 토큰을 하나도 못 받았으므로(create() 자체가 실패) 진행 중이던
             # affinity/rag task를 정리해야 한다(아래 공용 except 블록과 동일 로직).
-            if not affinity_task.done():
+            # skip_affinity(선톡) 경로에서는 affinity_task가 아예 없다(None).
+            if affinity_task is not None and not affinity_task.done():
                 affinity_task.cancel()
             if rag_task is not None and not rag_task.done():
                 rag_task.cancel()
@@ -1861,11 +1877,14 @@ async def stream_reply(
                     extra_payload={"streaming": True},
                 )
 
-        # 13. 호감도 수집 (병렬 태스크)
-        affinity_delta = await _collect_affinity_delta(
-            affinity_task, message, affinity_level, conversation_history, user_mbti, mbti,
-            warn_message="[stream] 호감도 분석 실패, 키워드 폴백",
-        )
+        # 13. 호감도 수집 (병렬 태스크).
+        # skip_affinity(선톡)면 분석 자체를 하지 않았으므로 delta는 0 그대로 둔다
+        # (키워드 폴백도 돌리지 않는다 — 유도 문구는 유저 발화가 아님).
+        if not skip_affinity:
+            affinity_delta = await _collect_affinity_delta(
+                affinity_task, message, affinity_level, conversation_history, user_mbti, mbti,
+                warn_message="[stream] 호감도 분석 실패, 키워드 폴백",
+            )
 
         # 14. 백그라운드 품질 평가 (quick_score_value: M4-①, step 12 결과 재사용)
         if full_text:
@@ -1930,7 +1949,8 @@ async def stream_reply(
         )
 
     except Exception as e:
-        if not affinity_task.done():
+        # skip_affinity(선톡) 경로에서는 affinity_task가 아예 없다(None).
+        if affinity_task is not None and not affinity_task.done():
             affinity_task.cancel()
         if rag_task is not None and not rag_task.done():
             rag_task.cancel()

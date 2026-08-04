@@ -80,6 +80,91 @@ class ChatRequest(BaseModel):
         return v.strip()
 
 
+class ProactiveChatRequest(BaseModel):
+    """선톡(캐릭터 선발화) 전용 요청 — 유저 발화가 없는 턴.
+
+    ChatRequest와 필드 구성은 거의 같지만 `message` 대신 `hook`(다음 대화
+    흐름 힌트)만 받는다. 유도 문구 자체는 서버가 합성한다
+    (routers/chat.build_proactive_message) — 클라이언트가 "[선톡 유도] ..."
+    문구를 message로 보내던 기존 방식은 그 문구가 유저 발화로 messages
+    테이블/chat_turn 이벤트에 적재돼 세션·리텐션 지표를 오염시켰다.
+
+    ChatRequest를 상속하지 않는 이유: ChatRequest는 message가 필수
+    (min_length=1)이고 기존 계약을 그대로 유지해야 하므로, 필요한 필드만
+    독립적으로 선언하고 `to_chat_request()`로 내부 변환한다. 제약(패턴,
+    길이, MBTI 검증)은 ChatRequest와 동일하게 맞춰 잘못된 입력이 핸들러
+    안이 아니라 422로 걸러지게 한다.
+
+    end_of_session/persona_* 계열은 선톡 경로에서 쓰지 않으므로 노출하지
+    않는다(내부 ChatRequest에서는 기본값 사용 — 야간 일기 미발동).
+    """
+
+    hook: str = Field(default="", max_length=300)
+    mbti: str = Field(..., pattern=r"^[A-Z]{4}$")
+    speech_style: Literal["FORMAL", "CASUAL", "TSUNDERE", "SWEET"] = "CASUAL"
+    relationship: Literal["FRIEND", "LOVER", "SENIOR_JUNIOR"] = "FRIEND"
+    nickname: str = Field(..., min_length=1, max_length=20)
+    affinity_level: int = Field(default=1, ge=1, le=5)
+    conversation_history: List[HistoryMessage] = Field(
+        default_factory=list, max_length=MAX_CONVERSATION_HISTORY
+    )
+    user_mbti: Optional[str] = Field(default=None, pattern=r"^[A-Z]{4}$")
+    character_name: str = Field(default="")
+    character_id: str = Field(default="")
+    room_id: str = Field(default="", max_length=120)
+    client_local_hour: Optional[int] = Field(default=None, ge=0, le=23)
+    memories: List[MemoryItem] = Field(default_factory=list)
+    mood: Optional[str] = Field(default=None, description="사용자 오늘 기분")
+    user_role: str = Field(default="", max_length=200)
+    situation: str = Field(default="", max_length=200)
+
+    @field_validator("mbti")
+    @classmethod
+    def validate_mbti(cls, v: str) -> str:
+        if v not in _VALID_MBTI_TYPES:
+            raise ValueError(f"유효하지 않은 MBTI 타입: {v}")
+        return v
+
+    @field_validator("hook", "user_role", "situation")
+    @classmethod
+    def sanitize_text(cls, v: str) -> str:
+        """ChatRequest.sanitize_scene과 동일 규칙 — 태그 이스케이프 + 공백 접기.
+
+        hook은 서버 합성 프롬프트에 그대로 삽입되므로 개행을 남기면 가짜
+        섹션 헤더를 심을 수 있다.
+        """
+        if not v:
+            return ""
+        v = v.replace("<", "&lt;").replace(">", "&gt;")
+        return " ".join(v.split())
+
+    def to_chat_request(self, message: str) -> "ChatRequest":
+        """합성된 유도 문구를 message로 갖는 내부 ChatRequest를 만든다.
+
+        기존 스트림 파이프라인(_prepare_chat_turn / stream_reply /
+        _finalize_chat_turn)은 전부 ChatRequest를 받으므로, 분기를 늘리는
+        대신 경계에서 한 번만 변환해 파이프라인을 그대로 재사용한다.
+        """
+        return ChatRequest(
+            message=message,
+            mbti=self.mbti,
+            speech_style=self.speech_style,
+            relationship=self.relationship,
+            nickname=self.nickname,
+            affinity_level=self.affinity_level,
+            conversation_history=self.conversation_history,
+            user_mbti=self.user_mbti,
+            character_name=self.character_name,
+            character_id=self.character_id,
+            room_id=self.room_id,
+            client_local_hour=self.client_local_hour,
+            memories=self.memories,
+            mood=self.mood,
+            user_role=self.user_role,
+            situation=self.situation,
+        )
+
+
 VALID_EMOTIONS: frozenset = frozenset({
     "NEUTRAL", "HAPPY", "SHY", "SAD", "ANGRY",
     "SURPRISED", "LOVE", "PLAYFUL", "WORRIED", "TOUCHED",

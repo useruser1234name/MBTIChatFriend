@@ -404,6 +404,68 @@ async def test_streaming_records_cached_tokens_when_present(patch_deps, monkeypa
             coro.close()
 
 
+# 선톡(/chat/proactive) 백로그: skip_affinity=True 면 유저 발화가 없는 턴이므로
+# 호감도 분석 LLM 호출 자체를 하지 않고 delta를 0으로 고정해야 한다.
+@pytest.mark.asyncio
+async def test_skip_affinity_returns_zero_delta_and_skips_llm(patch_deps, monkeypatch):
+    patch_deps(['[{"text":"자니?","emotion":"SHY"}]'])
+
+    called = []
+
+    async def _spy_affinity(*a, **k):
+        called.append(a)
+        return 3
+
+    monkeypatch.setattr(chat_service, "analyze_affinity_with_llm", _spy_affinity)
+
+    parts, done = await _collect(
+        chat_service.stream_reply(**_base_kwargs(skip_affinity=True))
+    )
+
+    assert [p.text for p in parts] == ["자니?"]
+    assert done.affinity_delta == 0
+    assert called == [], "선톡 턴에서는 호감도 분석 LLM을 호출하면 안 된다"
+
+
+@pytest.mark.asyncio
+async def test_default_still_analyzes_affinity(patch_deps, monkeypatch):
+    """mutation 방어: skip_affinity 기본값(False)에서는 기존대로 분석한다."""
+    patch_deps(['[{"text":"안녕","emotion":"HAPPY"}]'])
+
+    called = []
+
+    async def _spy_affinity(*a, **k):
+        called.append(a)
+        return 3
+
+    monkeypatch.setattr(chat_service, "analyze_affinity_with_llm", _spy_affinity)
+
+    _, done = await _collect(chat_service.stream_reply(**_base_kwargs()))
+
+    assert done.affinity_delta == 3
+    assert len(called) == 1
+
+
+@pytest.mark.asyncio
+async def test_skip_affinity_survives_llm_error(patch_deps, monkeypatch):
+    """affinity_task가 None인 상태로 예외 정리 경로를 타도 터지면 안 된다."""
+    patch_deps([])
+
+    async def _boom(**kwargs):
+        raise RuntimeError("stream boom")
+
+    monkeypatch.setattr(chat_service.client.chat.completions, "create", _boom)
+
+    parts, done = await _collect(
+        chat_service.stream_reply(**_base_kwargs(skip_affinity=True))
+    )
+
+    assert done is not None
+    assert done.affinity_delta == 0
+    assert len(parts) == 1
+    assert parts[0].emotion == "SURPRISED"
+
+
 @pytest.mark.asyncio
 async def test_streaming_skips_api_usage_without_usage_chunk(patch_deps):
     """usage 청크가 없는 스트림(예: LoRA 엔드포인트)에서는 record-usage를 스케줄하지 않는다."""

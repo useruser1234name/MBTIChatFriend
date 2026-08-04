@@ -46,6 +46,7 @@ from ..models import (
     MemoryItem,
     MemoryExtractRequest,
     MemoryExtractResponse,
+    ProactiveChatRequest,
     ReplyPart,
 )
 from ..chat_service import extract_memories
@@ -368,10 +369,20 @@ async def _finalize_chat_turn(
     callback_key,
     replies: list,
     affinity_delta: int,
+    turn_event_type: str = "chat_turn",
+    persist_user_message: bool = True,
 ) -> dict:
     """응답 생성 이후 후처리: 콜백 마킹, 야간 일기, hook/goal, 이벤트, 영속화.
 
     논스트림/스트림 두 경로가 동일하게 호출한다.
+
+    turn_event_type / persist_user_message (선톡 백로그, 2026-08-03 후속):
+    /chat/proactive 는 유저 발화가 없는 턴이라
+      - chat_turn 대신 proactive_turn 이벤트를 기록해야 하고
+        (_SESSION_EVENT_TYPES=("chat_turn","app_open")에 없으므로 30분 gap
+         세션 통계·리텐션 지표를 오염시키지 않는다),
+      - 서버가 합성한 유도 문구를 messages 테이블에 유저 발화로 적재하면 안 된다.
+    기본값은 기존 두 호출부의 동작과 정확히 동일하다.
     """
     # P0-1: 이 턴에서 기록하는 모든 metric_events에 user_id를 채운다.
     # (라이브 chat_turn 이벤트에 user_id가 비어 있던 결함 수정 — 검증관 실측 기반)
@@ -421,7 +432,7 @@ async def _finalize_chat_turn(
                 logger.warning("affinity_level_up 이벤트 태스크 생성 실패: %s", _e)
 
     await record_event_async(
-        event_type="chat_turn",
+        event_type=turn_event_type,
         room_id=room_id,
         character_id=effective_character_id,
         user_id=_uid,
@@ -440,7 +451,10 @@ async def _finalize_chat_turn(
     # fire-and-forget: DB 미연결 환경에서도 메인 응답을 블로킹하지 않는다.
     # _uid는 함수 상단에서 이미 계산됨 (chat_turn 등 이벤트와 동일 값 재사용)
     _character_mbti = (req.mbti or "").upper()
-    _user_message = req.message or ""
+    # persist_user_message=False(선톡)면 유도 문구를 유저 발화로 적재하지 않는다.
+    # _persist_chat_data는 빈 문자열이면 해당 INSERT 문장 자체를 생략하므로
+    # users upsert와 캐릭터 응답 적재(대화 연속성)는 그대로 유지된다.
+    _user_message = (req.message or "") if persist_user_message else ""
     _assistant_text = replies[0].text if replies else ""
 
     try:
@@ -656,6 +670,39 @@ def _build_crisis_hint(message: str, mbti: str, is_crisis: bool, crisis_tier: in
     return crisis_type_hint
 
 
+def _sse_message_event(part) -> dict:
+    """SSE "message" 이벤트 직렬화 — /chat/stream · /chat/proactive 공용.
+
+    원래 stream_message 안의 중첩 함수였다. /chat/proactive가 동일한 이벤트
+    계약(text/emotion/delay)을 그대로 써야 하므로 모듈 레벨로 승격했다.
+    출력 형태는 원본과 완전히 동일하다.
+    """
+    return {
+        "event": "message",
+        "data": json.dumps(
+            {"text": part.text, "emotion": part.emotion, "delay": part.delay},
+            ensure_ascii=False,
+        ),
+    }
+
+
+def _sse_done_event(meta: dict) -> dict:
+    """SSE "done" 이벤트 직렬화 — /chat/stream · /chat/proactive 공용."""
+    return {
+        "event": "done",
+        "data": json.dumps(
+            {
+                "affinity_delta": meta["affinity_delta"],
+                "night_diary_generated": meta["night_diary_generated"],
+                "next_hook": meta["next_hook"],
+                "next_goal": meta["next_goal"],
+                "room_id": meta["room_id"],
+            },
+            ensure_ascii=False,
+        ),
+    }
+
+
 async def _lora_event_generator(
     req: ChatRequest,
     crisis_type_hint: str,
@@ -722,6 +769,9 @@ async def _openai_event_generator(
     crisis_hint: str = "",
     request_start_ts: Optional[float] = None,
     gate_ms: float = 0.0,
+    turn_event_type: str = "chat_turn",
+    persist_user_message: bool = True,
+    skip_affinity: bool = False,
 ):
     """OpenAI 경로 SSE 제너레이터: 말풍선이 완결되는 즉시 전송해 TTFB를 단축한다.
 
@@ -737,6 +787,12 @@ async def _openai_event_generator(
     request_start_ts/gate_ms(2026-08-03 P1, 회의 항목1): stream_message가
     측정한 요청 진입 시각/게이트 소요를 stream_reply까지 전달해
     turn_latency에 t_e2e_first_bubble_ms/t_gate_ms를 남긴다.
+
+    turn_event_type/persist_user_message/skip_affinity (선톡 백로그): 이 제너레이터를
+    /chat/proactive 가 그대로 재사용하기 위한 스위치. 기본값이면 /chat/stream 의
+    기존 동작과 완전히 동일하다. 선톡 턴은 유저 발화가 없으므로 호감도 분석을
+    돌리지 않고(affinity_delta=0 고정), 유도 문구를 messages 에 적재하지 않으며,
+    chat_turn 대신 proactive_turn 이벤트를 남긴다.
     """
     prep = await _prepare_chat_turn(req, user)
     room_id = prep["room_id"]
@@ -769,9 +825,10 @@ async def _openai_event_generator(
             gate_ms=gate_ms,
             user_role=req.user_role,
             situation=req.situation,
+            skip_affinity=skip_affinity,
         ):
             if isinstance(item, StreamDone):
-                affinity_delta = item.affinity_delta
+                affinity_delta = 0 if skip_affinity else item.affinity_delta
             else:
                 collected.append(item)
                 yield message_event(item)
@@ -791,6 +848,8 @@ async def _openai_event_generator(
         callback_key=prep["callback_key"],
         replies=collected,
         affinity_delta=affinity_delta,
+        turn_event_type=turn_event_type,
+        persist_user_message=persist_user_message,
     )
     yield done_event(meta)
 
@@ -836,29 +895,9 @@ async def stream_message(
     if _insert_crisis:
         _crisis_reply = ReplyPart(text=get_crisis_response(crisis_tier), emotion="SAD", delay=0)
 
-    def _message_event(part) -> dict:
-        return {
-            "event": "message",
-            "data": json.dumps(
-                {"text": part.text, "emotion": part.emotion, "delay": part.delay},
-                ensure_ascii=False,
-            ),
-        }
-
-    def _done_event(meta: dict) -> dict:
-        return {
-            "event": "done",
-            "data": json.dumps(
-                {
-                    "affinity_delta": meta["affinity_delta"],
-                    "night_diary_generated": meta["night_diary_generated"],
-                    "next_hook": meta["next_hook"],
-                    "next_goal": meta["next_goal"],
-                    "room_id": meta["room_id"],
-                },
-                ensure_ascii=False,
-            ),
-        }
+    # SSE 이벤트 직렬화는 모듈 레벨 헬퍼로 공유한다(/chat/proactive 동일 계약).
+    _message_event = _sse_message_event
+    _done_event = _sse_done_event
 
     async def _record_crisis(room_id: str) -> None:
         if is_crisis:
@@ -901,6 +940,86 @@ async def stream_message(
         req, user, _crisis_reply, _record_crisis, _message_event, _done_event,
         crisis_tier=_effective_tier, crisis_hint=crisis_type_hint,
         request_start_ts=_req_t0, gate_ms=_t_gate_ms,
+    ))
+
+
+# === 선톡(캐릭터 선발화) 전용 엔드포인트 ===
+
+PROACTIVE_TURN_EVENT = "proactive_turn"
+PROACTIVE_DEFAULT_HOOK = "오랜만에 유저에게 먼저 안부를 건네는 상황"
+
+
+def build_proactive_message(hook: str) -> str:
+    """선톡 유도 프롬프트를 서버에서 합성한다.
+
+    R1 선톡은 원래 Android가 "[선톡 유도] ... 흐름: {hook}" 문구를 /chat/stream 의
+    message 로 보내 처리했다 — 그 문구가 유저 발화로 messages 테이블과 chat_turn
+    이벤트에 적재돼 세션(30분 gap)·리텐션 지표를 오염시켰다. 이 헬퍼는 동등한
+    유도 문구를 서버가 만들어 LLM 에만 전달하기 위한 것이다(적재·계측 제외는
+    _finalize_chat_turn 의 persist_user_message/turn_event_type 이 담당).
+
+    hook 이 비어 있으면 기본 흐름으로 폴백한다.
+    """
+    normalized = " ".join((hook or "").split()) or PROACTIVE_DEFAULT_HOOK
+    return (
+        "지금은 네가 먼저 말을 거는 상황. 아래 흐름을 자연스럽게 이어 짧게 "
+        f"먼저 말 걸어줘. 지시문 언급 금지. 흐름: {normalized}"
+    )
+
+
+async def _no_crisis_record(room_id: str) -> None:
+    """위기 감지를 수행하지 않는 경로(선톡)용 no-op record_crisis 콜백.
+
+    _openai_event_generator 는 record_crisis 를 필수 인자로 받으므로,
+    유저 입력이 없어 위기 감지가 성립하지 않는 선톡 경로에서는 아무것도
+    하지 않는 콜백을 넘긴다.
+    """
+    return None
+
+
+@router.post("/chat/proactive")
+@limiter.limit("30/minute")
+async def stream_proactive_message(
+    request: Request,
+    req: ProactiveChatRequest,
+    user: Optional[dict] = Depends(verify_firebase_token),
+):
+    """선톡(캐릭터 선발화) SSE 스트리밍 — /chat/stream 과 동일한 이벤트 계약.
+
+    이벤트: message(text/emotion/delay) 여러 개 → done(affinity_delta/
+    night_diary_generated/next_hook/next_goal/room_id).
+
+    /chat/stream 과 다른 점:
+      - 유저 발화가 없다. 유도 문구는 서버가 build_proactive_message 로 합성해
+        LLM 에만 전달하고 messages 테이블에는 적재하지 않는다.
+      - chat_turn 대신 proactive_turn 이벤트를 기록한다 — metrics_service 의
+        _SESSION_EVENT_TYPES=("chat_turn","app_open") 에 포함되지 않으므로
+        30분 gap 세션 통계와 리텐션 지표를 오염시키지 않는다.
+      - 호감도 분석을 돌리지 않는다(affinity_delta 는 항상 0).
+      - 위기 감지를 하지 않는다(유저 입력 없음). 콘텐츠 입력 필터는 hook 에 적용.
+    """
+    _req_t0 = time.monotonic()
+
+    # 입력 필터는 클라이언트가 보낸 hook 에만 적용한다(유도 문구 본문은 서버 상수).
+    is_safe, reason = check_content(req.hook)
+    if not is_safe:
+        raise HTTPException(status_code=400, detail=reason)
+
+    # 경계에서 한 번만 ChatRequest 로 변환해 기존 스트림 파이프라인
+    # (_prepare_chat_turn / stream_reply / _finalize_chat_turn)을 그대로 재사용한다.
+    chat_req = req.to_chat_request(build_proactive_message(req.hook))
+
+    await _gate_user(chat_req, user, request)
+    _t_gate_ms = (time.monotonic() - _req_t0) * 1000
+
+    return EventSourceResponse(_openai_event_generator(
+        chat_req, user, None, _no_crisis_record,
+        _sse_message_event, _sse_done_event,
+        crisis_tier=0, crisis_hint="",
+        request_start_ts=_req_t0, gate_ms=_t_gate_ms,
+        turn_event_type=PROACTIVE_TURN_EVENT,
+        persist_user_message=False,
+        skip_affinity=True,
     ))
 
 
