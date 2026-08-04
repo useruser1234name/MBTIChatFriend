@@ -34,7 +34,10 @@ data class ChatRequest(
     @Json(name = "user_mbti") val userMbti: String? = null,
     @Json(name = "character_name") val characterName: String = "",
     @Json(name = "character_id") val characterId: String = "",
-    val memories: List<MemoryItem> = emptyList()
+    val memories: List<MemoryItem> = emptyList(),
+    // M2: "내 역할"/"지금 상황" — 채팅 화면 상단 메뉴에서 캐릭터별로 설정. 빈 문자열이면 서버가 무시.
+    @Json(name = "user_role") val userRole: String = "",
+    @Json(name = "situation") val situation: String = ""
 )
 
 @JsonClass(generateAdapter = false)

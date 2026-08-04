@@ -227,6 +227,39 @@ class UserPreferences @Inject constructor(
     suspend fun getLastChatAt(characterId: Long): Long =
         context.dataStore.data.map { prefs -> prefs[lastChatAtKey(characterId)] ?: 0L }.first()
 
+    // ── M2: 유저 역할·상황(user_role/situation) — 캐릭터별 동적 키.
+    // R1의 next_hook_$characterId와 동일한 "동적 키" DataStore 패턴을 따른다(Room 스키마 변경 없음).
+    // 채팅 화면 상단 메뉴 "역할·상황 설정"에서 저장하며, 다음 전송부터 ChatRequest에 실려 나간다.
+    private fun userRoleKey(characterId: Long) = stringPreferencesKey("user_role_$characterId")
+    private fun situationKey(characterId: Long) = stringPreferencesKey("situation_$characterId")
+
+    suspend fun setUserRole(characterId: Long, role: String) {
+        context.dataStore.edit { prefs -> prefs[userRoleKey(characterId)] = role }
+    }
+
+    suspend fun getUserRole(characterId: Long): String =
+        context.dataStore.data.map { prefs -> prefs[userRoleKey(characterId)] ?: "" }.first()
+
+    fun observeUserRole(characterId: Long): Flow<String> =
+        context.dataStore.data.map { prefs -> prefs[userRoleKey(characterId)] ?: "" }
+
+    suspend fun setSituation(characterId: Long, situation: String) {
+        context.dataStore.edit { prefs -> prefs[situationKey(characterId)] = situation }
+    }
+
+    suspend fun getSituation(characterId: Long): String =
+        context.dataStore.data.map { prefs -> prefs[situationKey(characterId)] ?: "" }.first()
+
+    fun observeSituation(characterId: Long): Flow<String> =
+        context.dataStore.data.map { prefs -> prefs[situationKey(characterId)] ?: "" }
+
+    suspend fun clearRoleAndSituation(characterId: Long) {
+        context.dataStore.edit { prefs ->
+            prefs.remove(userRoleKey(characterId))
+            prefs.remove(situationKey(characterId))
+        }
+    }
+
     val isOpenBetaBannerDismissed: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.OPEN_BETA_BANNER_DISMISSED] ?: false
     }

@@ -49,6 +49,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -163,6 +164,10 @@ fun ChatScreen(
     var showMenu by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
     var shareTargetIndex by remember { mutableStateOf<Int?>(null) }
+    // M2: "내 역할"/"지금 상황" 설정 바텀시트
+    var showRoleSituationSheet by remember { mutableStateOf(false) }
+    val myUserRole by viewModel.userRole.collectAsState()
+    val mySituation by viewModel.situation.collectAsState()
     val context = LocalContext.current
     // R4: 햅틱 피드백 — 전송 시 tick, 수신 시 그룹당 1회(아래 itemsIndexed에서 사용)
     val haptics = LocalHapticFeedback.current
@@ -261,6 +266,10 @@ fun ChatScreen(
                 onClearChatRequest = {
                     showMenu = false
                     showClearDialog = true
+                },
+                onRoleSituationRequest = {
+                    showMenu = false
+                    showRoleSituationSheet = true
                 }
             )
 
@@ -502,6 +511,24 @@ fun ChatScreen(
             onDismiss = { shareTargetIndex = null }
         )
     }
+
+    // M2: "내 역할"/"지금 상황" 설정 — 다음 전송부터 반영(즉시 재생성 없음)
+    RoleSituationSheet(
+        visible = showRoleSituationSheet,
+        initialRole = myUserRole,
+        initialSituation = mySituation,
+        onSave = { role, situation ->
+            viewModel.saveRoleAndSituation(role, situation)
+            showRoleSituationSheet = false
+            coroutineScope.launch { snackbarHostState.showSnackbar("역할·상황을 저장했어요") }
+        },
+        onClear = {
+            viewModel.clearRoleAndSituation()
+            showRoleSituationSheet = false
+            coroutineScope.launch { snackbarHostState.showSnackbar("역할·상황을 지웠어요") }
+        },
+        onDismiss = { showRoleSituationSheet = false }
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -518,6 +545,7 @@ private fun ChatTopBar(
     onNavigateToCompatibility: () -> Unit,
     onMenuExpandedChange: (Boolean) -> Unit,
     onClearChatRequest: () -> Unit,
+    onRoleSituationRequest: () -> Unit,
 ) {
     TopAppBar(
         title = {
@@ -585,6 +613,13 @@ private fun ChatTopBar(
                     expanded = showMenu,
                     onDismissRequest = { onMenuExpandedChange(false) }
                 ) {
+                    DropdownMenuItem(
+                        text = { Text("역할·상황 설정") },
+                        onClick = onRoleSituationRequest,
+                        leadingIcon = {
+                            Icon(Icons.Default.Edit, contentDescription = null)
+                        }
+                    )
                     DropdownMenuItem(
                         text = { Text("대화 초기화") },
                         onClick = onClearChatRequest,

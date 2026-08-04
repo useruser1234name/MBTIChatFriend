@@ -171,6 +171,29 @@ class ChatViewModel @Inject constructor(
     val myMbti: StateFlow<String> = prefs.userMbti
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
 
+    // M2: "내 역할"/"지금 상황" — 채팅 화면 상단 메뉴 다이얼로그가 현재 저장된 값을 미리 채우는 데 사용.
+    // 실제 전송 시 값 반영은 SendMessageUseCase가 DataStore에서 직접 읽어 처리(여기선 UI 표시용).
+    val userRole: StateFlow<String> = prefs.observeUserRole(characterId)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
+
+    val situation: StateFlow<String> = prefs.observeSituation(characterId)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
+
+    /** M2: 역할·상황 저장 — 다음 전송부터 반영(즉시 재생성 없음). */
+    fun saveRoleAndSituation(role: String, situationText: String) {
+        viewModelScope.launch {
+            prefs.setUserRole(characterId, role.trim().take(200))
+            prefs.setSituation(characterId, situationText.trim().take(200))
+        }
+    }
+
+    /** M2: 역할·상황 지우기. */
+    fun clearRoleAndSituation() {
+        viewModelScope.launch {
+            prefs.clearRoleAndSituation(characterId)
+        }
+    }
+
     // MVI 통합 UiState — 9차 스프린트 (1단계: 추가만, 기존 StateFlow 유지)
     private val _uiState = MutableStateFlow<ChatUiState>(ChatUiState.Loading)
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()

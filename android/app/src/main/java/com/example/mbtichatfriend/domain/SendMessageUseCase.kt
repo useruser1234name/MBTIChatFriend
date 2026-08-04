@@ -1,11 +1,15 @@
 package com.example.mbtichatfriend.domain
 
 import com.example.mbtichatfriend.data.local.CharacterEntity
+import com.example.mbtichatfriend.data.local.UserPreferences
 import com.example.mbtichatfriend.data.remote.MemoryItem
 import com.example.mbtichatfriend.data.remote.SseEvent
 import com.example.mbtichatfriend.data.repository.ChatRepository
+import com.example.mbtichatfriend.data.repository.ChatResult
 import com.example.mbtichatfriend.model.ChatMessage
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,7 +32,20 @@ import javax.inject.Singleton
 @Singleton
 class SendMessageUseCase @Inject constructor(
     private val chatRepo: ChatRepository,
+    private val userPreferences: UserPreferences,
 ) {
+
+    /**
+     * M2: 캐릭터별로 저장된 "내 역할"/"지금 상황"을 DataStore에서 읽어온다.
+     * 모든 전송 경로(SSE/REST/재전송/오프라인 큐/선톡)가 이 UseCase를 거치므로
+     * 여기서 한 번만 읽으면 ChatViewModel의 각 호출부를 개별 수정할 필요가 없다.
+     * 조회 실패는 대화 전송 자체를 막지 않도록 조용히 빈 문자열로 대체한다.
+     */
+    private suspend fun loadRoleAndSituation(characterId: Long): Pair<String, String> {
+        val role = runCatching { userPreferences.getUserRole(characterId) }.getOrDefault("")
+        val situation = runCatching { userPreferences.getSituation(characterId) }.getOrDefault("")
+        return role to situation
+    }
 
     /**
      * SSE 스트리밍으로 메시지를 전송하고 이벤트 Flow를 반환.
@@ -48,19 +65,26 @@ class SendMessageUseCase @Inject constructor(
         userMbti: String?,
         conversationHistory: List<Map<String, String>>,
         memories: List<MemoryItem>,
-    ): Flow<SseEvent> = chatRepo.streamMessage(
-        message = text,
-        mbti = character.mbti,
-        speechStyle = character.speechStyle,
-        relationship = character.relationship,
-        nickname = nickname,
-        affinityLevel = character.affinityLevel,
-        conversationHistory = conversationHistory,
-        userMbti = userMbti,
-        characterName = character.name,
-        characterId = character.id.toString(),
-        memories = memories,
-    )
+    ): Flow<SseEvent> = flow {
+        val (role, situation) = loadRoleAndSituation(character.id)
+        emitAll(
+            chatRepo.streamMessage(
+                message = text,
+                mbti = character.mbti,
+                speechStyle = character.speechStyle,
+                relationship = character.relationship,
+                nickname = nickname,
+                affinityLevel = character.affinityLevel,
+                conversationHistory = conversationHistory,
+                userMbti = userMbti,
+                characterName = character.name,
+                characterId = character.id.toString(),
+                memories = memories,
+                userRole = role,
+                situation = situation,
+            )
+        )
+    }
 
     /**
      * REST 폴백 — SSE 실패 시 사용.
@@ -72,19 +96,24 @@ class SendMessageUseCase @Inject constructor(
         userMbti: String?,
         conversationHistory: List<Map<String, String>>,
         memories: List<MemoryItem>,
-    ) = chatRepo.sendMessage(
-        message = text,
-        mbti = character.mbti,
-        speechStyle = character.speechStyle,
-        relationship = character.relationship,
-        nickname = nickname,
-        affinityLevel = character.affinityLevel,
-        conversationHistory = conversationHistory,
-        userMbti = userMbti,
-        characterName = character.name,
-        characterId = character.id.toString(),
-        memories = memories,
-    )
+    ): ChatResult {
+        val (role, situation) = loadRoleAndSituation(character.id)
+        return chatRepo.sendMessage(
+            message = text,
+            mbti = character.mbti,
+            speechStyle = character.speechStyle,
+            relationship = character.relationship,
+            nickname = nickname,
+            affinityLevel = character.affinityLevel,
+            conversationHistory = conversationHistory,
+            userMbti = userMbti,
+            characterName = character.name,
+            characterId = character.id.toString(),
+            memories = memories,
+            userRole = role,
+            situation = situation,
+        )
+    }
 
     /**
      * 메시지 DB 저장.

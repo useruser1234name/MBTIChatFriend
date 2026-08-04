@@ -69,7 +69,9 @@ class ChatRepository @Inject constructor(
         userMbti: String? = null,
         characterName: String = "",
         characterId: String = "",
-        memories: List<MemoryItem> = emptyList()
+        memories: List<MemoryItem> = emptyList(),
+        userRole: String = "",
+        situation: String = ""
     ): Flow<SseEvent> {
         return sseClient.streamChat(
             ChatRequest(
@@ -83,7 +85,9 @@ class ChatRepository @Inject constructor(
                 userMbti = userMbti,
                 characterName = characterName,
                 characterId = characterId,
-                memories = memories
+                memories = memories,
+                userRole = userRole,
+                situation = situation
             )
         )
     }
@@ -102,7 +106,9 @@ class ChatRepository @Inject constructor(
         userMbti: String? = null,
         characterName: String = "",
         characterId: String = "",
-        memories: List<MemoryItem> = emptyList()
+        memories: List<MemoryItem> = emptyList(),
+        userRole: String = "",
+        situation: String = ""
     ): ChatResult {
         return try {
             val response = api.chat(
@@ -117,7 +123,9 @@ class ChatRepository @Inject constructor(
                     userMbti = userMbti,
                     characterName = characterName,
                     characterId = characterId,
-                    memories = memories
+                    memories = memories,
+                    userRole = userRole,
+                    situation = situation
                 )
             )
             ChatResult(

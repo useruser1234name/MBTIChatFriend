@@ -77,6 +77,9 @@ class SseClient @Inject constructor(
                 }
                 put("memories", memoriesArray)
             }
+            // M2: "내 역할"/"지금 상황" — 빈 문자열이어도 항상 포함(서버가 빈 값을 무시)
+            put("user_role", request.userRole)
+            put("situation", request.situation)
         }
 
         val body = json.toString().toRequestBody("application/json".toMediaType())
