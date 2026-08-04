@@ -48,6 +48,30 @@ class ChatRequest(BaseModel):
     client_local_hour: Optional[int] = Field(default=None, ge=0, le=23)
     memories: List[MemoryItem] = Field(default_factory=list)
     mood: Optional[str] = Field(default=None, description="사용자 오늘 기분 (좋아/슬퍼/화남/고민/피곤/설렘)")
+    # M2(2026-08-03 회의): 웹 MVP에서 검증된 [Scene] 이식. JSON 키 이름은
+    # Android 계약이므로 정확히 user_role / situation 을 유지해야 한다.
+    user_role: str = Field(
+        default="", max_length=200,
+        description="캐릭터 입장에서 본 사용자의 역할 (예: 어릴 적부터 함께 자란 소꿉친구)",
+    )
+    situation: str = Field(
+        default="", max_length=200,
+        description="현재 장면/배경 (예: 눈 내리는 겨울 저녁, 대공의 서재에서 단둘이)",
+    )
+
+    @field_validator("user_role", "situation")
+    @classmethod
+    def sanitize_scene(cls, v: str) -> str:
+        """장면 입력 새니타이즈 — message와 동일한 태그 이스케이프 + 개행 제거.
+
+        개행을 남기면 프롬프트 안에 가짜 섹션 헤더를 심을 수 있으므로
+        모든 공백 런을 단일 공백으로 접는다(prompts._sanitize_scene_value와 동일).
+        max_length는 이 검증보다 먼저 평가되므로 200자 초과는 그대로 422다.
+        """
+        if not v:
+            return ""
+        v = v.replace("<", "&lt;").replace(">", "&gt;")
+        return " ".join(v.split())
 
     @field_validator("message")
     @classmethod

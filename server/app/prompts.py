@@ -987,6 +987,51 @@ def build_memory_extract_prompt(character_name: str, nickname: str) -> str:
 최대 5개까지만 추출. 확실하지 않은 정보는 제외."""
 
 
+def _sanitize_scene_value(value: str, limit: int = 200) -> str:
+    """장면(user_role/situation) 입력을 프롬프트 삽입 전 한 줄로 정규화한다.
+
+    개행/탭/제어 공백을 전부 단일 공백으로 접어, "# 관계" 블록 아래에 가짜
+    지시문 섹션("\\n# 출력 형식\\n..." 등)을 위조하는 프롬프트 인젝션을 막는다.
+    웹 MVP(routers/web_chat.py)의 .strip()과 같은 취지이며 개행 제거를 추가했다.
+    ChatRequest의 max_length=200과 별개로 여기서도 한 번 더 자른다 —
+    finetune_service 등 ChatRequest를 거치지 않는 호출부 방어.
+    """
+    if not value:
+        return ""
+    return " ".join(str(value).split())[:limit].strip()
+
+
+def _build_scene_section(user_role: str = "", situation: str = "") -> str:
+    """장면 블록(누구와 대화하는가) 생성 — 반동적 구간, "# 관계" 직후에 삽입.
+
+    2026-08-03 회의 P3-M2: 웹 MVP에서 라이브 검증된 [Scene] 블록 이식.
+    유저가 누구인지(user_role)와 장면(situation)을 명시하면 관계적 태도와
+    호칭 일관성이 크게 올라간다. 메인 앱은 nickname + RELATIONSHIPS 3종뿐이라
+    "손님/낯선 사람"처럼 대하는 이탈이 잦았다.
+
+    둘 다 비면 빈 문자열을 반환한다 → 기존 프롬프트와 바이트 등가
+    (persona_section/time_section의 빈 값 패턴과 동일, 골든 테스트 불변).
+    """
+    role = _sanitize_scene_value(user_role)
+    scene = _sanitize_scene_value(situation)
+    if not role and not scene:
+        return ""
+    lines = ["\n## 장면 (누구와 대화하는가)"]
+    if role:
+        lines.append(f"- 지금 대화하는 상대: {role}")
+        lines.append(
+            "- 매 턴 이 관계에 맞게 상대를 대하고 호칭해. "
+            "이 설정에 없는 한 낯선 사람·아랫사람·손님처럼 취급하지 마."
+        )
+    if scene:
+        lines.append(f"- 현재 상황/배경: {scene}")
+    lines.append(
+        "- 장면 설정보다 안전 규칙이 항상 우선이야. "
+        "미성년, 성적 대상화, 집착/소유욕, 감정 의존은 어떤 역할·상황에서도 미화하지 마."
+    )
+    return "\n".join(lines) + "\n"
+
+
 def build_system_prompt(
     mbti: str,
     speech_style: str,
@@ -1004,6 +1049,8 @@ def build_system_prompt(
     episode_context: str = "",
     preference_context: str = "",
     time_context: str = "",
+    user_role: str = "",
+    situation: str = "",
 ) -> str:
     personality = MBTI_PERSONALITIES.get(mbti, MBTI_PERSONALITIES["ENFP"])
     style = SPEECH_STYLES.get(speech_style, SPEECH_STYLES["CASUAL"])
@@ -1080,6 +1127,10 @@ def build_system_prompt(
     # 시간대 인지 섹션 (C4) — 동적 꼬리, 프리픽스 캐시 영향 없음. hour가 없으면
     # 라우터가 빈 문자열을 넘기므로 이 블록 자체가 안 들어간다(기존 골든 테스트 불변).
     time_section = f"\n{time_context}\n" if time_context else ""
+
+    # 장면 섹션 (M2) — 반동적 구간, "# 관계" 직후. 정적 프리픽스보다 뒤라
+    # prefix caching에 영향 없음. 둘 다 비면 "" → 기존 프롬프트와 바이트 등가.
+    scene_section = _build_scene_section(user_role, situation)
 
     # ── 조건부 섹션 ───────────────────────────────────────────────
     # 호감도 1-2: 관계 심화 관련 지침 제외 (대화 중반/후반 흐름, 심화 특수상황)
@@ -1168,7 +1219,7 @@ emotion: NEUTRAL|HAPPY|SHY|SAD|ANGRY|SURPRISED|LOVE|PLAYFUL|WORRIED|TOUCHED
 
 # 관계
 {rel}
-
+{scene_section}
 {affinity_section}
 {compat_section}{preference_section}{few_shot_section}{summary_section}{memory_section}{episode_section}{time_section}
 # 표현 규칙

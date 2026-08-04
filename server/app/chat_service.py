@@ -567,6 +567,8 @@ def _build_chat_messages(
     message: str,
     time_context: str = "",
     crisis_hint: str = "",
+    user_role: str = "",
+    situation: str = "",
 ) -> List[dict]:
     """시스템 프롬프트 + safety + 히스토리 + 현재 메시지로 messages 배열 조립.
 
@@ -583,6 +585,11 @@ def _build_chat_messages(
     빈 문자열이면 기존 프롬프트와 바이트 단위로 동일하다(골든 테스트 불변).
     이전에는 이 지침이 LoRA 제너레이터에만 전달됐고 그 경로가 도달 불가라
     실질적으로 어디에도 적용되지 않았다.
+
+    user_role/situation(2026-08-03 P3-M2): 웹 MVP에서 검증된 [Scene] 이식.
+    build_system_prompt의 반동적 구간("# 관계" 직후)에 장면 블록으로 들어간다.
+    둘 다 빈 문자열이면 블록 자체가 생성되지 않아 기존 프롬프트와 바이트
+    단위로 동일하다(골든 테스트 불변).
     """
     # 유저 발화 스타일 미러링(개인화 되먹임 MVP). 규칙 기반·LLM 미호출.
     # 여기 도달하는 conversation_history는 호출부(generate_reply/stream_reply)에서
@@ -607,6 +614,8 @@ def _build_chat_messages(
         episode_context=episode_context,
         preference_context=preference_context,
         time_context=time_context,
+        user_role=user_role,
+        situation=situation,
     )
     # safety_prompt는 거의 변하지 않으므로 정적 system_prompt에 인라인하여 prefix caching 효율 극대화
     safety_prompt = get_safety_system_prompt()
@@ -1186,6 +1195,8 @@ async def _assemble_prompt_and_model(
     time_context: str = "",
     crisis_tier: int = 0,
     crisis_hint: str = "",
+    user_role: str = "",
+    situation: str = "",
 ) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, Optional[str], str]:
     """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/복잡도/AB 오버레이) + LoRA 클라이언트 해석.
 
@@ -1203,6 +1214,10 @@ async def _assemble_prompt_and_model(
     crisis_tier/crisis_hint(2026-08-03 P0-S3): 라우터가 detect_crisis_v2 /
     _build_crisis_hint 로 계산해 넘긴다. tier는 모델 승격에, hint는 시스템
     프롬프트 꼬리 주입에 쓰인다. 둘 다 기본값(0/"")이면 기존 동작과 동일.
+
+    user_role/situation(2026-08-03 P3-M2): ChatRequest에서 온 장면 설정을
+    _build_chat_messages → build_system_prompt로 그대로 전달한다(빈 값이면
+    프롬프트 무변화).
     """
     messages = _build_chat_messages(
         mbti=mbti,
@@ -1224,6 +1239,8 @@ async def _assemble_prompt_and_model(
         message=message,
         time_context=time_context,
         crisis_hint=crisis_hint,
+        user_role=user_role,
+        situation=situation,
     )
 
     # 모델 선택 (복잡도 기반 라우팅이 기준선 + A/B 정책 오버레이 + 위기 승격)
@@ -1352,6 +1369,8 @@ async def generate_reply(
     crisis_hint: str = "",
     request_start_ts: Optional[float] = None,
     gate_ms: float = 0.0,
+    user_role: str = "",
+    situation: str = "",
 ) -> Tuple[List[ReplyPart], int]:
     """LLM을 사용하여 대화 응답 생성, (replies, affinity_delta) 반환.
 
@@ -1370,6 +1389,10 @@ async def generate_reply(
     turn_latency 이벤트에 t_e2e_total_ms(요청 진입~응답 완성)와 t_gate_ms를
     함께 남긴다. 기본값(None/0.0)이면 두 필드 중 t_e2e_total_ms는 payload에서
     빠지고 t_gate_ms는 0.0으로 기록되어 기존 동작과 동일하다 — 순수 계측용.
+
+    user_role/situation(2026-08-03 P3-M2): 라우터가 ChatRequest에서 그대로
+    넘기는 장면 설정. 시스템 프롬프트의 "# 관계" 직후에 장면 블록으로
+    주입된다. 기본값("")이면 블록이 생성되지 않아 기존 동작과 동일.
     """
 
     if conversation_history is None:
@@ -1463,6 +1486,7 @@ async def generate_reply(
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
             character_id, time_context=time_context,
             crisis_tier=crisis_tier, crisis_hint=crisis_hint,
+            user_role=user_role, situation=situation,
         )
 
         _t_start = time.monotonic()
@@ -1610,6 +1634,8 @@ async def stream_reply(
     crisis_hint: str = "",
     request_start_ts: Optional[float] = None,
     gate_ms: float = 0.0,
+    user_role: str = "",
+    situation: str = "",
 ) -> AsyncGenerator[Union[ReplyPart, StreamDone], None]:
     """말풍선 점진 스트리밍 생성기.
 
@@ -1641,6 +1667,9 @@ async def stream_reply(
     않는다(비-crisis 턴이 절대다수라 근사치로 충분 — 순수 계측 필드).
     기본값(None/0.0)이면 t_e2e_first_bubble_ms는 payload에서 빠지고
     t_gate_ms는 0.0으로 기록되어 기존 동작과 동일하다.
+
+    user_role/situation(2026-08-03 P3-M2): generate_reply와 동일 계약 —
+    시스템 프롬프트 "# 관계" 직후에 장면 블록으로 주입, 빈 값이면 무변화.
     """
     if conversation_history is None:
         conversation_history = []
@@ -1731,6 +1760,7 @@ async def stream_reply(
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
             character_id, log_lora_routing=False, time_context=time_context,
             crisis_tier=crisis_tier, crisis_hint=crisis_hint,
+            user_role=user_role, situation=situation,
         )
 
         # 9. 스트리밍 호출 + 증분 파싱

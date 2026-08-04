@@ -499,6 +499,8 @@ async def _run_chat_pipeline(
         crisis_hint=crisis_hint,
         request_start_ts=request_start_ts,
         gate_ms=gate_ms,
+        user_role=req.user_role,
+        situation=req.situation,
     )
     return await _finalize_chat_turn(
         req,
@@ -682,6 +684,8 @@ async def _lora_event_generator(
         affinity_level=req.affinity_level or 0,
         user_mbti=req.user_mbti or "",
         character_name=req.character_name or "",
+        user_role=req.user_role,
+        situation=req.situation,
     )
     if crisis_type_hint:
         sys_prompt += crisis_type_hint
@@ -763,6 +767,8 @@ async def _openai_event_generator(
             crisis_hint=crisis_hint,
             request_start_ts=request_start_ts,
             gate_ms=gate_ms,
+            user_role=req.user_role,
+            situation=req.situation,
         ):
             if isinstance(item, StreamDone):
                 affinity_delta = item.affinity_delta
