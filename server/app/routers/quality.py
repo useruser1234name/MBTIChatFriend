@@ -1,5 +1,6 @@
 """품질 관련 엔드포인트"""
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -142,7 +143,9 @@ async def get_feedback_summary(room_id: str):
 
 
 @router.get("/metrics/session-stats")
+@limiter.limit("10/minute")
 async def session_stats(
+    request: Request,
     days: int = 7,
     group_by: str = "room",
     user: Optional[dict] = Depends(verify_firebase_token),
@@ -151,10 +154,15 @@ async def session_stats(
     세션을 파생(P3, 2026-08-03 회의). 신규 계측 없이 조회 계층에서만 집계한다.
 
     group_by: "room"(room_id 기준) 또는 "user"(user_id 기준).
+
+    M-C(2026-08-04) 경화: days 클램프(1~90, /cost/summary 패턴)로 풀스캔 방지,
+    레이트리밋 추가, 동기 psycopg 조회(fetchall)를 to_thread로 내려 이벤트 루프
+    블로킹 제거.
     """
     if group_by not in ("room", "user"):
         raise HTTPException(status_code=400, detail="group_by must be 'room' or 'user'")
-    return get_session_stats(days=days, group_by=group_by)
+    days = max(1, min(days, 90))
+    return await asyncio.to_thread(get_session_stats, days=days, group_by=group_by)
 
 
 @router.get("/finetune/audit")

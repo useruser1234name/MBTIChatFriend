@@ -213,6 +213,7 @@ def get_session_stats(
           AND {group_col} IS NOT NULL AND {group_col} != ''
           AND created_at >= NOW() - INTERVAL '1 day' * %s
         ORDER BY {group_col}, created_at
+        LIMIT 200000
         """,
         tuple(_SESSION_EVENT_TYPES) + (days,),
     )

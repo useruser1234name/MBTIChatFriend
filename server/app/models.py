@@ -3,6 +3,24 @@ from typing import Dict, List, Literal, Optional
 
 from .config import MAX_CONVERSATION_HISTORY, MAX_MESSAGE_LENGTH
 
+
+def _reject_unsafe_prompt_text(v: str) -> str:
+    """시스템 프롬프트에 삽입되는 값(user_role/situation/hook)의 안전 검사.
+
+    M-A(2026-08-04): 기존에는 message에만 check_content(인젝션/유해 패턴)가
+    적용되고, 정작 시스템 프롬프트 블록으로 들어가는 이 값들은 태그 이스케이프
+    +공백 접기만 거쳤다 — 권한이 더 높은 입력이 더 약하게 검증되는 역전.
+    message와 동일한 기준을 적용해 감지 시 422로 거부한다.
+    (지연 임포트: content_filter는 표준 라이브러리만 사용하므로 순환 없음,
+    모듈 로드 순서 민감성만 회피)
+    """
+    from .content_filter import check_content
+
+    ok, reason = check_content(v)
+    if not ok:
+        raise ValueError(reason or "허용되지 않는 표현이 포함되어 있습니다.")
+    return v
+
 _VALID_MBTI_TYPES = {
     "INTJ", "INTP", "ENTJ", "ENTP",
     "INFJ", "INFP", "ENFJ", "ENFP",
@@ -67,11 +85,12 @@ class ChatRequest(BaseModel):
         개행을 남기면 프롬프트 안에 가짜 섹션 헤더를 심을 수 있으므로
         모든 공백 런을 단일 공백으로 접는다(prompts._sanitize_scene_value와 동일).
         max_length는 이 검증보다 먼저 평가되므로 200자 초과는 그대로 422다.
+        인젝션/유해 패턴은 message와 동일 기준(check_content)으로 거부한다(M-A).
         """
         if not v:
             return ""
         v = v.replace("<", "&lt;").replace(">", "&gt;")
-        return " ".join(v.split())
+        return _reject_unsafe_prompt_text(" ".join(v.split()))
 
     @field_validator("message")
     @classmethod
@@ -131,12 +150,13 @@ class ProactiveChatRequest(BaseModel):
         """ChatRequest.sanitize_scene과 동일 규칙 — 태그 이스케이프 + 공백 접기.
 
         hook은 서버 합성 프롬프트에 그대로 삽입되므로 개행을 남기면 가짜
-        섹션 헤더를 심을 수 있다.
+        섹션 헤더를 심을 수 있다. 인젝션/유해 패턴은 message와 동일 기준
+        (check_content)으로 거부한다(M-A).
         """
         if not v:
             return ""
         v = v.replace("<", "&lt;").replace(">", "&gt;")
-        return " ".join(v.split())
+        return _reject_unsafe_prompt_text(" ".join(v.split()))
 
     def to_chat_request(self, message: str) -> "ChatRequest":
         """합성된 유도 문구를 message로 갖는 내부 ChatRequest를 만든다.

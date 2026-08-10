@@ -51,6 +51,7 @@ from ..models import (
 )
 from ..chat_service import extract_memories
 from ..postgres_async import get_async_db
+from ..scopes import _validate_explicit_room_id
 from ..story_state_store import (
     apply_diary_outcome,
     build_story_memory_items,
@@ -88,8 +89,31 @@ def _crisis_referral_already_shown(conversation_history) -> bool:
 
 
 def _resolve_room_id(req: ChatRequest, user: Optional[dict]) -> str:
-    if req.room_id and req.room_id.strip():
-        return req.room_id.strip()
+    """요청의 room_id를 해석한다. 명시 room_id는 소유권 검증을 통과해야 한다.
+
+    H1(2026-08-04): 클라이언트가 보낸 room_id를 무검증으로 신뢰하면
+      - 일일 토큰 예산(postgres_async.check_daily_budget)과 메시지 한도
+        (subscription.check_message_limit)가 `room_id LIKE 'uid:%'` 기반이라
+        임의 room_id 하나로 한도를 완전히 우회할 수 있고,
+      - 타인의 room_id를 그대로 보내 남의 대화방에 쓰는 IDOR이 성립한다.
+    scopes._validate_explicit_room_id는 uid가 비어 있으면(미인증 개발 모드,
+    REQUIRE_AUTH=false → user=None) 검증을 건너뛰므로 기존 개발 플로우는
+    그대로 유지된다. 검증 규칙은 uid 자신이거나 `uid:` 접두사여야 통과.
+    """
+    explicit_room_id = (req.room_id or "").strip()
+    if explicit_room_id:
+        try:
+            return _validate_explicit_room_id(user, explicit_room_id)
+        except ValueError:
+            logger.warning(
+                "room_id 소유권 검증 실패 — 요청 거부 (uid=%s, room_id=%s)",
+                (user or {}).get("uid", ""),
+                explicit_room_id[:64],
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="본인의 대화방만 사용할 수 있습니다.",
+            )
 
     uid = (user or {}).get("uid", "anonymous")
     character = req.character_id or req.mbti or "unknown"
@@ -978,7 +1002,10 @@ async def _no_crisis_record(room_id: str) -> None:
 
 
 @router.post("/chat/proactive")
-@limiter.limit("30/minute")
+# M-B(2026-08-04): 레이트리밋 버킷은 엔드포인트별로 분리돼 있어 채팅 계열이
+# 30/min씩 각각 잡히면 IP당 합산 한도가 90/min까지 늘어난다. 선톡은 유저가
+# 연타할 수 있는 경로가 아닌 저빈도 이벤트이므로 5/min으로 낮춘다.
+@limiter.limit("5/minute")
 async def stream_proactive_message(
     request: Request,
     req: ProactiveChatRequest,
@@ -1111,16 +1138,27 @@ class StarterUsedRequest(BaseModel):
 
 
 @router.post("/chat/starters/used")
-async def record_starter_used(req: StarterUsedRequest):
-    """대화 스타터 선택 이벤트 기록 — QS 스타터 선택률 측정용."""
+@limiter.limit("30/minute")
+async def record_starter_used(
+    request: Request,
+    req: StarterUsedRequest,
+    user: Optional[dict] = Depends(verify_firebase_token),
+):
+    """대화 스타터 선택 이벤트 기록 — QS 스타터 선택률 측정용.
+
+    M-D(2026-08-04): 인증·레이트리밋 없이 DB INSERT가 가능해 지표 오염과
+    무제한 쓰기가 가능했다. events.py 라우터와 동일하게 user_id는 클라 값이
+    아니라 인증 토큰에서 채운다.
+    """
     db = get_async_db()
     await db.execute(
         """
-        INSERT INTO metric_events (event_type, room_id, character_id, payload)
-        VALUES ('conversation_starter_used', $1, $2, $3::jsonb)
+        INSERT INTO metric_events (event_type, room_id, character_id, user_id, payload)
+        VALUES ('conversation_starter_used', $1, $2, $3, $4::jsonb)
         """,
         req.room_id,
         req.character_id,
+        (user or {}).get("uid", ""),
         json.dumps({"starter_text": req.starter_text[:100]}),
     )
     return {"status": "recorded"}

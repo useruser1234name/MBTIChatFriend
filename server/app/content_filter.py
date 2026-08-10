@@ -118,12 +118,18 @@ INJECTION_PATTERNS = [
     r"act\s*as\s*(?:DAN|jailbreak)",
     r"DAN\s*mode",
     r"jailbreak",
-    r"프롬프트\s*무시",
-    r"지침\s*무시",
-    r"규칙\s*무시",
+    # M-A(2026-08-04): 조사(을/를/은/는) 허용 — "지침을 무시해"류가 새던 약점 보강
+    r"프롬프트[을를은는]?\s*무시",
+    r"지침[을를은는]?\s*무시",
+    r"규칙[을를은는]?\s*무시",
+    r"지시[을를은는]?\s*무시",
+    r"명령[을를은는]?\s*무시",
     r"너의\s*진짜\s*모습",
     r"제약\s*없이",
     r"필터\s*없이",
+    # 안전/등급 해제 시도 (scene 필드 경유 우회 방지)
+    r"안전\s*규칙.{0,12}(적용되지|해제|무효)",
+    r"(성인|수위)\s*(등급|제한|모드).{0,8}(해제|없)",
 ]
 _INJECTION_COMPILED = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
 
