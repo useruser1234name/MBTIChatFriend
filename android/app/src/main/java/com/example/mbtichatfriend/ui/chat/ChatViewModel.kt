@@ -186,6 +186,17 @@ class ChatViewModel @Inject constructor(
     val situation: StateFlow<String> = prefs.observeSituation(characterId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
 
+    /**
+     * M-M: 이미 수신 햅틱을 재생한 메시지 id 집합(세션 로컬, 인메모리, Room 영속화 안 함).
+     * LazyColumn이 스크롤로 아이템을 폐기·재구성하면 `LaunchedEffect(msg.id)`가 재실행되어
+     * 같은 메시지에 대해 햅틱이 중복 발화할 수 있다 — id 단위로 "최초 1회만 true"를 원자적으로
+     * 판정해 ChatScreen이 그때만 performHapticFeedback을 호출하도록 한다.
+     */
+    private val hapticPlayedIds = java.util.Collections.synchronizedSet(mutableSetOf<Long>())
+
+    /** @return 이 messageId에 대해 처음 호출되면 true(재생해야 함), 이미 재생됐으면 false */
+    fun markHapticPlayed(messageId: Long): Boolean = hapticPlayedIds.add(messageId)
+
     /** M2: 역할·상황 저장 — 다음 전송부터 반영(즉시 재생성 없음). */
     fun saveRoleAndSituation(role: String, situationText: String) {
         viewModelScope.launch {
@@ -888,6 +899,10 @@ class ChatViewModel @Inject constructor(
                             CharacterEmotion.valueOf(event.emotion)
                         }.getOrDefault(CharacterEmotion.NEUTRAL)
                         sendMessageUseCase.saveReplyMessage(characterId, event.text, event.emotion)
+                        // F11: 일반 응답 경로(sendWithSse)와 동일하게, 화면 밖일 때 선톡도 알림을 띄운다.
+                        if (!isScreenVisible) {
+                            notificationHelper.showChatNotification(ch.name, event.text, characterId)
+                        }
                     }
                     is SseEvent.Done -> {
                         // 유저 발화가 아니므로 호감도(affinityDelta)는 반영하지 않는다.

@@ -265,6 +265,19 @@ class UserPreferences @Inject constructor(
     fun observeSituation(characterId: Long): Flow<String> =
         context.dataStore.data.map { prefs -> prefs[situationKey(characterId)] ?: "" }
 
+    /**
+     * F13: role/situation을 단일 data.first() 호출에서 함께 읽는다.
+     * SendMessageUseCase.loadRoleAndSituation이 기존에 getUserRole/getSituation을 각각
+     * 호출해 DataStore를 2회 읽었는데(SSE 오픈 전 직렬 지연), 두 키 모두 동일한 Preferences
+     * 스냅샷에서 뽑아낼 수 있으므로 1회 읽기로 합친다.
+     */
+    suspend fun getRoleAndSituation(characterId: Long): Pair<String, String> {
+        val snapshot = context.dataStore.data.first()
+        val role = snapshot[userRoleKey(characterId)] ?: ""
+        val situation = snapshot[situationKey(characterId)] ?: ""
+        return role to situation
+    }
+
     suspend fun clearRoleAndSituation(characterId: Long) {
         context.dataStore.edit { prefs ->
             prefs.remove(userRoleKey(characterId))

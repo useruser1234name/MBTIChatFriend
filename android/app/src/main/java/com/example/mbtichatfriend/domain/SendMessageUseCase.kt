@@ -40,12 +40,13 @@ class SendMessageUseCase @Inject constructor(
      * 모든 전송 경로(SSE/REST/재전송/오프라인 큐/선톡)가 이 UseCase를 거치므로
      * 여기서 한 번만 읽으면 ChatViewModel의 각 호출부를 개별 수정할 필요가 없다.
      * 조회 실패는 대화 전송 자체를 막지 않도록 조용히 빈 문자열로 대체한다.
+     *
+     * F13: 과거엔 getUserRole/getSituation을 각각 호출해 매 전송마다 DataStore를 2회
+     * 읽어 SSE 오픈 전 직렬 지연이 있었다 — UserPreferences.getRoleAndSituation으로
+     * 단일 data.first() 읽기에 합쳤다.
      */
-    private suspend fun loadRoleAndSituation(characterId: Long): Pair<String, String> {
-        val role = runCatching { userPreferences.getUserRole(characterId) }.getOrDefault("")
-        val situation = runCatching { userPreferences.getSituation(characterId) }.getOrDefault("")
-        return role to situation
-    }
+    private suspend fun loadRoleAndSituation(characterId: Long): Pair<String, String> =
+        runCatching { userPreferences.getRoleAndSituation(characterId) }.getOrDefault("" to "")
 
     /**
      * SSE 스트리밍으로 메시지를 전송하고 이벤트 Flow를 반환.

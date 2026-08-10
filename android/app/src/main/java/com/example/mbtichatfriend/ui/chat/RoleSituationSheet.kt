@@ -71,7 +71,8 @@ fun RoleSituationSheet(
 
             OutlinedTextField(
                 value = role,
-                onValueChange = { if (it.length <= MAX_LEN) role = it },
+                // F12: 길이 초과 시 통째로 무시하면 붙여넣기가 무음으로 버려진다 — 초과분만 잘라 반영
+                onValueChange = { role = it.take(MAX_LEN) },
                 label = { Text("내 역할") },
                 placeholder = { Text("예: 소꿉친구, 신입 매니저, 이 저택의 손님") },
                 supportingText = { Text("${role.length}/$MAX_LEN") },
@@ -83,7 +84,8 @@ fun RoleSituationSheet(
 
             OutlinedTextField(
                 value = situation,
-                onValueChange = { if (it.length <= MAX_LEN) situation = it },
+                // F12: 길이 초과 시 통째로 무시하면 붙여넣기가 무음으로 버려진다 — 초과분만 잘라 반영
+                onValueChange = { situation = it.take(MAX_LEN) },
                 label = { Text("지금 상황") },
                 placeholder = { Text("예: 비 오는 저녁, 카페에서 우연히 만남") },
                 supportingText = { Text("${situation.length}/$MAX_LEN") },

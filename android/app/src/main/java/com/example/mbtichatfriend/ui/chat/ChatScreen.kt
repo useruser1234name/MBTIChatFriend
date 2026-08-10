@@ -204,9 +204,15 @@ fun ChatScreen(
     LaunchedEffect(messages.size) {
         val delta = messages.size - lastMessageCount
         if (delta > 0) {
-            val last = messages.lastOrNull()
-            if (!isNearBottom && last != null && !last.isFromUser) {
-                unseenCount += delta
+            // F9: lastMessageCount == 0 → N인 최초 전이는 히스토리 최초 로드이지 "새로 도착한
+            // AI 메시지"가 아니므로 미확인 카운트 대상에서 제외한다.
+            if (lastMessageCount != 0 && !isNearBottom) {
+                // F10: 같은 프레임에 유저+AI 메시지가 함께 반영되면 delta 전체를 그대로 더하면
+                // 유저 메시지까지 미확인으로 잡힌다 — 새로 추가된 마지막 delta개 중
+                // AI(!isFromUser) 메시지만 필터링해 계수한다.
+                val newlyAdded = messages.takeLast(delta)
+                val newAiCount = newlyAdded.count { !it.isFromUser }
+                if (newAiCount > 0) unseenCount += newAiCount
             }
         } else if (delta < 0) {
             // 대화 초기화 등으로 메시지가 줄어든 경우 카운트 리셋
@@ -360,9 +366,15 @@ fun ChatScreen(
                         // R4: 수신 햅틱 — 새 AI 메시지가 그룹의 첫 버블로 추가될 때 1회만.
                         // "이번 세션에서 새로 도착한 메시지"만 대상으로 해 화면 재진입 시
                         // 과거 메시지를 다시 훑을 때는 울리지 않는다.
+                        // M-M: sessionStartMs 조건만으로는 LazyColumn이 스크롤로 아이템을
+                        // 폐기·재구성할 때(=LaunchedEffect(msg.id) 재실행) 같은 메시지에 대해
+                        // 햅틱이 매번 재발화하는 걸 막지 못한다 — ViewModel의 세션 로컬 Set으로
+                        // "이 id는 처음 재생하는지"를 원자적으로 판정해 최초 1회만 재생한다.
                         LaunchedEffect(msg.id) {
                             if (!msg.isFromUser && !sameAsPrev && msg.createdAt > viewModel.sessionStartMs) {
-                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                if (viewModel.markHapticPlayed(msg.id)) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
                             }
                         }
 
@@ -501,11 +513,17 @@ fun ChatScreen(
             confirmLabel = "공유하기",
             dismissLabel = "취소",
             onConfirm = {
-                val start = maxOf(0, targetIdx - 3)
-                val snapshot = messages.subList(start, minOf(messages.size, targetIdx + 1))
-                val mbti = character?.mbti ?: "MBTI"
-                val bitmap = ShareMessageHelper.captureChatSnapshot(snapshot, mbti, context)
-                ShareMessageHelper.shareSnapshot(bitmap, context)
+                // F15: 다이얼로그가 열린 채 메시지 목록이 줄어들면(대화 초기화 등) targetIdx가
+                // 범위를 벗어나 start > end가 되어 subList가 IndexOutOfBoundsException을 던질 수
+                // 있다 — coerceIn으로 안전 클램프하고, 클램프 후 범위가 비면 캡처를 건너뛴다.
+                val end = (targetIdx + 1).coerceIn(0, messages.size)
+                val start = (targetIdx - 3).coerceIn(0, end)
+                if (start < end) {
+                    val snapshot = messages.subList(start, end)
+                    val mbti = character?.mbti ?: "MBTI"
+                    val bitmap = ShareMessageHelper.captureChatSnapshot(snapshot, mbti, context)
+                    ShareMessageHelper.shareSnapshot(bitmap, context)
+                }
                 shareTargetIndex = null
             },
             onDismiss = { shareTargetIndex = null }
