@@ -41,6 +41,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 
 @HiltViewModel
@@ -145,8 +147,13 @@ class ChatViewModel @Inject constructor(
      * 메시지별 맵 대신 단일 워터마크만 유지한다(회의 스펙: 화면 재진입 시엔 전부 읽음 취급이
      * 자연스러우므로 세션 로컬 값이면 충분 — Room 영속화하지 않는다).
      * ChatScreen은 `msg.id > readWatermarkId`인 유저 메시지에만 "1"을 그린다.
+     *
+     * H4: 초기값을 0L로 두면 재진입 시 과거 유저 메시지 전부(id > 0)가 "안읽음"으로 번쩍인다
+     * (주석이 의도한 "재진입 시 전부 읽음 취급"과 정반대). Long.MAX_VALUE를 sentinel로 시작해
+     * 어떤 메시지 id도 이보다 클 수 없게 해 시드 전 렌더 프레임에서 표시를 억제하고,
+     * init에서 Room 첫 방출을 읽어 실제 마지막 유저 메시지 id로 즉시 시드한다.
      */
-    private val _readWatermarkId = MutableStateFlow(0L)
+    private val _readWatermarkId = MutableStateFlow(Long.MAX_VALUE)
     val readWatermarkId: StateFlow<Long> = _readWatermarkId.asStateFlow()
 
     /** id가 워터마크보다 클 때만 전진 — 역행(더 이전 값으로 되돌림) 방지 */
@@ -263,11 +270,36 @@ class ChatViewModel @Inject constructor(
 
     private var userMessageCount = 0
 
+    /** M-K: 선톡(maybeSendProactiveMessage) 코루틴 — send() 진입 시 취소 대상으로 보관 */
+    private var proactiveJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * M-K: 유저가 send()를 시작했는지 여부(레이스 가드). proactiveJob.cancel()이 즉시
+     * 전파되지 않는 짧은 창(비-서스펜드 구간)을 메우기 위해 선톡 발사 직전 이 플래그를
+     * 한 번 더 확인한다. 메인 디스패처에서만 갱신/조회되지만 취소 안전성을 위해 @Volatile.
+     */
+    @Volatile
+    private var userSendStarted = false
+
+    /** M-O: 같은 ViewModel 인스턴스 내에서 선톡 시도가 중복 발사되지 않도록 하는 인메모리 가드 */
+    private var proactiveAttemptStarted = false
+
+    /** F8: 빠른 연속 전송 시 SSE 스트림 개시만 직렬화 — 유저 메시지 저장(낙관적 렌더)은 대상 아님 */
+    private val sendMutex = Mutex()
+
     init {
         // A3: Room에 저장된 피드백을 복원 — 화면 재진입/프로세스 재시작 시 아이콘 표시 소실 및
         // 멱등 가드 리셋(중복 제출 가능) 방지
         viewModelScope.launch {
             feedbackUseCase.restoreFeedback(characterId)
+        }
+
+        // H4: Room 첫 방출의 마지막 유저 메시지 id로 읽음 워터마크를 시드.
+        // 시드 전에는 sentinel(Long.MAX_VALUE)이 모든 "1" 표시를 억제한다.
+        viewModelScope.launch {
+            val initial = runCatching { chatRepo.observeMessages(characterId).first() }.getOrNull().orEmpty()
+            val maxUserMessageId = initial.filter { it.isFromUser }.maxOfOrNull { it.id } ?: 0L
+            _readWatermarkId.value = maxUserMessageId
         }
 
         // 기존 expressionSet 로드 또는 진행 중인 생성 작업 폴링 → ExpressionManager에 위임
@@ -314,7 +346,8 @@ class ChatViewModel @Inject constructor(
 
         // R1: 선톡 연출 — 보관된 next_hook이 있고 충분히 오래 쉬었다면
         // 채팅방 진입 시 캐릭터가 먼저 말을 건다. (빈 방은 sendInitialGreeting 영역)
-        viewModelScope.launch { maybeSendProactiveMessage() }
+        // M-K: job을 필드에 보관해 유저가 직접 전송을 시작하면 취소할 수 있게 한다.
+        proactiveJob = viewModelScope.launch { maybeSendProactiveMessage() }
 
         // 네트워크 복구 시 대기 중인 메시지 전송
         viewModelScope.launch {
@@ -359,6 +392,11 @@ class ChatViewModel @Inject constructor(
                                 characterRepo.updateAffinity(pendingMessage.characterId, result.affinityDelta)
                             }
 
+                            // M-L: 오프라인 큐 flush 성공 시에도 읽음 워터마크를 전진시킨다
+                            // (온라인 경로의 markRead와 동일한 취급 — 누락 시 큐로 보냈던 메시지가
+                            // 영구히 "1"로 표시됨)
+                            markRead(pendingMessage.id)
+
                             true
                         } catch (_: Exception) {
                             false
@@ -399,20 +437,22 @@ class ChatViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
+            // M-K: 유저가 직접 전송을 시작했다 — 대기 중인 선톡을 취소하고, 취소 전파가
+            // 늦는 경우에 대비해 선톡 발사 직전 재확인용 플래그도 세운다.
+            userSendStarted = true
+            proactiveJob?.cancel()
+
             if (!isOnline.value) {
                 sendMessageUseCase.savePendingMessage(characterId, trimmed)
                 return@launch
             }
 
-            // Self-Regulation: 메시지 전송 직전 세션 사용 시간 점검
-            // room_id는 "uid:character:nickname" 형식으로 서버와 동일하게 구성
-            val ch0 = characterRepo.getById(characterId)
-            if (ch0 != null) {
-                checkSessionLimit(buildRoomId())
-            }
-
+            // F7: 유저 말풍선을 세션 점검(REST 왕복)보다 먼저 즉시 저장해 바로 렌더한다.
+            // 세션 점검은 별도로 병렬 launch — 결과(sessionWarnMessage)는 기존과 동일하게 반영되되
+            // 전송 자체를 막지 않는다. checkSessionLimit 내부에서 캐릭터 null-체크를 이미 수행한다.
             val userMessageId = sendMessageUseCase.saveUserMessage(characterId, trimmed)
             userMessageCount++
+            launch { checkSessionLimit(buildRoomId()) }
 
             analyticsRepository.track(
                 scope = viewModelScope,
@@ -425,12 +465,6 @@ class ChatViewModel @Inject constructor(
             if (elapsedMinutes >= 10 || userMessageCount >= 3) {
                 _showFeedbackSheet.value = true
             }
-
-            isTyping = true
-            isTalking = true
-            errorMessage = null
-            // R9: 첫 버블 도착까지 4초가 걸리면 대기 문구를 전환
-            startLongWaitTimer()
 
             val ch = characterRepo.getById(characterId) ?: return@launch
             val nickname = prefs.nickname.first()
@@ -462,8 +496,19 @@ class ChatViewModel @Inject constructor(
                 memoryRepo.loadMemories(characterId)
             }.getOrDefault(emptyList())
 
-            // SSE 스트리밍 시도
-            sendWithSse(trimmed, ch, nickname, userMbti, recentMessages, memories, userMessageId)
+            // F8: 빠른 연속 전송 시 SSE 스트림이 겹치지 않도록 "개시"만 직렬화한다.
+            // 유저 메시지 저장은 이미 위에서 즉시 완료돼 낙관적으로 렌더된 상태 — 직렬화 대상이 아니다.
+            // 이전 전송이 스트리밍 중이면 이 지점에서 대기했다가, 완료 직후 순서대로 시작된다.
+            sendMutex.withLock {
+                isTyping = true
+                isTalking = true
+                errorMessage = null
+                // R9: 첫 버블 도착까지 4초가 걸리면 대기 문구를 전환
+                startLongWaitTimer()
+
+                // SSE 스트리밍 시도
+                sendWithSse(trimmed, ch, nickname, userMbti, recentMessages, memories, userMessageId)
+            }
         }
     }
 
@@ -688,6 +733,9 @@ class ChatViewModel @Inject constructor(
     fun clearChat() {
         viewModelScope.launch {
             chatRepo.clearMessages(characterId)
+            // M-N: 대화를 초기화하면서 선톡(R1) 상태도 함께 정리한다 — 남아있으면
+            // 삭제된 대화 맥락과 무관한 next_hook이 재진입 시 선톡으로 튀어나올 수 있다.
+            runCatching { prefs.clearProactiveState(characterId) }
         }
     }
 
@@ -729,7 +777,10 @@ class ChatViewModel @Inject constructor(
         runCatching {
             prefs.setLastChatAt(characterId, System.currentTimeMillis())
             if (hook.isNotBlank()) {
-                prefs.setNextHook(characterId, hook)
+                // M-P: 서버 ProactiveChatRequest.hook은 max_length=300으로 검증되는데
+                // next_hook은 LLM이 자유 생성해 길이 제한이 없다 — 초과분을 저장 시점에
+                // 절단해 선톡 요청이 422로 무음 실패하는 것을 막는다.
+                prefs.setNextHook(characterId, hook.take(300))
             }
         }
     }
@@ -766,13 +817,22 @@ class ChatViewModel @Inject constructor(
         val lastChatAt = maxOf(lastMessageAt, storedLastChatAt)
         if (System.currentTimeMillis() - lastChatAt < PROACTIVE_MIN_IDLE_MS) return
 
-        val ch = characterRepo.getById(characterId) ?: return
+        // M-O: 오프라인이면 시도 자체를 미룬다 — 훅을 소비하지 않아야 네트워크가 돌아왔을 때
+        // 같은 훅으로 다시 시도할 수 있다(비행기 모드 진입만으로 훅이 소각되던 결함 수정).
+        if (!isOnline.value) return
 
-        // 발화 시도 전에 소비 처리 — 전송 실패나 프로세스 종료가 있어도 같은 훅이 반복되지 않게
-        runCatching { prefs.consumeNextHook(characterId, hook) }
+        // M-O: 같은 ViewModel 인스턴스 내 중복 발사 방지(인메모리, 영속 소비는 성공 시에만).
+        if (proactiveAttemptStarted) return
+        proactiveAttemptStarted = true
+
+        val ch = characterRepo.getById(characterId) ?: return
 
         // 진입 즉시 쏘지 않고 잠시 뜸을 들인다
         delay(PROACTIVE_ENTRY_DELAY_MS)
+
+        // M-K: 대기하는 동안 유저가 직접 전송을 시작했다면 선톡을 포기한다(레이스 가드).
+        // proactiveJob.cancel()이 이 지점까지 아직 전파되지 않았을 수 있어 한 번 더 확인한다.
+        if (userSendStarted) return
 
         val nickname = prefs.nickname.first()
         val userMbti = prefs.userMbti.first().ifEmpty { null }
@@ -791,48 +851,61 @@ class ChatViewModel @Inject constructor(
         isTalking = true
         val typingStartMs = System.currentTimeMillis()
         var isFirstBubble = true
+        // M-O: 소비 확정을 "첫 SseEvent.Message 수신" 시점으로 미룬다. 위험 hook을 서버가
+        // 422로 거부하거나(현재 5/min 레이트리밋도 포함) 스트림이 열리기 전에 실패하면
+        // 훅이 소비되지 않은 채 남아 다음 기회에 재시도된다.
+        var hookConsumed = false
 
-        sendMessageUseCase.streamProactive(
-            hook = hook,
-            character = ch,
-            nickname = nickname,
-            userMbti = userMbti,
-            conversationHistory = recentMessages,
-            memories = memories,
-        ).catch { _ ->
-            // 선톡 실패는 조용히 무시 (REST 폴백도 하지 않음 — 부가 연출이므로)
-        }.collect { event ->
-            when (event) {
-                is SseEvent.Opened -> {
-                    // 캐릭터 선톡 — 유저 메시지가 아니므로 읽음 워터마크와 무관, 무시
-                }
-                is SseEvent.Message -> {
-                    if (isFirstBubble) {
-                        isFirstBubble = false
-                        // 타이핑 인디케이터를 최소 시간만큼 노출한 뒤 첫 말풍선 도착
-                        val shownMs = System.currentTimeMillis() - typingStartMs
-                        delay((PROACTIVE_TYPING_MIN_MS - shownMs).coerceAtLeast(0L))
-                    } else {
-                        delay(event.delay)
+        try {
+            sendMessageUseCase.streamProactive(
+                hook = hook,
+                character = ch,
+                nickname = nickname,
+                userMbti = userMbti,
+                conversationHistory = recentMessages,
+                memories = memories,
+            ).catch { _ ->
+                // 선톡 실패는 조용히 무시 (REST 폴백도 하지 않음 — 부가 연출이므로)
+            }.collect { event ->
+                when (event) {
+                    is SseEvent.Opened -> {
+                        // 캐릭터 선톡 — 유저 메시지가 아니므로 읽음 워터마크와 무관, 무시
                     }
-                    currentEmotion = runCatching {
-                        CharacterEmotion.valueOf(event.emotion)
-                    }.getOrDefault(CharacterEmotion.NEUTRAL)
-                    sendMessageUseCase.saveReplyMessage(characterId, event.text, event.emotion)
-                }
-                is SseEvent.Done -> {
-                    // 유저 발화가 아니므로 호감도(affinityDelta)는 반영하지 않는다.
-                    // 다음 화두만 보관 — 같은 훅이 다시 와도 소비 기록이 재발화를 막는다.
-                    persistStoryHook(event.nextHook)
-                }
-                is SseEvent.Error -> {
-                    // 조용히 무시
+                    is SseEvent.Message -> {
+                        if (!hookConsumed) {
+                            hookConsumed = true
+                            runCatching { prefs.consumeNextHook(characterId, hook) }
+                        }
+                        if (isFirstBubble) {
+                            isFirstBubble = false
+                            // 타이핑 인디케이터를 최소 시간만큼 노출한 뒤 첫 말풍선 도착
+                            val shownMs = System.currentTimeMillis() - typingStartMs
+                            delay((PROACTIVE_TYPING_MIN_MS - shownMs).coerceAtLeast(0L))
+                        } else {
+                            delay(event.delay)
+                        }
+                        currentEmotion = runCatching {
+                            CharacterEmotion.valueOf(event.emotion)
+                        }.getOrDefault(CharacterEmotion.NEUTRAL)
+                        sendMessageUseCase.saveReplyMessage(characterId, event.text, event.emotion)
+                    }
+                    is SseEvent.Done -> {
+                        // 유저 발화가 아니므로 호감도(affinityDelta)는 반영하지 않는다.
+                        // 다음 화두만 보관 — 같은 훅이 다시 와도 소비 기록이 재발화를 막는다.
+                        persistStoryHook(event.nextHook)
+                    }
+                    is SseEvent.Error -> {
+                        // 조용히 무시 — 422(위험 hook 거부)도 여기로 들어오며, hookConsumed가
+                        // false로 남아있어 훅이 소각되지 않고 다음 기회에 재시도된다.
+                    }
                 }
             }
+        } finally {
+            // M-K: 레이스로 인해 send()가 이 job을 취소해도 타이핑 인디케이터가 켜진 채
+            // 남지 않도록 보장한다.
+            isTyping = false
+            isTalking = false
         }
-
-        isTyping = false
-        isTalking = false
     }
 
     /**

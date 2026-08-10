@@ -227,6 +227,18 @@ class UserPreferences @Inject constructor(
     suspend fun getLastChatAt(characterId: Long): Long =
         context.dataStore.data.map { prefs -> prefs[lastChatAtKey(characterId)] ?: 0L }.first()
 
+    /**
+     * M-N: 대화 초기화(clearChat) 시 선톡(R1) 상태도 함께 지운다.
+     * next_hook이 남아있으면 삭제된 대화 맥락과 무관한 선톡이 재진입 시 튀어나올 수 있다.
+     */
+    suspend fun clearProactiveState(characterId: Long) {
+        context.dataStore.edit { prefs ->
+            prefs.remove(nextHookKey(characterId))
+            prefs.remove(usedNextHookKey(characterId))
+            prefs.remove(lastChatAtKey(characterId))
+        }
+    }
+
     // ── M2: 유저 역할·상황(user_role/situation) — 캐릭터별 동적 키.
     // R1의 next_hook_$characterId와 동일한 "동적 키" DataStore 패턴을 따른다(Room 스키마 변경 없음).
     // 채팅 화면 상단 메뉴 "역할·상황 설정"에서 저장하며, 다음 전송부터 ChatRequest에 실려 나간다.
