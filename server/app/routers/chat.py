@@ -515,9 +515,16 @@ async def _run_chat_pipeline(
     위기 대응 지침은 도달 불가한 LoRA 경로에만 붙어 사실상 미적용이었다.
 
     request_start_ts/gate_ms(2026-08-03 P1, 회의 항목1): 호출부(send_message/
-    stream_message)가 요청 진입 시각(time.monotonic())과 _gate_user 소요를
+    stream_message)가 요청 진입 시각(time.monotonic())과 게이트 단계 소요를
     측정해 넘겨주면 generate_reply가 turn_latency에 t_e2e_total_ms/t_gate_ms를
     함께 남긴다. 기본값(None/0.0)이면 기존 동작과 동일.
+    Low-4(2026-08-04 점검): gate_ms는 "_gate_user 소요"만이 아니다 — 호출부가
+    _req_t0(요청 진입 시각)를 check_content(H-1 입력 안전 필터) **호출 전**에
+    캡처하고, _t_gate_ms는 그 이후 await _gate_user(...)가 끝난 시점에 계산하므로
+    실제로는 check_content + _gate_user(일일 예산/구독 한도 조회) 두 단계를 합산한
+    소요다. 두 단계 모두 "본격 생성 전 게이트"로 묶어 계측하려는 의도이므로 값
+    자체는 그대로 두되, 이름이 시사하는 범위(_gate_user만)와 실제 측정 범위
+    (check_content 포함)가 어긋나 있었다는 점을 명시한다.
     """
     prep = await _prepare_chat_turn(req, user)
     replies, affinity_delta = await generate_reply(
@@ -796,6 +803,7 @@ async def _openai_event_generator(
     turn_event_type: str = "chat_turn",
     persist_user_message: bool = True,
     skip_affinity: bool = False,
+    rag_query: str = "",
 ):
     """OpenAI 경로 SSE 제너레이터: 말풍선이 완결되는 즉시 전송해 TTFB를 단축한다.
 
@@ -817,6 +825,12 @@ async def _openai_event_generator(
     기존 동작과 완전히 동일하다. 선톡 턴은 유저 발화가 없으므로 호감도 분석을
     돌리지 않고(affinity_delta=0 고정), 유도 문구를 messages 에 적재하지 않으며,
     chat_turn 대신 proactive_turn 이벤트를 남긴다.
+
+    rag_query(Low-6, 2026-08-04 점검): stream_reply에 그대로 전달한다. 기본값
+    ""이면 stream_reply가 req.message를 검색어로 쓰는 기존 동작과 동일하다.
+    /chat/proactive는 req.message가 build_proactive_message로 합성한 보일러
+    플레이트 문장이므로, 원래 hook 원문을 여기 넘겨 RAG/메모리 관련성 검색이
+    지시문 문구에 희석되지 않게 한다.
 
     H3/M-I(2026-08-04):
       - 클라이언트가 SSE를 조기 종료하면 이 제너레이터는 yield 지점에서
@@ -877,6 +891,7 @@ async def _openai_event_generator(
         user_role=req.user_role,
         situation=req.situation,
         skip_affinity=skip_affinity,
+        rag_query=rag_query,
     )
 
     try:
@@ -1105,6 +1120,12 @@ async def stream_proactive_message(
         turn_event_type=PROACTIVE_TURN_EVENT,
         persist_user_message=False,
         skip_affinity=True,
+        # Low-6(2026-08-04 점검): chat_req.message는 build_proactive_message가
+        # 만든 보일러플레이트 지시문 문장 — RAG/메모리 검색어로는 원래 hook
+        # 원문을 넘겨 검색 관련성이 지시문 문구에 희석되지 않게 한다.
+        # hook이 비어 있으면(빈 문자열) stream_reply가 chat_req.message로
+        # 폴백해 기존 동작과 동일하다.
+        rag_query=req.hook,
     ))
 
 

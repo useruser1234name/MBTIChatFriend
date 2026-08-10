@@ -227,14 +227,28 @@ class ABTestManager:
         실험이 비활성화 상태이거나 존재하지 않으면 variant_a(대조군)를 반환한다.
 
         Returns:
-            배정된 variant 문자열 (예: "gpt-4.1-mini" 또는 "gpt-4.1")
+            배정된 variant 문자열 — 실험마다 의미가 다르다(예: model_routing은
+            "complexity_routing"/"always_complex" 정책 오버레이 이름, LoRA
+            실험들은 "control"/"lora_xxx" 모델 슬러그 등). 2026-08-03 P0-S2
+            이전에는 model_routing 실험 자체가 모델 ID 문자열
+            ("gpt-4.1-mini"/"gpt-4.1")을 그대로 배정했지만, 지금은 그 실험도
+            복잡도 라우팅 위의 정책 오버레이일 뿐이라 모델 ID를 직접
+            반환하지 않는다.
         """
         config = EXPERIMENTS.get(experiment_id)
         if config is None or not config.active:
             # 실험 없음 또는 비활성 → 대조군
             if config:
                 return config.variant_a
-            return "gpt-4.1-mini"  # 기본 fallback
+            # Low-3(2026-08-04 점검): 등록되지 않은 experiment_id에 대한 기본
+            # fallback. 이전에는 구식 모델 ID 문자열("gpt-4.1-mini")을 그대로
+            # 반환했다 — model_routing 실험이 P0-S2로 "모델 ID 배정"에서
+            # "복잡도 라우팅 위의 정책 오버레이"로 의미가 바뀐 뒤에는 이 값이
+            # variant_a/variant_b 어느 쪽과도 일치하지 않아, record_result가
+            # 집계에서 알아볼 수 없는 유령 variant 버킷을 만들었다. 실질적으로
+            # 이 분기는 "정책 개입 없음 = 복잡도 라우팅 그대로"와 동치이므로
+            # 그 정책 상수를 반환한다.
+            return MODEL_ROUTING_COMPLEXITY  # 기본 fallback
 
         # 분할 기준: character_id 우선, 없으면 user_id
         split_key = character_id if character_id else user_id

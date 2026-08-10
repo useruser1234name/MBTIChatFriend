@@ -1,11 +1,13 @@
 """`_calculate_delay` 유닛테스트 — R7: 딜레이 지터 + 감정 가중치.
 
-계약 (docs/MEETING_2026-08-03_model_perf_chat_realism.md R7):
-- base = 텍스트 길이 기반 (<=5자 800ms, <=20자 1200ms, 이후 length*60+500 max 3000ms)
+계약 (docs/MEETING_2026-08-03_model_perf_chat_realism.md R7,
+      2026-08-04 점검 F5로 base 상한/하한 조정):
+- base = 텍스트 길이 기반 (<=5자 800ms, <=20자 1200ms, 이후 length*60+500 max 2200ms)
 - ±15% 랜덤 지터: base * uniform(0.85, 1.15)
 - 감정 가중치: SURPRISED/ANGRY 0.85배, WORRIED/SAD 1.2배, 그 외 1.0배
 - 첫 버블(is_first_bubble=True)은 +300~500ms 가산
-- 최종 결과는 [300ms, 3500ms] 범위로 clamp
+- 최종 결과는 [500ms, 3500ms] 범위로 clamp (F5: 기존 300ms 하한은 실측상 도달 불가능한
+  죽은 값이었다 — 실측 최소값 578ms 부근에 맞춰 500ms로 현실화)
 - 서버는 sleep 하지 않는다 (delay는 메타데이터로만 전송, 클라이언트가 적용)
 """
 
@@ -23,7 +25,7 @@ from app.chat_service import (
 )
 
 
-LONG_TEXT = "가" * 30  # length=30 → base = min(30*60+500, 3000) = 2300
+LONG_TEXT = "가" * 30  # length=30 → base = min(30*60+500, 2200) = 2200 (상한 적용)
 
 
 # ── 1. 지터 범위 (반복 실행 시 ±15% 안에 분포) ──────────────────────────
@@ -40,8 +42,8 @@ def test_jitter_stays_within_15_percent_of_base_for_short_text():
 
 
 def test_jitter_stays_within_15_percent_of_base_for_long_text():
-    """긴 텍스트: base=min(len*60+500, 3000)."""
-    base = min(len(LONG_TEXT) * 60 + 500, 3000)
+    """긴 텍스트: base=min(len*60+500, 2200)."""
+    base = min(len(LONG_TEXT) * 60 + 500, 2200)
     samples = [_calculate_delay(LONG_TEXT) for _ in range(500)]
     assert min(samples) >= base * 0.85 - 1
     assert max(samples) <= base * 1.15 + 1
@@ -132,21 +134,39 @@ def test_first_bubble_flag_defaults_to_false():
     assert without_flag == explicit_false
 
 
-# ── 4. clamp 경계 (최소 300ms, 최대 3500ms) ──────────────────────────────
+# ── 4. clamp 경계 (최소 500ms, 최대 3500ms) ──────────────────────────────
 
 
-def test_clamp_lower_bound_never_below_300ms():
+def test_clamp_lower_bound_never_below_500ms():
     samples = [_calculate_delay("응") for _ in range(1000)]
-    assert min(samples) >= _DELAY_MIN_MS == 300
+    assert min(samples) >= _DELAY_MIN_MS == 500
 
 
 def test_clamp_upper_bound_never_above_3500ms_even_with_worried_first_bubble():
     """최악 케이스: 긴 텍스트 + WORRIED(1.2배) + 첫 버블(+500ms) + 지터(+15%)도 3500ms를 넘지 않아야."""
-    text = "가" * 200  # base = min(200*60+500, 3000) = 3000
+    text = "가" * 200  # base = min(200*60+500, 2200) = 2200
     samples = [
         _calculate_delay(text, "WORRIED", is_first_bubble=True) for _ in range(1000)
     ]
     assert max(samples) <= _DELAY_MAX_MS == 3500
+
+
+def test_upper_clamp_saturation_reduced_after_f5_base_cap_lowering():
+    """F5(2026-08-04): base 상한을 3000→2200으로 낮춰 3500ms 고정(clamp 포화) 비율이
+    기존(3000 상한 시 실측 ~96%)보다 크게 줄었는지 회귀 방지.
+
+    2200 상한에서도 WORRIED(1.2배)+첫 버블 최악 케이스는 여전히 이론상 clamp에
+    걸릴 수 있다(2200*1.2*1.15+500=3536>3500) — 완전히 0%가 되는 것은 목표가
+    아니다. 목표는 "지터가 무의미해질 정도의 고정값 폭주"를 벗어나는 것이므로,
+    포화 비율이 3000 상한 대비 확연히(절반 이하) 낮아졌는지만 검증한다.
+    """
+    text = "가" * 200  # base가 상한에 걸리는 "장문" 케이스
+    samples = [
+        _calculate_delay(text, "WORRIED", is_first_bubble=True) for _ in range(3000)
+    ]
+    saturated_ratio = sum(1 for s in samples if s == _DELAY_MAX_MS) / len(samples)
+    # 3000 상한 시절 실측/이론값은 ~95% — 2200으로 낮춘 뒤에는 그 절반 미만이어야 한다.
+    assert saturated_ratio < 0.45, f"clamp 포화 비율이 여전히 높음: {saturated_ratio:.2%}"
 
 
 def test_delay_is_always_int():

@@ -105,6 +105,14 @@ def bump_turn_and_get_state(room_id: str, character_id: str = "") -> StoryState:
     return _row_to_state(row, room_id, character_id)
 
 
+# Low-2(2026-08-04 점검): ProactiveChatRequest.hook의 max_length=300 계약과
+# 저장 시점에서도 정합시킨다. 안드로이드 클라이언트가 이미 hook을 300자로
+# 절단해 전송하지만, 그건 "다음 요청 조립" 시점의 방어일 뿐 — 저장 원천
+# (여기)에서도 절단해 둬야 다른 경로/클라이언트가 절단 없이 이 값을 읽어가는
+# 경우까지 이중으로 방어된다.
+_HOOK_MAX_LEN = 300
+
+
 def apply_diary_outcome(
     room_id: str,
     character_id: str,
@@ -113,6 +121,9 @@ def apply_diary_outcome(
 ) -> None:
     if not room_id:
         return
+
+    next_hook = (next_hook or "")[:_HOOK_MAX_LEN]
+    next_goal = (next_goal or "")[:_HOOK_MAX_LEN]
 
     state = get_story_state(room_id, character_id)
 

@@ -186,6 +186,13 @@ def get_session_stats(
     group_by="room": room_id 기준 세션 분할(캐릭터별 방 단위 몰입도).
     group_by="user": user_id 기준 세션 분할(사용자 단위 앱 사용 패턴).
     이벤트 소스는 metric_events의 chat_turn/app_open (신규 계측 없음 — P3 스펙).
+
+    Low-5(2026-08-04 점검, 동작 변경 아님 — 문서화만): group_by="room"일 때
+    쿼리는 `room_id IS NOT NULL AND room_id != ''`로 필터링한다. app_open
+    이벤트는 특정 채팅방에 묶이지 않아 room_id=''로 적재되므로, group_by="room"
+    모드는 사실상 chat_turn 이벤트만으로 세션을 분할하고 app_open은 room 기준
+    집계에서 항상 배제된다. group_by="user"는 user_id가 두 이벤트 타입 모두에서
+    보통 채워져 있으므로 chat_turn/app_open이 함께 세션 분할에 반영된다.
     """
     empty = {
         "group_by": group_by,

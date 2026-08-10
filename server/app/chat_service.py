@@ -826,7 +826,7 @@ async def _quality_gate_regenerate(
         retry_content = retry_response.choices[0].message.content or ""
         retry_replies = _parse_reply(retry_content)
         if retry_replies:
-            retry_score = quick_score(message, retry_content, mbti)
+            retry_score = quick_score(message, _reconstruct_score_source(retry_replies), mbti)
             # 원본과 재시도 중 점수가 더 높은 쪽 채택.
             # 동점이면 재시도(더 최신·형식 보강 반영)를 선호.
             if retry_score >= score:
@@ -1132,7 +1132,11 @@ async def _spawn_parallel_analysis(
     affinity_delta = 0
     pre_mem_ctx = ""
     mem_ok = True
-    mem_cache_hit = True
+    # Low-1(2026-08-04 점검): character_name/nickname이 비어 조회 자체를 하지
+    # 않는 경우 기본값은 False여야 한다. 이전에는 True로 시작해 "조회를
+    # 안 했다"와 "캐시에서 처리됐다"가 텔레메트리상 구분 불가능했고, 조회
+    # 스킵 턴이 전부 긍정 캐시 히트로 오집계되어 캐시 효율 지표가 부풀려졌다.
+    mem_cache_hit = False
 
     # 메모리 컨텍스트를 태스크로 시작 — 호출부가 이미 만들어 둔 RAG task와
     # 동시에 진행된다(RAG task는 이 함수 호출 전에 이미 스레드에서 실행 중).
@@ -1557,7 +1561,7 @@ async def generate_reply(
         # 아래 _emit_background_metrics까지 전달하기 위해 함수 스코프에 유지한다.
         score: Optional[float] = None
         if replies:
-            score = quick_score(message, content, mbti)
+            score = quick_score(message, _reconstruct_score_source(replies), mbti)
             if score < QUALITY_GATE_THRESHOLD:
                 replies, content, score = await _quality_gate_regenerate(
                     replies, content, score, message, mbti, model_id, messages,
@@ -1703,6 +1707,7 @@ async def stream_reply(
     user_role: str = "",
     situation: str = "",
     skip_affinity: bool = False,
+    rag_query: str = "",
 ) -> AsyncGenerator[Union[ReplyPart, StreamDone], None]:
     """말풍선 점진 스트리밍 생성기.
 
@@ -1741,6 +1746,19 @@ async def stream_reply(
     skip_affinity(선톡/proactive): message가 유저 발화가 아니라 서버가 합성한
     선발화 유도 문구인 경우 호감도 분석을 건너뛰고 StreamDone.affinity_delta를
     0으로 고정한다. 기본값 False면 기존 동작과 완전히 동일하다.
+
+    rag_query(Low-6, 2026-08-04 점검): RAG(Chroma) 검색과 메모리 관련성
+    필터링(_filter_relevant_memories)에 message 대신 사용할 검색어. LLM에
+    전달되는 실제 프롬프트 내용(message, _build_chat_messages 입력)에는
+    영향이 없다 — 오직 "무엇으로 검색할지"만 바꾼다. 빈 문자열(기본값)이면
+    기존과 동일하게 message를 그대로 검색어로 쓴다.
+    선톡(/chat/proactive)에서 필요한 이유: message는 routers/chat.
+    build_proactive_message가 hook을 지시문 보일러플레이트 문장("지금은 네가
+    먼저 말을 거는 상황... 흐름: {hook}")으로 감싼 결과다. 이 전체 문장을
+    그대로 검색어로 쓰면 Jaccard 유사도가 보일러플레이트 단어들에 희석되어
+    hook의 실제 주제와 무관한 기억/에피소드가 뽑히거나, 관련 기억이 있어도
+    상위 top_k에서 밀려난다. 원래 hook 원문만 검색어로 넘기면 이 희석이
+    없어진다.
     """
     if conversation_history is None:
         conversation_history = []
@@ -1757,6 +1775,10 @@ async def stream_reply(
         yield StreamDone(affinity_delta=_blocked_delta, full_text="")
         return
 
+    # Low-6: RAG/메모리 관련성 검색어 — rag_query가 주어지면 그걸, 아니면
+    # 기존과 동일하게 message를 사용한다.
+    _rag_query = rag_query.strip() or message
+
     # P6: RAG(Chroma) 검색을 memory-context 조회보다 먼저 시작해 두 대기가
     # 겹치게 한다(P1 실측: memory=1176ms, rag=449ms 완전 직렬 → 이론상 ~449ms
     # 절감). 안전 필터를 통과한 뒤에만 생성해 위 차단 경로에서 고아 태스크가
@@ -1767,7 +1789,7 @@ async def stream_reply(
         _rag_scope_id = _storage_scope_id(room_id, character_id)
         if _rag_scope_id and get_store():
             rag_task = asyncio.create_task(
-                asyncio.to_thread(_rag_search_sync, _rag_scope_id, message)
+                asyncio.to_thread(_rag_search_sync, _rag_scope_id, _rag_query)
             )
 
     # 3+5. 선행 memory_context + 호감도 분석 병렬 시작 (공유 헬퍼)
@@ -1793,6 +1815,10 @@ async def stream_reply(
 
     affinity_delta = 0
     full_text = ""
+    # F4(2026-08-04): 실제로 사용자에게 방출된(안전 필터 통과) ReplyPart를
+    # 누적해 quick_score 채점을 원문(raw) 대신 이걸로 재구성한다 — full_text와
+    # 항상 함께 append되므로 "full_text truthy ⇔ _emitted_parts non-empty".
+    _emitted_parts: List[ReplyPart] = []
     # M4-①(2026-08-03): step 12에서 계산해 step 14(품질 평가)까지 재사용한다.
     _score: Optional[float] = None
 
@@ -1839,7 +1865,8 @@ async def stream_reply(
         )
         _t_rag_ms = (time.perf_counter() - _t_rag_start) * 1000
 
-        all_memories = _filter_relevant_memories(message, all_memories, top_k=3)
+        # Low-6: 여기도 _rag_query 사용 — RAG 검색어와 동일 기준으로 관련성 채점.
+        all_memories = _filter_relevant_memories(_rag_query, all_memories, top_k=3)
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
 
         # 8. 프롬프트 + 모델 라우팅 (공유 헬퍼, S13/S14) — 스트리밍은 LoRA 라우팅
@@ -1913,6 +1940,7 @@ async def stream_reply(
                 is_safe_part, _ = check_content(part.text)
                 if is_safe_part:
                     full_text += (" " if full_text else "") + part.text
+                    _emitted_parts.append(part)
                     if _t_e2e_first_bubble_ms is None and request_start_ts is not None:
                         _t_e2e_first_bubble_ms = (time.monotonic() - request_start_ts) * 1000
                     yield part
@@ -1927,6 +1955,7 @@ async def stream_reply(
                 is_safe_part, _ = check_content(part.text)
                 if is_safe_part:
                     full_text += (" " if full_text else "") + part.text
+                    _emitted_parts.append(part)
                     if _t_e2e_first_bubble_ms is None and request_start_ts is not None:
                         _t_e2e_first_bubble_ms = (time.monotonic() - request_start_ts) * 1000
                     yield part
@@ -1938,11 +1967,20 @@ async def stream_reply(
             yield ReplyPart(text="음... 뭐라고 말해야 할지 모르겠어요", emotion="SHY", delay=2000)
 
         # 12. 저품질 텔레메트리 (재생성 없음) — _score는 M4-①(step 14)에서 재사용
+        # F4(2026-08-04): parser.emitted_count>0(=실제 방출 성공)이면 방출된 파트로
+        # 재구성한 JSON을 채점 입력으로 쓴다 — 원문(parser.raw)은 max_tokens 절단 등으로
+        # 닫는 ']'가 없어도 정상 응답일 수 있는데, 원문 그대로 채점하면 JSON_INVALID로
+        # 오판해 정상 응답을 저품질로 오기록한다. 방출이 아예 없었던 경우(형식 완전
+        # 파괴)만 기존대로 원문(raw)을 채점한다.
         if full_text:
-            _score = quick_score(message, parser.raw or full_text, mbti)
+            _score_source = (
+                _reconstruct_score_source(_emitted_parts) if _emitted_parts
+                else (parser.raw or full_text)
+            )
+            _score = quick_score(message, _score_source, mbti)
             if _score < QUALITY_GATE_THRESHOLD:
                 await _record_quality_gate_event(
-                    _score, message, parser.raw or full_text, model_id, room_id, character_id,
+                    _score, message, _score_source, model_id, room_id, character_id,
                     extra_payload={"streaming": True},
                 )
 
@@ -2162,8 +2200,12 @@ async def _record_ab_result(
     추가로 남긴다(ab_test_results는 metric_value가 숫자라 0/1 인디케이터로 기록).
       complexity_complex  분류기가 complex로 판정한 비율(variant별 평균)
       used_complex_model  실제로 상위 모델을 쓴 비율
-    대조군에서는 두 값이 일치해야 하고, 오버레이 variant에서는 used_complex_model
-    이 1.0로 고정된다 — 분류기 정확도/승격 빈도를 사후 대조할 수 있다.
+    대조군에서는 두 값이 일치하는 것이 기본이고, 오버레이 variant(always_complex)
+    에서는 used_complex_model이 1.0으로 고정된다 — 분류기 정확도/승격 빈도를
+    사후 대조할 수 있다. 단 대조군도 "항상" 일치하지는 않는다: crisis_tier>=1
+    턴은 _apply_crisis_override가 분류기 판정과 무관하게 상위 모델로 승격시키므로
+    (2026-08-03 P0-S3), complexity_complex=0(simple 판정)인데도 used_complex_model=1
+    (위기 승격으로 실제 상위 모델 사용)인 반례가 정상적으로 존재한다.
     """
     try:
         # 지연 임포트: 순환/기동 순서 회피
@@ -2400,7 +2442,7 @@ _EMOTION_DELAY_MULTIPLIER = {
     "SAD": 1.2,
 }
 
-_DELAY_MIN_MS = 300
+_DELAY_MIN_MS = 500
 _DELAY_MAX_MS = 3500
 _FIRST_BUBBLE_EXTRA_MIN_MS = 300
 _FIRST_BUBBLE_EXTRA_MAX_MS = 500
@@ -2409,11 +2451,21 @@ _FIRST_BUBBLE_EXTRA_MAX_MS = 500
 def _calculate_delay(text: str, emotion: str = "", is_first_bubble: bool = False) -> int:
     """텍스트 길이 기반 기본 딜레이에 지터/감정 가중치/첫 버블 가산을 적용.
 
-    - 기본값: 5자 이하 800ms, 20자 이하 1200ms, 이후 length*60+500 (최대 3000ms)
+    - 기본값: 5자 이하 800ms, 20자 이하 1200ms, 이후 length*60+500 (최대 2200ms)
     - ±15% 랜덤 지터 (base * uniform(0.85, 1.15))
     - 감정별 배수: SURPRISED/ANGRY 0.85배(즉각 반응), WORRIED/SAD 1.2배(머뭇거림)
     - 멀티 버블 응답의 첫 버블은 +300~500ms (생각 시작하는 텀)
-    - 최종 범위는 [300ms, 3500ms]로 clamp
+    - 최종 범위는 [500ms, 3500ms]로 clamp
+
+    F5(2026-08-04 점검): 길이 기반 base 상한을 3000→2200으로 낮췄다. 기존
+    3000 상한에서는 WORRIED/SAD(×1.2) 장문 + 첫 버블 가산(+500) 조합이
+    3000*1.2*1.15+500=4640 로 3500 clamp를 항상 초과해, 이런 턴의 최종
+    딜레이가 지터와 무관하게 96%가 3500 고정값이 되는 문제가 있었다
+    (지터가 사실상 무의미). 2200으로 낮추면 최악 케이스가
+    2200*1.2*1.15+500=3536 로 여전히 clamp가 필요하지만 포화되는 구간이
+    base 상단 근처로 좁아져 포화 비율이 크게 줄어든다. 하한도 300→500으로
+    올렸다 — 실측 최소값이 578ms 부근이라 300은 사실상 도달 불가능한
+    죽은 하한이었다.
     """
     length = len(text)
     if length <= 5:  # 짧은 리액션 (ㅋㅋ, 헐, 응)
@@ -2421,7 +2473,7 @@ def _calculate_delay(text: str, emotion: str = "", is_first_bubble: bool = False
     elif length <= 20:
         base = 1200.0
     else:
-        base = float(min(length * 60 + 500, 3000))
+        base = float(min(length * 60 + 500, 2200))
 
     base *= _EMOTION_DELAY_MULTIPLIER.get(emotion, 1.0)
     delay = base * random.uniform(0.85, 1.15)
@@ -2511,6 +2563,24 @@ def _parse_reply(content: str) -> List[ReplyPart]:
         ReplyPart(text=s, emotion="NEUTRAL", delay=_calculate_delay(s, "NEUTRAL", i == 0))
         for i, s in enumerate(sentences) if s
     ]
+
+
+def _reconstruct_score_source(replies: List[ReplyPart]) -> str:
+    """파싱/방출된 ReplyPart 목록으로 정규 JSON 배열 문자열을 재구성해
+    quick_score 채점 입력으로 사용한다 (F4, 2026-08-04 점검).
+
+    generate_reply(_parse_reply 결과)와 stream_reply(IncrementalReplyParser가
+    실제로 방출한 파트)가 공유한다. 스트림 절단(max_tokens로 닫는 ']' 유실 등)
+    이나 그 밖의 사소한 형식 손상이 있어도 _parse_reply/IncrementalReplyParser가
+    이미 복구·방출에 성공했다면, 실제로 사용자에게 전달된 말풍선 형태를
+    기준으로 채점해야 한다. 원문(raw)을 그대로 채점하면 classify_quality_issues의
+    JSON 파싱이 실패해 JSON_INVALID(0.1)로 오판하고, 정상 응답인데도 불필요한
+    재생성(quality_gate 재시도) 또는 저품질 텔레메트리를 유발한다.
+    """
+    return json.dumps(
+        [{"text": p.text, "emotion": p.emotion} for p in replies],
+        ensure_ascii=False,
+    )
 
 
 class IncrementalReplyParser:
