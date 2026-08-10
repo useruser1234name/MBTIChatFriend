@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..auth_middleware import require_auth_always, verify_firebase_token
+from ..memory_service import invalidate_memory_cache
 from ..postgres_async import get_async_db
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,10 @@ async def delete_conversation(
     삭제 범위: conversation_memory, story_state, diary_entries,
                metric_events, api_usage (PostgreSQL)
     ChromaDB 벡터 삭제는 Phase 2에서 구현 예정.
+
+    H2(2026-08-04): DB 삭제 직후 memory_service의 인메모리 캐시도 무효화한다.
+    이전에는 DB만 지워져서, 프로세스가 살아있는 동안 삭제된 요약·팩트가
+    계속 프롬프트에 주입됐다(_load_from_db가 캐시 히트 시 조기 반환).
     """
     if not room_id.strip():
         raise HTTPException(status_code=400, detail="room_id가 필요합니다.")
@@ -100,6 +105,12 @@ async def delete_conversation(
     try:
         db = get_async_db()
         await db.delete_conversation(room_id=room_id, character_id=character_id)
+        # DB 삭제와 캐시 무효화는 반드시 짝을 이뤄야 한다(H2).
+        invalidate_memory_cache(
+            room_id=room_id,
+            character_id=character_id,
+            user=user,
+        )
         logger.info(f"대화 기록 삭제 완료: room_id={room_id}, character_id={character_id}")
         return {"status": "deleted", "room_id": room_id}
     except Exception as e:

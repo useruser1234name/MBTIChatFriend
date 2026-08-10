@@ -817,6 +817,15 @@ async def _openai_event_generator(
     기존 동작과 완전히 동일하다. 선톡 턴은 유저 발화가 없으므로 호감도 분석을
     돌리지 않고(affinity_delta=0 고정), 유도 문구를 messages 에 적재하지 않으며,
     chat_turn 대신 proactive_turn 이벤트를 남긴다.
+
+    H3/M-I(2026-08-04):
+      - 클라이언트가 SSE를 조기 종료하면 이 제너레이터는 yield 지점에서
+        GeneratorExit를 받아 _finalize_chat_turn이 아예 실행되지 않았다
+        (chat_turn 이벤트·messages 적재·콜백 마킹 유실). finally에서
+        미실행 시 create_tracked_task로 후처리를 보장한다(이중 실행 방지 플래그).
+      - _finalize_chat_turn 내부(야간 일기 LLM 호출 등)에서 예외가 나면
+        done 이벤트가 전송되지 않아 클라이언트가 타임아웃까지 대기했다.
+        실패해도 최소 meta로 done을 반드시 보낸다.
     """
     prep = await _prepare_chat_turn(req, user)
     room_id = prep["room_id"]
@@ -828,54 +837,103 @@ async def _openai_event_generator(
 
     collected = []
     affinity_delta = 0
-    try:
-        async for item in stream_reply(
-            message=req.message,
-            mbti=req.mbti,
-            speech_style=req.speech_style,
-            relationship=req.relationship,
-            nickname=req.nickname,
-            affinity_level=req.affinity_level,
-            conversation_history=req.conversation_history,
-            user_mbti=req.user_mbti,
-            character_name=req.character_name,
-            character_id=prep["effective_character_id"],
-            memories=prep["merged_memories"],
-            room_id=room_id,
-            time_context=build_time_context(req.client_local_hour),
-            crisis_tier=crisis_tier,
-            crisis_hint=crisis_hint,
-            request_start_ts=request_start_ts,
-            gate_ms=gate_ms,
-            user_role=req.user_role,
-            situation=req.situation,
-            skip_affinity=skip_affinity,
-        ):
-            if isinstance(item, StreamDone):
-                affinity_delta = 0 if skip_affinity else item.affinity_delta
-            else:
-                collected.append(item)
-                yield message_event(item)
-    except Exception as _stream_err:
-        logger.error(f"[stream] OpenAI 스트리밍 실패: {_stream_err}")
-        if not collected:
-            _fb = ReplyPart(text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?", emotion="SURPRISED", delay=2000)
-            collected.append(_fb)
-            yield message_event(_fb)
+    _finalized = False
 
-    meta = await _finalize_chat_turn(
-        req,
-        user,
+    def _finalize_call():
+        """_finalize_chat_turn 코루틴 생성 — 정상 경로/조기 종료 경로 공용."""
+        return _finalize_chat_turn(
+            req,
+            user,
+            room_id=room_id,
+            state=prep["state"],
+            effective_character_id=prep["effective_character_id"],
+            callback_key=prep["callback_key"],
+            replies=collected,
+            affinity_delta=affinity_delta,
+            turn_event_type=turn_event_type,
+            persist_user_message=persist_user_message,
+        )
+
+    # H3: 조기 종료 시 내부 제너레이터를 즉시 닫아 stream_reply의 finally
+    # (태스크 취소·계측)가 GC 타이밍에 의존하지 않게 한다. 참조를 붙들어 둔다.
+    _stream_gen = stream_reply(
+        message=req.message,
+        mbti=req.mbti,
+        speech_style=req.speech_style,
+        relationship=req.relationship,
+        nickname=req.nickname,
+        affinity_level=req.affinity_level,
+        conversation_history=req.conversation_history,
+        user_mbti=req.user_mbti,
+        character_name=req.character_name,
+        character_id=prep["effective_character_id"],
+        memories=prep["merged_memories"],
         room_id=room_id,
-        state=prep["state"],
-        effective_character_id=prep["effective_character_id"],
-        callback_key=prep["callback_key"],
-        replies=collected,
-        affinity_delta=affinity_delta,
-        turn_event_type=turn_event_type,
-        persist_user_message=persist_user_message,
+        time_context=build_time_context(req.client_local_hour),
+        crisis_tier=crisis_tier,
+        crisis_hint=crisis_hint,
+        request_start_ts=request_start_ts,
+        gate_ms=gate_ms,
+        user_role=req.user_role,
+        situation=req.situation,
+        skip_affinity=skip_affinity,
     )
-    yield done_event(meta)
+
+    try:
+        try:
+            async for item in _stream_gen:
+                if isinstance(item, StreamDone):
+                    affinity_delta = 0 if skip_affinity else item.affinity_delta
+                else:
+                    collected.append(item)
+                    yield message_event(item)
+        except Exception as _stream_err:
+            logger.error(f"[stream] OpenAI 스트리밍 실패: {_stream_err}")
+            if not collected:
+                _fb = ReplyPart(text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?", emotion="SURPRISED", delay=2000)
+                collected.append(_fb)
+                yield message_event(_fb)
+
+        # 여기부터는 후처리가 "시도됨"으로 확정된다 — 아래 finally가 중복
+        # 실행하지 않도록 await 전에 플래그를 세운다(제너레이터는 yield
+        # 지점에서만 닫히므로 이 await 도중 중단되지 않는다).
+        _finalized = True
+        try:
+            meta = await _finalize_call()
+        except Exception as _fin_err:
+            # M-I: finalize 실패로 done을 못 보내면 클라이언트가 타임아웃까지
+            # 매달린다. 최소 meta로라도 반드시 종료 신호를 보낸다.
+            logger.error(f"[stream] 턴 후처리 실패, 최소 meta로 done 전송: {_fin_err}")
+            meta = {
+                "room_id": room_id,
+                "replies": collected,
+                "affinity_delta": affinity_delta,
+                "night_diary_generated": False,
+                "next_hook": "",
+                "next_goal": "",
+            }
+        yield done_event(meta)
+    finally:
+        if not _finalized:
+            _finalized = True
+            # 내부 스트림을 명시적으로 닫아 stream_reply의 finally(태스크 취소·
+            # 계측)가 즉시 실행되게 한다. GeneratorExit 중이라 await은 불가하므로
+            # aclose() 코루틴을 태스크로 스케줄한다.
+            _aclose = getattr(_stream_gen, "aclose", None)
+            if _aclose is not None:
+                _close_coro = _aclose()
+                try:
+                    create_tracked_task(_close_coro, name="close-stream-reply")
+                except Exception as _e:
+                    _close_coro.close()
+                    logger.warning("조기 종료 스트림 정리 스케줄 실패: %s", _e)
+
+            _pending_finalize = _finalize_call()
+            try:
+                create_tracked_task(_pending_finalize, name="finalize-chat-turn")
+            except Exception as _e:
+                _pending_finalize.close()
+                logger.warning("조기 종료 턴 후처리 스케줄 실패: %s", _e)
 
 
 @router.post("/chat/stream")

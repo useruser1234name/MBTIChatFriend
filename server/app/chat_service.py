@@ -858,6 +858,7 @@ async def _record_turn_latency_event(
     t_gate_ms: float = 0.0,
     t_e2e_first_bubble_ms: Optional[float] = None,
     t_e2e_total_ms: Optional[float] = None,
+    outcome: str = "ok",
 ) -> None:
     """턴 단계별 레이턴시(P1 계측)를 turn_latency 이벤트로 기록.
 
@@ -888,6 +889,15 @@ async def _record_turn_latency_event(
     호출부(기존 테스트 등)는 t_gate_ms=0.0, e2e 필드는 아예 payload에서
     빠져 기존 동작과 동일하다 — 게이트/재생성 판정 로직에는 전혀 관여하지
     않는 순수 계측 필드.
+
+    outcome(2026-08-04 M-G): 턴의 종료 형태.
+      "ok"           — 정상 완료(기본값, 기존 호출부는 전부 이 값)
+      "error"        — LLM/파이프라인 예외로 폴백 응답을 낸 턴
+      "circuit_open" — 서킷브레이커 OPEN으로 목업을 낸 턴
+      "aborted"      — 스트리밍 중 클라이언트가 조기 종료한 턴(H3)
+    이전에는 성공한 턴만 turn_latency를 남겨 레이턴시 분포에 생존편향이
+    있었다(느려서 타임아웃/실패한 턴이 통계에서 사라짐). 필드는 추가만
+    되므로 기존 payload 필드/의미는 불변.
     """
     payload = {
         "model_id": model_id,
@@ -899,15 +909,16 @@ async def _record_turn_latency_event(
         "crisis_tier": crisis_tier,
         "t_memory_cache_hit": bool(memory_cache_hit),
         "t_gate_ms": round(t_gate_ms, 2),
+        "outcome": outcome or "ok",
     }
     if t_e2e_first_bubble_ms is not None:
         payload["t_e2e_first_bubble_ms"] = round(t_e2e_first_bubble_ms, 2)
     if t_e2e_total_ms is not None:
         payload["t_e2e_total_ms"] = round(t_e2e_total_ms, 2)
     logger.info(
-        "[latency] room=%s model=%s complexity=%s crisis_tier=%s streaming=%s memory=%.1fms(cache_hit=%s) rag=%.1fms first_token=%.1fms gate=%.1fms",
-        room_id, model_id, complexity, crisis_tier, streaming, t_memory_ms,
-        bool(memory_cache_hit), t_rag_ms, t_first_token_ms, t_gate_ms,
+        "[latency] room=%s model=%s complexity=%s crisis_tier=%s streaming=%s outcome=%s memory=%.1fms(cache_hit=%s) rag=%.1fms first_token=%.1fms gate=%.1fms",
+        room_id, model_id, complexity, crisis_tier, streaming, payload["outcome"],
+        t_memory_ms, bool(memory_cache_hit), t_rag_ms, t_first_token_ms, t_gate_ms,
     )
     try:
         await record_event_async(
@@ -1448,6 +1459,16 @@ async def generate_reply(
     if not client:
         return _mock_reply(message, mbti, nickname, affinity_level), affinity_delta
 
+    # M-G(2026-08-04): 실패/서킷오픈 턴도 turn_latency를 남기기 위해, 아래
+    # try/finally가 참조하는 값들을 미리 정의한다(예외가 어느 단계에서
+    # 터지든 finally가 NameError 없이 기록할 수 있어야 한다).
+    model_id = ""
+    _complexity = ""
+    _t_rag_ms = 0.0
+    _elapsed_ms = 0.0
+    _outcome = "ok"
+    _latency_recorded = False
+
     # 4. LLM 호출
     try:
         # 대화 요약 기억 (memory_service): 10메시지마다 요약/핵심정보 갱신 (백그라운드)
@@ -1512,6 +1533,8 @@ async def generate_reply(
             )
         except CircuitOpenError as _cb_err:
             logger.warning(f"[CB] openai circuit OPEN — 목업 응답 반환: {_cb_err}")
+            _outcome = "circuit_open"
+            _elapsed_ms = (time.monotonic() - _t_start) * 1000
             return _mock_reply(message, mbti, nickname, affinity_level), affinity_delta
         _elapsed_ms = (time.monotonic() - _t_start) * 1000
 
@@ -1592,24 +1615,58 @@ async def generate_reply(
                 memory_cache_hit=_mem.cache_hit,
                 t_gate_ms=gate_ms,
                 t_e2e_total_ms=_t_e2e_total_ms,
+                outcome="ok",
             ),
             name="turn-latency",
         )
+        _latency_recorded = True
 
         return result, affinity_delta
 
     except Exception as e:
-        # 병렬 호감도 분석 태스크가 남아있으면 정리
-        if affinity_task is not None and not affinity_task.done():
-            affinity_task.cancel()
-        if rag_task is not None and not rag_task.done():
-            rag_task.cancel()
+        _outcome = "error"
         logger.error(f"LLM 호출 실패: {e}")
         return [ReplyPart(
             text="앗, 잠깐 멍해졌어요... 다시 말해줄래요?",
             emotion="SURPRISED",
             delay=2000
         )], 0
+
+    finally:
+        # 병렬 태스크 정리 — 정상/예외/서킷오픈(early return) 모든 경로 공통.
+        # 이전에는 except 블록에만 있어 CircuitOpenError early return 시
+        # affinity/rag 태스크가 고아로 남았다.
+        if affinity_task is not None and not affinity_task.done():
+            affinity_task.cancel()
+        if rag_task is not None and not rag_task.done():
+            rag_task.cancel()
+
+        # M-G: 실패/서킷오픈 턴도 turn_latency를 남긴다(생존편향 제거).
+        if not _latency_recorded:
+            _fail_e2e_ms: Optional[float] = None
+            if request_start_ts is not None:
+                _fail_e2e_ms = (time.monotonic() - request_start_ts) * 1000
+            try:
+                create_tracked_task(
+                    _record_turn_latency_event(
+                        room_id=room_id,
+                        character_id=character_id,
+                        model_id=model_id,
+                        streaming=False,
+                        t_memory_ms=_t_memory_ms,
+                        t_rag_ms=_t_rag_ms,
+                        t_first_token_ms=_elapsed_ms,
+                        complexity=_complexity,
+                        crisis_tier=crisis_tier,
+                        memory_cache_hit=_mem.cache_hit,
+                        t_gate_ms=gate_ms,
+                        t_e2e_total_ms=_fail_e2e_ms,
+                        outcome=_outcome if _outcome != "ok" else "error",
+                    ),
+                    name="turn-latency",
+                )
+            except Exception as _lat_err:
+                logger.warning(f"실패 턴 turn_latency 기록 스케줄 실패: {_lat_err}")
 
 
 @dataclass
@@ -1738,6 +1795,24 @@ async def stream_reply(
     full_text = ""
     # M4-①(2026-08-03): step 12에서 계산해 step 14(품질 평가)까지 재사용한다.
     _score: Optional[float] = None
+
+    # H3/M-G(2026-08-04): 아래 try에 finally를 붙여 "클라이언트 조기 종료
+    # (GeneratorExit)"를 포함한 모든 종료 경로에서 병렬 태스크를 정리하고
+    # 가능한 만큼의 계측을 남긴다. finally가 참조하는 값은 예외가 어느
+    # 단계에서 터지든 정의돼 있어야 하므로 여기서 전부 초기화한다.
+    # 주의: GeneratorExit 중에는 await/yield가 불가하므로 finally의 기록은
+    # 전부 create_tracked_task(동기 스케줄)로만 수행한다.
+    model_id = ""
+    _complexity = ""
+    _t_rag_ms = 0.0
+    _elapsed_ms = 0.0
+    _t_first_token_ms: Optional[float] = None
+    _t_e2e_first_bubble_ms: Optional[float] = None
+    _stream_usage = None
+    _stream_total_tokens = 0.0
+    _outcome = "ok"
+    _latency_recorded = False
+    _usage_recorded = False
     try:
         # 6. 기억 컨텍스트 (N턴 백그라운드 갱신 + 조회)
         mem_ctx = _mem.context
@@ -1795,14 +1870,11 @@ async def stream_reply(
         parser = IncrementalReplyParser()
         _t_start = time.monotonic()
         # P1 계측: LLM 호출 시작~첫 콘텐츠 청크 도착까지의 소요(t_first_token)
-        _t_first_token_ms: Optional[float] = None
         # P1(2026-08-03, 회의 항목1): 요청 진입~첫 말풍선 yield 직전까지의 소요.
         # request_start_ts가 없으면(라우터 미배선/기존 테스트) None으로 남는다.
-        _t_e2e_first_bubble_ms: Optional[float] = None
-        _stream_total_tokens = 0.0
-        # P7: usage를 포함한 마지막 청크(비어있는 choices) 전체를 보관 —
+        # P7: _stream_usage는 usage를 포함한 마지막 청크(비어있는 choices) 전체 —
         # api_usage 기록(_record_usage)에 prompt/completion_tokens가 필요.
-        _stream_usage = None
+        # (위 세 변수는 finally에서도 읽으므로 try 진입 전에 초기화되어 있다.)
 
         # P7: 서킷브레이커 보호 — generate_reply(_openai_cb.call(...))와 동일 패턴.
         # 스트림 객체를 반환하는 create() 호출 자체만 래핑하고, 토큰 순회(async for)는
@@ -1815,13 +1887,10 @@ async def stream_reply(
         except CircuitOpenError as _cb_err:
             logger.warning(f"[CB] openai circuit OPEN — 목업 응답 반환(스트림): {_cb_err}")
             # generate_reply의 CircuitOpenError 폴백(_mock_reply)과 동일한 사용자 경험.
-            # 이 시점엔 아직 토큰을 하나도 못 받았으므로(create() 자체가 실패) 진행 중이던
-            # affinity/rag task를 정리해야 한다(아래 공용 except 블록과 동일 로직).
-            # skip_affinity(선톡) 경로에서는 affinity_task가 아예 없다(None).
-            if affinity_task is not None and not affinity_task.done():
-                affinity_task.cancel()
-            if rag_task is not None and not rag_task.done():
-                rag_task.cancel()
+            # 진행 중이던 affinity/rag 태스크 정리와 turn_latency 기록(outcome=
+            # "circuit_open")은 아래 공용 finally가 담당한다(H3/M-G).
+            _outcome = "circuit_open"
+            _elapsed_ms = (time.monotonic() - _t_start) * 1000
             for part in _mock_reply(message, mbti, nickname, affinity_level):
                 yield part
             yield StreamDone(affinity_delta=affinity_delta, full_text="")
@@ -1928,6 +1997,7 @@ async def stream_reply(
                 endpoint="stream",
                 cached_tokens=_extract_cached_tokens(_stream_usage),
             ), name="record-usage")
+            _usage_recorded = True
 
         # 16. P1: 턴 단계별 레이턴시 계측 기록
         create_tracked_task(
@@ -1944,16 +2014,14 @@ async def stream_reply(
                 memory_cache_hit=_mem.cache_hit,
                 t_gate_ms=gate_ms,
                 t_e2e_first_bubble_ms=_t_e2e_first_bubble_ms,
+                outcome="ok",
             ),
             name="turn-latency",
         )
+        _latency_recorded = True
 
     except Exception as e:
-        # skip_affinity(선톡) 경로에서는 affinity_task가 아예 없다(None).
-        if affinity_task is not None and not affinity_task.done():
-            affinity_task.cancel()
-        if rag_task is not None and not rag_task.done():
-            rag_task.cancel()
+        _outcome = "error"
         logger.error(f"스트리밍 생성 실패: {e}")
         if not full_text:
             yield ReplyPart(
@@ -1961,6 +2029,61 @@ async def stream_reply(
                 emotion="SURPRISED",
                 delay=2000,
             )
+
+    finally:
+        # H3(2026-08-04): 클라이언트가 SSE를 조기 종료하면 이 제너레이터는
+        # yield 지점에서 GeneratorExit를 받는다. 위 `except Exception`은
+        # GeneratorExit(BaseException)를 잡지 못하므로 이전에는
+        #   - affinity_task가 고아로 남아 결과를 아무도 수거하지 않았고,
+        #   - AB/api_usage/turn_latency/품질평가가 통째로 유실됐다.
+        # finally에서 태스크를 정리하고, 남길 수 있는 계측은 남긴다.
+        # 제약: GeneratorExit 도중에는 await/yield가 불가능하므로 여기서는
+        #       동기 스케줄(create_tracked_task)만 사용한다.
+        # skip_affinity(선톡) 경로에서는 affinity_task가 아예 없다(None).
+        if affinity_task is not None and not affinity_task.done():
+            affinity_task.cancel()
+        if rag_task is not None and not rag_task.done():
+            rag_task.cancel()
+
+        if not _latency_recorded:
+            # _outcome이 아직 "ok"인데 계측이 안 남았다 = 정상 완료 전에
+            # 제너레이터가 닫혔다(클라이언트 조기 종료).
+            _final_outcome = _outcome if _outcome != "ok" else "aborted"
+            try:
+                if _stream_usage is not None and not _usage_recorded:
+                    create_tracked_task(_record_usage(
+                        room_id=room_id,
+                        character_id=character_id,
+                        model_id=model_id,
+                        prompt_tokens=getattr(_stream_usage, "prompt_tokens", 0),
+                        completion_tokens=getattr(_stream_usage, "completion_tokens", 0),
+                        endpoint="stream",
+                        cached_tokens=_extract_cached_tokens(_stream_usage),
+                    ), name="record-usage")
+                    _usage_recorded = True
+                create_tracked_task(
+                    _record_turn_latency_event(
+                        room_id=room_id,
+                        character_id=character_id,
+                        model_id=model_id,
+                        streaming=True,
+                        t_memory_ms=_t_memory_ms,
+                        t_rag_ms=_t_rag_ms,
+                        t_first_token_ms=(
+                            _t_first_token_ms if _t_first_token_ms is not None else _elapsed_ms
+                        ),
+                        complexity=_complexity,
+                        crisis_tier=crisis_tier,
+                        memory_cache_hit=_mem.cache_hit,
+                        t_gate_ms=gate_ms,
+                        t_e2e_first_bubble_ms=_t_e2e_first_bubble_ms,
+                        outcome=_final_outcome,
+                    ),
+                    name="turn-latency",
+                )
+                _latency_recorded = True
+            except Exception as _lat_err:
+                logger.warning(f"[stream] 미완 턴 계측 기록 스케줄 실패: {_lat_err}")
 
     yield StreamDone(affinity_delta=affinity_delta, full_text=full_text)
 

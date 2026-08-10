@@ -43,6 +43,18 @@ _SENSITIVE_VALUE_PATTERNS = [
 _MAX_SUMMARIES = 200
 _MAX_MEMORIES = 200
 
+# ── positive 캐시 TTL(2026-08-04 H2) ──────────────────────────────────────
+# 배경: positive 캐시(_conversation_summaries/_character_memories)는 FIFO
+# eviction 외에는 만료가 없어 영구였다. 그래서 (a) 다른 워커/프로세스가
+# 대화를 삭제하거나 요약을 갱신해도 이 프로세스는 무기한 stale한 값을
+# 프롬프트에 주입했고, (b) 삭제 경로가 캐시를 비워도 멀티 워커에서는
+# 자기 워커만 비워졌다.
+# 무효화가 아니라 "재검증"으로 푼다 — TTL이 지나면 다음 조회에서 DB를 한 번
+# 다시 읽는다(캐시 미스 1회 수준의 TTFT 영향). 삭제 경로는 아래
+# invalidate_memory_cache()로 즉시 비우고, TTL은 크로스 워커 안전망이다.
+_POSITIVE_TTL_SECONDS = 300.0
+_positive_loaded_at: Dict[str, float] = {}
+
 # ── 네거티브 캐시(2026-08-03 P1-S4) ────────────────────────────────────────
 # 배경: conversation_memory에 아직 행이 없는 방(= 첫 요약 이전의 모든 신규 방)은
 # _load_from_db가 아무것도 캐싱하지 않아 매 턴 DB를 다시 조회했다. 그 조회 중
@@ -85,6 +97,33 @@ def _prune_negative(now: float) -> None:
         _negative_until.pop(expired, None)
     while len(_negative_until) > _MAX_NEGATIVE:
         _negative_until.pop(next(iter(_negative_until)))
+
+
+def _positive_cache_valid(key: str, now: float) -> bool:
+    """positive 캐시 항목이 존재하고 TTL 안에 있는지(= DB 재검증 불필요).
+
+    타임스탬프가 없는 항목(예: 외부에서 직접 주입)은 만료로 간주해 다음 조회에서
+    DB를 한 번 재검증한다 — stale을 오래 끌고 가는 것보다 안전한 기본값.
+    """
+    if key not in _conversation_summaries:
+        return False
+    loaded_at = _positive_loaded_at.get(key)
+    if loaded_at is None:
+        return False
+    return (now - loaded_at) < _POSITIVE_TTL_SECONDS
+
+
+def _touch_positive(key: str, now: Optional[float] = None) -> None:
+    """positive 캐시 항목의 신선도 시각을 갱신."""
+    _positive_loaded_at[key] = time.monotonic() if now is None else now
+
+
+def _drop_positive(key: str) -> bool:
+    """positive 캐시(요약/팩트/신선도)를 제거. 제거된 항목이 있으면 True."""
+    removed = _conversation_summaries.pop(key, None) is not None
+    removed = (_character_memories.pop(key, None) is not None) or removed
+    _positive_loaded_at.pop(key, None)
+    return removed
 
 
 def _normalize_fact_key(key: str) -> str:
@@ -133,9 +172,13 @@ def merge_memory_facts(
 def _evict_if_needed() -> None:
     """캐시 크기가 MAX를 초과하면 가장 오래된 항목(FIFO) 제거"""
     while len(_conversation_summaries) > _MAX_SUMMARIES:
-        _conversation_summaries.popitem(last=False)
+        evicted_key, _ = _conversation_summaries.popitem(last=False)
+        if evicted_key not in _character_memories:
+            _positive_loaded_at.pop(evicted_key, None)
     while len(_character_memories) > _MAX_MEMORIES:
-        _character_memories.popitem(last=False)
+        evicted_key, _ = _character_memories.popitem(last=False)
+        if evicted_key not in _conversation_summaries:
+            _positive_loaded_at.pop(evicted_key, None)
 
 
 SUMMARY_PROMPT = """아래는 AI 캐릭터와 사용자 간의 이전 대화 내용이야.
@@ -224,12 +267,20 @@ async def _load_from_db(key: str, fallback_keys: Optional[list[str]] = None) -> 
     Returns:
         True면 이번 호출이 DB 왕복 없이 처리됨(positive 캐시 히트 / 유효한 네거티브
         캐시 / postgres 비활성). False면 fetchone을 최소 1회 실행했다.
+
+    H2(2026-08-04): positive 캐시 히트도 TTL(_POSITIVE_TTL_SECONDS)을 확인한다.
+    만료된 항목은 조회 전에 버리고 DB를 다시 읽어, 다른 워커가 삭제/갱신한
+    결과를 최대 TTL 이내에 반영한다. DB에도 행이 없으면(=삭제됨) 네거티브
+    마킹으로 전환되어 삭제된 요약·팩트가 프롬프트에 다시 들어가지 않는다.
     """
     if not postgres_enabled():
         return True
-    if key in _conversation_summaries:
-        return True  # 이미 캐시에 있음
     now = time.monotonic()
+    if _positive_cache_valid(key, now):
+        return True  # 이미 캐시에 있고 아직 신선함
+    if key in _conversation_summaries:
+        # 만료된 stale 항목 — 아래에서 재검증한다.
+        _drop_positive(key)
     if _negative_cache_valid(key, now):
         return True  # DB에 행이 없다는 걸 최근에 확인함 — 재조회 생략
 
@@ -254,6 +305,7 @@ async def _load_from_db(key: str, fallback_keys: Optional[list[str]] = None) -> 
                 _character_memories[key] = []
         else:
             _character_memories[key] = []
+        _touch_positive(key, now)
         _clear_negative(key)
         _evict_if_needed()
         return False
@@ -271,6 +323,8 @@ async def _save_to_db(key: str) -> None:
     facts = _character_memories.get(key, [])
     # 행이 생겼으므로 '행 없음' 마킹을 즉시 해제 — 저장 직후 조회가 새 값을 본다.
     _clear_negative(key)
+    # 방금 이 워커가 쓴 값이 최신이므로 TTL 시계를 리셋한다(H2).
+    _touch_positive(key)
     await asyncio.to_thread(
         execute,
         """
@@ -559,9 +613,76 @@ def is_memory_cached(
         room_id=room_id,
         character_id=character_id,
     )
-    if key in _conversation_summaries:
+    now = time.monotonic()
+    # H2: TTL이 지난 positive 항목은 다음 조회에서 DB를 재검증하므로 hit이 아니다
+    # (_load_from_db의 판정과 정확히 같은 조건을 유지해 t_memory_cache_hit의
+    #  의미 — "이번 턴이 DB 왕복 없이 처리됨" — 을 보존한다).
+    if _positive_cache_valid(key, now):
         return True
-    return _negative_cache_valid(key, time.monotonic())
+    return _negative_cache_valid(key, now)
+
+
+def invalidate_memory_cache(
+    room_id: str = "",
+    character_id: str = "",
+    *,
+    user: Optional[dict] = None,
+    character_name: str = "",
+    nickname: str = "",
+) -> int:
+    """대화 기억이 DB에서 삭제됐을 때 인메모리 캐시를 즉시 무효화한다(H2).
+
+    배경(2026-08-04 점검 H2): postgres_async.delete_conversation은 DB만 지우고
+    이 모듈의 캐시(_conversation_summaries/_character_memories/_negative_until)를
+    건드리지 않았다. _load_from_db가 캐시 히트 시 조기 반환하므로, 프로세스가
+    살아있는 동안 **삭제된 요약·팩트가 계속 프롬프트에 주입**됐다.
+
+    삭제 범위는 delete_conversation과 맞춘다. DB 삭제가
+    `memory_key LIKE '%{character_id}:{room_id}%'`(또는 `'%{room_id}%'`)이므로,
+    캐시도 해석된 정확한 키에 더해 같은 fragment를 포함하는 캐시 키를 함께
+    비운다(레거시 키·다른 스코프 표기까지 커버).
+
+    Returns: 실제로 제거된 캐시 항목 수(요약/팩트/네거티브 마킹 합산 아님 —
+             positive 항목 기준).
+    """
+    targets: set[str] = set()
+
+    primary_key, fallback_keys = _resolve_memory_keys(
+        character_name,
+        nickname,
+        user=user,
+        room_id=room_id,
+        character_id=character_id,
+    )
+    for candidate in [primary_key, *fallback_keys]:
+        if candidate:
+            targets.add(candidate)
+
+    clean_room_id = (room_id or "").strip()
+    clean_character_id = (character_id or "").strip()
+    fragments = [
+        fragment
+        for fragment in (
+            f"{clean_character_id}:{clean_room_id}" if (clean_character_id and clean_room_id) else "",
+            clean_room_id,
+        )
+        if fragment
+    ]
+    if fragments:
+        cached_keys = set(_conversation_summaries) | set(_character_memories) | set(_negative_until)
+        for cached_key in cached_keys:
+            if any(fragment in cached_key for fragment in fragments):
+                targets.add(cached_key)
+
+    removed = 0
+    for target in targets:
+        if _drop_positive(target):
+            removed += 1
+        _negative_until.pop(target, None)
+
+    if targets:
+        logger.info("기억 캐시 무효화: keys=%s removed=%s", len(targets), removed)
+    return removed
 
 
 async def build_memory_context(

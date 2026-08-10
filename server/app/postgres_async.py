@@ -306,6 +306,11 @@ class AsyncDatabase:
         """대화 기록 삭제 — GDPR/개인정보 보호 대응.
 
         Returns: 삭제된 메시지 수
+
+        H2(2026-08-04): DB 행을 지운 뒤 memory_service 인메모리 캐시도 함께
+        무효화한다. 호출부(routers/data.py)에서도 한 번 더 호출하지만
+        (풀 미연결 환경 커버), 여기서도 수행해 향후 다른 호출부가 생겨도
+        "DB만 지우고 캐시는 stale" 상태가 되지 않게 한다. 무효화는 idempotent.
         """
         if not self._pool:
             return 0
@@ -359,6 +364,14 @@ class AsyncDatabase:
                 ),
                 (room_id, character_id or ""),
             )
+
+        # 지연 임포트: 모듈 로드 순서 의존 회피
+        try:
+            from .memory_service import invalidate_memory_cache
+
+            invalidate_memory_cache(room_id=room_id, character_id=character_id)
+        except Exception as exc:  # 캐시 무효화 실패가 삭제 자체를 되돌리진 않는다
+            logger.warning("[delete_conversation] 기억 캐시 무효화 실패: %s", exc)
 
         return deleted
 
