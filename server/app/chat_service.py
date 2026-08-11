@@ -15,8 +15,6 @@ from openai import AsyncOpenAI
 from .circuit_breaker import CircuitOpenError, get_openai_circuit
 from .config import (
     OPENAI_API_KEY,
-    TOGETHER_API_KEY,
-    MAX_TOKENS,
     LLM_MODEL_COMPLEX,
     LLM_MODEL_SIMPLE,
 )
@@ -1000,28 +998,20 @@ async def _merge_rag_results(
 async def _resolve_reply_client(
     model_id: str,
     ab_variant: Optional[str],
-    log_lora_routing: bool = False,
-) -> Tuple[AsyncOpenAI, str, Optional[str]]:
-    """LoRA 서빙이면 Together AI 클라이언트로 전환.
+) -> Tuple[AsyncOpenAI, str]:
+    """모델 ID 라우팅 계약(resolve_model_endpoint)을 보존한 얇은 래퍼.
 
-    generate_reply/stream_reply가 공유. log_lora_routing으로 라우팅 성공
-    시 info 로그 여부를 제어(논스트림 경로만 기존에 로그를 남겼음).
-    Returns (active_client, model_id, lora_base_url).
+    generate_reply/stream_reply가 공유. LoRA 서빙 경로는 2026-08-11 소유자
+    결정으로 제거됨 — ChatRequest에 ab_variant 필드가 없어(2026-08-03 회의
+    S3-c 확정) 애초에 어떤 요청도 도달할 수 없었던 사문 코드였다.
+    resolve_model_endpoint는 이제 base_model을 그대로 반환하므로 클라이언트는
+    항상 기본 OpenAI 클라이언트다.
+    Returns (active_client, model_id).
     """
-    resolved_model_id, lora_base_url = await resolve_model_endpoint(
+    resolved_model_id, _base_url = await resolve_model_endpoint(
         model_id, ab_variant or ""
     )
-    if lora_base_url and TOGETHER_API_KEY:
-        active_client = AsyncOpenAI(
-            api_key=TOGETHER_API_KEY,
-            base_url=lora_base_url,
-        )
-        model_id = resolved_model_id
-        if log_lora_routing:
-            logger.info("[LoRA] Together AI 라우팅: model=%s base_url=%s", model_id, lora_base_url)
-    else:
-        active_client = client
-    return active_client, model_id, lora_base_url
+    return client, resolved_model_id
 
 
 def _build_recent_context(
@@ -1215,22 +1205,18 @@ async def _assemble_prompt_and_model(
     conversation_history: List[HistoryMessage],
     message: str,
     character_id: str,
-    log_lora_routing: bool = True,
     time_context: str = "",
     crisis_tier: int = 0,
     crisis_hint: str = "",
     user_role: str = "",
     situation: str = "",
-) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, Optional[str], str]:
-    """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/복잡도/AB 오버레이) + LoRA 클라이언트 해석.
+) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, str]:
+    """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/복잡도/AB 오버레이).
 
-    generate_reply/stream_reply가 공유(S13/S14 잔여 본문 분할). 논스트림
-    경로만 라우팅 성공 시 info 로그를 남기므로(기존 동작) log_lora_routing
-    으로 _resolve_reply_client(S11) 호출 시 로그 여부를 제어한다
-    (generate_reply=True, stream_reply=False).
-    Returns (messages, model_id, ab_variant, active_client, lora_base_url, complexity).
-    lora_base_url은 stream_reply가 stream_options 분기에 사용한다
-    (generate_reply는 사용하지 않지만 반환값 형태는 통일한다).
+    generate_reply/stream_reply가 공유(S13/S14 잔여 본문 분할). LoRA 클라이언트
+    해석 단계는 2026-08-11 소유자 결정으로 제거됨(_resolve_reply_client가 이제
+    항상 기본 OpenAI 클라이언트를 반환 — 상세는 그 함수 docstring 참고).
+    Returns (messages, model_id, ab_variant, active_client, complexity).
     complexity는 계측 전용(turn_latency / A/B 결과 기록)이다.
     time_context(C4)는 그대로 _build_chat_messages → build_system_prompt로
     전달한다(동적 꼬리 전용 파라미터, 정적 프리픽스 불변).
@@ -1272,12 +1258,9 @@ async def _assemble_prompt_and_model(
         character_id, message, len(conversation_history), crisis_tier=crisis_tier
     )
 
-    # LoRA 서빙 라우팅: Together AI 엔드포인트 사용 (9차 스프린트)
-    active_client, model_id, lora_base_url = await _resolve_reply_client(
-        model_id, ab_variant, log_lora_routing=log_lora_routing
-    )
+    active_client, model_id = await _resolve_reply_client(model_id, ab_variant)
 
-    return messages, model_id, ab_variant, active_client, lora_base_url, complexity
+    return messages, model_id, ab_variant, active_client, complexity
 
 
 def _extract_cached_tokens(usage) -> int:
@@ -1286,7 +1269,7 @@ def _extract_cached_tokens(usage) -> int:
     2026-08-03 P2(회의 항목2): `usage.prompt_tokens_details.cached_tokens`를
     아무도 읽지 않아 prefix cache 히트율이 완전 미지였다. usage 자체가
     없거나(목업/실패 응답) prompt_tokens_details가 없는 구버전 SDK/엔드포인트
-    (예: LoRA/Together AI)에서도 getattr 체인으로 안전하게 0을 반환한다.
+    에서도 getattr 체인으로 안전하게 0을 반환한다.
     """
     if usage is None:
         return 0
@@ -1514,7 +1497,7 @@ async def generate_reply(
         # ──────────────────────────────────────────────────────────────
 
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
-        messages, model_id, _ab_variant, _active_client, _lora_base_url, _complexity = await _assemble_prompt_and_model(
+        messages, model_id, _ab_variant, _active_client, _complexity = await _assemble_prompt_and_model(
             mbti, speech_style, relationship, nickname, character_name, affinity_level,
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
@@ -1869,20 +1852,19 @@ async def stream_reply(
         all_memories = _filter_relevant_memories(_rag_query, all_memories, top_k=3)
         memory_dicts = [{"key": m.key, "value": m.value} for m in all_memories]
 
-        # 8. 프롬프트 + 모델 라우팅 (공유 헬퍼, S13/S14) — 스트리밍은 LoRA 라우팅
-        # info 로그를 남기지 않는 기존 동작 유지(log_lora_routing=False).
-        messages, model_id, _ab_variant, active_client, _lora_base_url, _complexity = await _assemble_prompt_and_model(
+        # 8. 프롬프트 + 모델 라우팅 (공유 헬퍼, S13/S14)
+        messages, model_id, _ab_variant, active_client, _complexity = await _assemble_prompt_and_model(
             mbti, speech_style, relationship, nickname, character_name, affinity_level,
             user_mbti, persona_raw, persona_summary, dialogue_prompt, visual_prompt,
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
-            character_id, log_lora_routing=False, time_context=time_context,
+            character_id, time_context=time_context,
             crisis_tier=crisis_tier, crisis_hint=crisis_hint,
             user_role=user_role, situation=situation,
         )
 
         # 9. 스트리밍 호출 + 증분 파싱
         # A/B(P0-3): 논스트림 경로와 동일하게 토큰 사용량·응답시간을 기록하기 위해
-        # 가능하면 usage 청크를 요청한다(Together AI LoRA 엔드포인트는 미지원일 수 있어 제외).
+        # usage 청크를 요청한다.
         _stream_kwargs: dict = dict(
             model=model_id,
             messages=messages,
@@ -1890,9 +1872,8 @@ async def stream_reply(
             max_tokens=1200,
             timeout=45,
             stream=True,
+            stream_options={"include_usage": True},
         )
-        if not (_lora_base_url and TOGETHER_API_KEY):
-            _stream_kwargs["stream_options"] = {"include_usage": True}
 
         parser = IncrementalReplyParser()
         _t_start = time.monotonic()
@@ -2124,23 +2105,6 @@ async def stream_reply(
                 logger.warning(f"[stream] 미완 턴 계측 기록 스케줄 실패: {_lat_err}")
 
     yield StreamDone(affinity_delta=affinity_delta, full_text=full_text)
-
-
-async def stream_lora_response(messages: list, model_id: str, base_url: str):
-    """Together AI LoRA 모델 스트리밍 응답 제너레이터"""
-    client = AsyncOpenAI(api_key=TOGETHER_API_KEY, base_url=base_url)
-    response = await client.chat.completions.create(
-        model=model_id,
-        messages=messages,
-        stream=True,
-        max_tokens=MAX_TOKENS,
-        temperature=0.85,
-        timeout=45,
-    )
-    async for chunk in response:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
 
 
 async def _record_usage(

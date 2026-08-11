@@ -4,8 +4,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY", "")
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", "")

@@ -51,46 +51,6 @@ EXPERIMENTS: Dict[str, ABTestConfig] = {
     )
 }
 
-EXPERIMENTS["lora_enfp_v2"] = ABTestConfig(
-    experiment_id="lora_enfp_v2",
-    variant_a="gpt-4.1-mini",   # 기존 모델 (베이스라인)
-    variant_b="lora-enfp-v2",   # LoRA 적용 모델
-    traffic_split=1.0,           # 0.5 → 1.0: 전체 배포
-    active=True,
-)
-
-EXPERIMENTS["lora_infj_v1"] = ABTestConfig(
-    experiment_id="lora_infj_v1",
-    variant_a="gpt-4.1-mini",
-    variant_b="lora-infj-v1",
-    traffic_split=1.0,  # 전체 배포
-    active=True,
-)
-
-EXPERIMENTS["lora_intj_v1"] = ABTestConfig(
-    experiment_id="lora_intj_v1",
-    variant_a="control",
-    variant_b="lora_intj",
-    traffic_split=1.0,   # 0.5 → 1.0: 전체 배포
-    active=True,
-)
-
-EXPERIMENTS["lora_isfj_v1"] = ABTestConfig(
-    experiment_id="lora_isfj_v1",
-    variant_a="control",
-    variant_b="lora_isfj",
-    traffic_split=1.0,  # 0.5 → 1.0: 전체 배포
-    active=True,
-)
-
-EXPERIMENTS["lora_infp_v1"] = ABTestConfig(
-    experiment_id="lora_infp_v1",
-    variant_a="control",
-    variant_b="lora_infp",
-    traffic_split=1.0,  # 0.5 → 1.0: 전체 배포
-    active=True,
-)
-
 EXPERIMENTS["cta_level3_v1"] = ABTestConfig(
     experiment_id="cta_level3_v1",
     variant_a="feature_gate",       # 현재: "레벨 4는 프리미엄에서만 경험할 수 있어요"
@@ -99,109 +59,12 @@ EXPERIMENTS["cta_level3_v1"] = ABTestConfig(
     active=True,
 )
 
-EXPERIMENTS["lora_entp_v1"] = ABTestConfig(
-    experiment_id="lora_entp_v1",
-    variant_a="control",
-    variant_b="lora_entp",
-    traffic_split=1.0,  # 0.5 → 1.0: 19차 전체 배포
-    active=True,
-)
-
-EXPERIMENTS["lora_estj_v1"] = ABTestConfig(
-    experiment_id="lora_estj_v1",
-    variant_a="control",
-    variant_b="lora_estj_v1",
-    traffic_split=1.0,  # 23차 스프린트: ESTJ LoRA 전체 배포 (0.5 → 1.0)
-    active=True,
-)
-
-EXPERIMENTS["lora_isfp_v1"] = ABTestConfig(
-    experiment_id="lora_isfp_v1",
-    variant_a="control",
-    variant_b="lora_isfp",
-    traffic_split=1.0,  # 27차 스프린트: ISFP LoRA 전체 배포 (0.5 → 1.0)
-    active=True,
-    character_filter="ISFP",
-)
-
-EXPERIMENTS["lora_intp_v1"] = ABTestConfig(
-    experiment_id="lora_intp_v1",
-    variant_a="control",
-    variant_b="lora_intp",
-    traffic_split=1.0,  # A/B 종료, 전체 배포
-    active=True,
-    character_filter="INTP",
-)
-
 EXPERIMENTS["referral_cta_v1"] = ABTestConfig(
     experiment_id="referral_cta_v1",
     variant_a="control",
     variant_b="referral_cta",
     traffic_split=1.0,  # B 문구 전체 적용
     active=True,
-)
-
-EXPERIMENTS["lora_esfp_v1"] = ABTestConfig(
-    experiment_id="lora_esfp_v1",
-    variant_a="control",
-    variant_b="lora_esfp",
-    traffic_split=1.0,  # A/B 종료, 10종 완성
-    active=True,
-    character_filter="ESFP",
-)
-
-EXPERIMENTS["lora_entj_v1"] = ABTestConfig(
-    experiment_id="lora_entj_v1",
-    variant_a="control",
-    variant_b="lora_entj",
-    traffic_split=1.0,  # 11종 완성
-    active=True,
-    character_filter="ENTJ",
-)
-
-EXPERIMENTS["lora_istj_v1"] = ABTestConfig(
-    experiment_id="lora_istj_v1",
-    variant_a="control",
-    variant_b="lora_istj",
-    traffic_split=1.0,  # 12종 완성
-    active=True,
-    character_filter="ISTJ",
-)
-
-EXPERIMENTS["lora_estp_v1"] = ABTestConfig(
-    experiment_id="lora_estp_v1",
-    variant_a="control",
-    variant_b="lora_estp",
-    traffic_split=1.0,  # 13종 완성
-    active=True,
-    character_filter="ESTP",
-)
-
-EXPERIMENTS["lora_enfj_v1"] = ABTestConfig(
-    experiment_id="lora_enfj_v1",
-    variant_a="control",
-    variant_b="lora_enfj",
-    traffic_split=1.0,  # 14종 완성
-    active=True,
-    character_filter="ENFJ",
-)
-
-EXPERIMENTS["lora_esfj_v1"] = ABTestConfig(
-    experiment_id="lora_esfj_v1",
-    variant_a="control",
-    variant_b="lora_esfj",
-    traffic_split=1.0,  # 15종 완성
-    active=True,
-    character_filter="ESFJ",
-)
-
-EXPERIMENTS["lora_istp_v1"] = ABTestConfig(
-    experiment_id="lora_istp_v1",
-    variant_a="control",
-    variant_b="lora_istp",
-    traffic_split=1.0,  # 16종 완성! 37차 스프린트 조기 전체 배포
-    active=True,
-    character_filter="ISTP",
 )
 
 
@@ -221,19 +84,19 @@ class ABTestManager:
     ) -> str:
         """
         variant 배정. character_id가 있으면 character_id 기준으로 분할.
-        lora_enfp_v2 실험은 character_id(ENFP 캐릭터) 기준으로 분할.
 
         동일한 (split_key, experiment_id) 조합은 항상 동일 variant를 반환한다.
         실험이 비활성화 상태이거나 존재하지 않으면 variant_a(대조군)를 반환한다.
 
         Returns:
             배정된 variant 문자열 — 실험마다 의미가 다르다(예: model_routing은
-            "complexity_routing"/"always_complex" 정책 오버레이 이름, LoRA
-            실험들은 "control"/"lora_xxx" 모델 슬러그 등). 2026-08-03 P0-S2
-            이전에는 model_routing 실험 자체가 모델 ID 문자열
+            "complexity_routing"/"always_complex" 정책 오버레이 이름 등).
+            2026-08-03 P0-S2 이전에는 model_routing 실험 자체가 모델 ID 문자열
             ("gpt-4.1-mini"/"gpt-4.1")을 그대로 배정했지만, 지금은 그 실험도
             복잡도 라우팅 위의 정책 오버레이일 뿐이라 모델 ID를 직접
-            반환하지 않는다.
+            반환하지 않는다. 2026-08-11(소유자 결정): LoRA 실험 16종은 도달
+            불가한 사문 코드였기에 EXPERIMENTS에서 전부 제거됐다(복구는 git
+            이력으로 가능).
         """
         config = EXPERIMENTS.get(experiment_id)
         if config is None or not config.active:

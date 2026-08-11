@@ -4,34 +4,9 @@ from __future__ import annotations
 
 import logging
 
-import httpx
-
-from .config import LLM_MODEL_COMPLEX, LLM_MODEL_SIMPLE, TOGETHER_API_KEY, VLLM_BASE_URL
+from .config import LLM_MODEL_COMPLEX, LLM_MODEL_SIMPLE
 
 logger = logging.getLogger(__name__)
-
-
-TOGETHER_LORA_MODELS: dict[str, str] = {
-    "lora-enfp-v2": "mbtichatfriend/enfp-lora-v2",
-    "lora-infj-v1": "mbtichatfriend/infj-lora-v1",
-    "lora-intj-v1": "mbtichatfriend/intj-lora-v1",
-    "lora-isfj-v1": "mbtichatfriend/isfj-lora-v1",
-    "lora-infp-v1": "mbtichatfriend/infp-lora-v1",
-    "lora-entp-v1": "mbtichatfriend/entp-lora-v1",
-    "lora_estj": "togetherai/mbtichat-estj-lora-v1",
-    "lora_isfp": "togetherai/mbtichat-isfp-lora-v1",
-    "lora_intp": "togetherai/mbtichat-intp-lora-v1",
-}
-
-AB_VARIANT_TO_LORA_KEY: dict[str, str] = {
-    "lora_intj": "lora-intj-v1",
-    "lora_isfj": "lora-isfj-v1",
-    "lora_infp": "lora-infp-v1",
-    "lora_entp": "lora-entp-v1",
-    "lora_estj_v1": "lora_estj",
-    "lora_isfp_v1": "lora_isfp",
-    "lora_intp_v1": "lora_intp",
-}
 
 
 def select_model_for_crisis(crisis_result: dict) -> str:
@@ -42,30 +17,17 @@ def select_model_for_crisis(crisis_result: dict) -> str:
     return LLM_MODEL_SIMPLE
 
 
-async def check_vllm_health() -> bool:
-    """Return whether the configured vLLM endpoint is ready."""
-    if not VLLM_BASE_URL:
-        return False
-    try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            resp = await client.get(f"{VLLM_BASE_URL}/health")
-            return resp.status_code == 200
-    except Exception:
-        return False
-
-
 async def resolve_model_endpoint(base_model: str, ab_variant: str) -> tuple[str, str]:
     """Resolve an OpenAI-compatible model id and optional base URL.
 
     Returns (model_id, base_url). Empty base_url means the default OpenAI
     endpoint should be used.
+
+    2026-08-11(소유자 결정, LoRA 사문 코드 제거): 이 함수는 원래 ab_variant를
+    LoRA 모델 슬러그로 매핑해 Together AI/vLLM 엔드포인트로 라우팅했다. 그러나
+    ChatRequest에 ab_variant 필드 자체가 없어(2026-08-03 회의 S3-c 확정) 그
+    경로에는 어떤 요청도 도달할 수 없었다 — 실험 정의 16종, 매핑 7종이 전부
+    죽은 코드였다. 함수 계약(호출부 시그니처)은 유지하되, 이제는 base_model을
+    base_url 없이 그대로 반환한다. 복구는 git 이력으로 가능하다.
     """
-    resolved_variant = AB_VARIANT_TO_LORA_KEY.get(ab_variant, ab_variant)
-    if resolved_variant in TOGETHER_LORA_MODELS and TOGETHER_API_KEY:
-        lora_model_id = TOGETHER_LORA_MODELS[resolved_variant]
-        if VLLM_BASE_URL and await check_vllm_health():
-            logger.info("[ModelRouting] vLLM health check passed: %s", VLLM_BASE_URL)
-            return lora_model_id, VLLM_BASE_URL
-        logger.info("[ModelRouting] vLLM unavailable; falling back to Together AI")
-        return lora_model_id, "https://api.together.xyz/v1"
     return base_model, ""
