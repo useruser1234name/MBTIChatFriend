@@ -1,3 +1,5 @@
+import re
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Dict, List, Literal, Optional
 
@@ -20,6 +22,73 @@ def _reject_unsafe_prompt_text(v: str) -> str:
     if not ok:
         raise ValueError(reason or "허용되지 않는 표현이 포함되어 있습니다.")
     return v
+
+
+# 줄 시작(들여쓰기 허용)의 마크다운 헤더 표시. 시스템 프롬프트가 "# 출력 형식",
+# "## 관계 (호감도 ...)" 같은 헤더로 섹션을 구분하므로, 사용자 입력이 줄머리에
+# '#'를 넣으면 가짜 섹션을 위조할 수 있다.
+_LINE_LEADING_HASH_RE = re.compile(r"(?m)^([ \t ]*)(#+)")
+
+# 개행처럼 취급될 수 있는 유니코드 구분자 — '\n'으로 정규화한 뒤 줄머리 검사를
+# 적용해야 " # 출력 형식" 같은 우회를 막을 수 있다.
+_LINE_SEPARATORS = ("\r\n", "\r", " ", " ", "\x0b", "\x0c", "\x85")
+
+# mood는 max_length 제약이 없는 자유 문자열이라(기존 계약) 프롬프트 삽입 전에
+# 길이를 잘라둔다. 422로 거부하면 기존 클라이언트가 깨질 수 있으므로 절단만 한다.
+MAX_MOOD_LENGTH = 100
+
+
+def _neutralize_line_markup(v: str) -> str:
+    """줄 시작의 '#' 마크업을 전각 '＃'로 치환해 가짜 섹션 헤더를 무력화한다.
+
+    페르소나 계열 필드는 여러 줄 설정(외모/배경/말투를 줄바꿈으로 나열)이
+    자연스러우므로 개행 자체는 허용한다. 대신 개행 직후의 헤더 마크업만
+    무력화해, 프롬프트의 섹션 구조를 위조하지 못하게 한다.
+    '＃'(U+FF03)는 프롬프트 파서(사람/LLM 모두)가 섹션 헤더로 읽지 않으면서
+    사용자가 의도한 문자는 시각적으로 보존한다.
+    """
+    return _LINE_LEADING_HASH_RE.sub(
+        lambda m: m.group(1) + "＃" * len(m.group(2)), v
+    )
+
+
+def _sanitize_multiline_prompt_text(v: str) -> str:
+    """페르소나 계열(멀티라인 허용) 입력의 새니타이즈.
+
+    2026-08-11 소유자 결정(죽은 페르소나 기능 배선)의 선행 조건. 이 값들은
+    시스템 프롬프트의 반동적 구간에 그대로 삽입되므로 message보다 권한이
+    높다 — 배선 전에 message와 같은 기준(check_content)을 먼저 통과시킨다.
+
+    scene(user_role/situation)의 sanitize_scene과 다른 점은 **개행 보존**이다.
+    페르소나는 줄바꿈 나열이 정상 사용 패턴이라 공백을 접으면 가독성이 깨진다.
+    대신 (i) 개행류 문자를 '\\n'으로 정규화하고 (ii) 줄머리 '#' 마크업을
+    무력화해 가짜 섹션 헤더 위조를 막는다.
+    max_length(Field 제약)는 이 검증보다 먼저 평가되므로 초과 입력은 422다.
+    """
+    if not v:
+        return ""
+    for sep in _LINE_SEPARATORS:
+        v = v.replace(sep, "\n")
+    v = v.replace("<", "&lt;").replace(">", "&gt;")
+    v = "\n".join(line.rstrip() for line in v.split("\n"))
+    v = _neutralize_line_markup(v)
+    return _reject_unsafe_prompt_text(v.strip())
+
+
+def _sanitize_mood_value(v: Optional[str]) -> Optional[str]:
+    """mood 새니타이즈 — 한 줄 값이므로 scene과 동일하게 공백을 접는다.
+
+    mood는 별도 system 메시지("[사용자 오늘 기분: ...]")로 삽입되므로 개행을
+    남기면 그 한 줄짜리 블록 안에 임의 지시문을 이어붙일 수 있다.
+    """
+    if v is None:
+        return None
+    v = v.replace("<", "&lt;").replace(">", "&gt;")
+    v = " ".join(v.split())[:MAX_MOOD_LENGTH].strip()
+    if not v:
+        return ""
+    return _reject_unsafe_prompt_text(v)
+
 
 _VALID_MBTI_TYPES = {
     "INTJ", "INTP", "ENTJ", "ENTP",
@@ -92,6 +161,27 @@ class ChatRequest(BaseModel):
         v = v.replace("<", "&lt;").replace(">", "&gt;")
         return _reject_unsafe_prompt_text(" ".join(v.split()))
 
+    @field_validator(
+        "persona_raw", "persona_summary", "dialogue_prompt", "visual_prompt"
+    )
+    @classmethod
+    def sanitize_persona(cls, v: str) -> str:
+        """페르소나 계열 새니타이즈 — 배선(2026-08-11)의 선행 조건.
+
+        이 값들은 시스템 프롬프트의 반동적 구간에 삽입되므로 message보다
+        권한이 높은데도 지금까지 아무 검증이 없었다(배선 자체가 죽어 있어
+        노출되지 않았을 뿐). 개행은 페르소나 특성상 허용하되 줄머리 '#'
+        마크업을 무력화하고, 인젝션/유해 패턴은 message와 동일 기준으로
+        422 거부한다. 상세는 _sanitize_multiline_prompt_text 참고.
+        """
+        return _sanitize_multiline_prompt_text(v)
+
+    @field_validator("mood")
+    @classmethod
+    def sanitize_mood(cls, v: Optional[str]) -> Optional[str]:
+        """mood 새니타이즈 — 별도 system 메시지로 삽입되므로 한 줄로 접는다."""
+        return _sanitize_mood_value(v)
+
     @field_validator("message")
     @classmethod
     def sanitize_message(cls, v: str) -> str:
@@ -157,6 +247,18 @@ class ProactiveChatRequest(BaseModel):
             return ""
         v = v.replace("<", "&lt;").replace(">", "&gt;")
         return _reject_unsafe_prompt_text(" ".join(v.split()))
+
+    @field_validator("mood")
+    @classmethod
+    def sanitize_mood(cls, v: Optional[str]) -> Optional[str]:
+        """ChatRequest.sanitize_mood와 동일 규칙.
+
+        to_chat_request()가 ChatRequest를 다시 생성하므로 거기서도 한 번 더
+        걸리지만(새니타이즈는 멱등), 잘못된 입력이 핸들러 안이 아니라 요청
+        경계에서 422로 걸러지도록 여기서도 검증한다 — 다른 필드들과 동일한
+        이 클래스의 설계 의도.
+        """
+        return _sanitize_mood_value(v)
 
     def to_chat_request(self, message: str) -> "ChatRequest":
         """합성된 유도 문구를 message로 갖는 내부 ChatRequest를 만든다.

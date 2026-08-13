@@ -524,6 +524,12 @@ async def _run_chat_pipeline(
     소요다. 두 단계 모두 "본격 생성 전 게이트"로 묶어 계측하려는 의도이므로 값
     자체는 그대로 두되, 이름이 시사하는 범위(_gate_user만)와 실제 측정 범위
     (check_content 포함)가 어긋나 있었다는 점을 명시한다.
+
+    persona_*/mood(2026-08-11 소유자 결정): ChatRequest가 검증까지 하고도
+    생성 경로에 전달하지 않아 사일런트 드롭되던 필드들을 배선한다. 값이
+    비면(모든 기존 클라이언트가 그렇다) 프롬프트는 바이트 단위로 불변이다.
+    visual_prompt는 generate_reply까지 전달되지만 대화 프롬프트에는 의도적으로
+    주입되지 않는다 — 사유는 prompts.build_system_prompt의 주석 참고.
     """
     prep = await _prepare_chat_turn(req, user)
     replies, affinity_delta = await generate_reply(
@@ -537,7 +543,12 @@ async def _run_chat_pipeline(
         user_mbti=req.user_mbti,
         character_name=req.character_name,
         character_id=prep["effective_character_id"],
+        persona_raw=req.persona_raw,
+        persona_summary=req.persona_summary,
+        dialogue_prompt=req.dialogue_prompt,
+        visual_prompt=req.visual_prompt,
         memories=prep["merged_memories"],
+        mood=req.mood,
         time_context=build_time_context(req.client_local_hour),
         crisis_tier=crisis_tier,
         crisis_hint=crisis_hint,
@@ -770,6 +781,11 @@ async def _openai_event_generator(
     돌리지 않고(affinity_delta=0 고정), 유도 문구를 messages 에 적재하지 않으며,
     chat_turn 대신 proactive_turn 이벤트를 남긴다.
 
+    persona_*/mood(2026-08-11 소유자 결정): _run_chat_pipeline과 동일하게
+    사일런트 드롭되던 필드를 stream_reply까지 배선한다. /chat/proactive가
+    쓰는 ProactiveChatRequest.to_chat_request()는 persona_*를 노출하지 않아
+    (선톡 경로 설계) 항상 기본값 ""이 들어가고 mood만 전달된다.
+
     rag_query(Low-6, 2026-08-04 점검): stream_reply에 그대로 전달한다. 기본값
     ""이면 stream_reply가 req.message를 검색어로 쓰는 기존 동작과 동일하다.
     /chat/proactive는 req.message가 build_proactive_message로 합성한 보일러
@@ -825,7 +841,12 @@ async def _openai_event_generator(
         user_mbti=req.user_mbti,
         character_name=req.character_name,
         character_id=prep["effective_character_id"],
+        persona_raw=req.persona_raw,
+        persona_summary=req.persona_summary,
+        dialogue_prompt=req.dialogue_prompt,
+        visual_prompt=req.visual_prompt,
         memories=prep["merged_memories"],
+        mood=req.mood,
         room_id=room_id,
         time_context=build_time_context(req.client_local_hour),
         crisis_tier=crisis_tier,
