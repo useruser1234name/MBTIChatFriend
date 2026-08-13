@@ -159,3 +159,47 @@ def test_finetuned_model_still_takes_priority(monkeypatch):
     assert model_id == "ft:custom-model"
     assert ab_variant is None
     assert complexity == "simple"  # 계측용 분류는 파인튜닝 경로에서도 남는다
+
+
+# ── owner_uid 전달 배선 (2026-08-13 페르소나 배선 조사 회귀) ───────────────────
+#
+# get_model_for_character는 (owner_uid, character_id) 복합 키로 등록된 모델을
+# 조회한다 — character_id는 Android Room의 로컬 autoIncrement Long이라 전역
+# 유니크가 아니므로, owner_uid 없이 조회하면 항상 미스(안전 폴백)해 파인튜닝
+# 모델이 적용되지 않는다. _route_model_with_complexity가 owner_uid를 그대로
+# 전달하는지 검증한다.
+
+def test_owner_uid_is_forwarded_to_get_model_lookup(monkeypatch):
+    captured = {}
+
+    def _fake_lookup(character_id, owner_uid=""):
+        captured["character_id"] = character_id
+        captured["owner_uid"] = owner_uid
+        return LLM_MODEL_COMPLEX
+
+    monkeypatch.setattr(chat_service, "get_model_for_character", _fake_lookup)
+    _force_variant(monkeypatch, MODEL_ROUTING_COMPLEXITY)
+
+    chat_service._route_model_with_complexity(
+        CHARACTER_ID, SIMPLE_MESSAGE, 0, owner_uid="uid-owner-1"
+    )
+
+    assert captured == {"character_id": CHARACTER_ID, "owner_uid": "uid-owner-1"}
+
+
+def test_default_owner_uid_is_empty_string_not_none(monkeypatch):
+    """owner_uid 미전달 시(기존 호출부) 빈 문자열이 전달되어 조회가 항상
+    안전하게 미스해야 한다 — None이 새어나가 down-stream .strip() 등에서
+    터지지 않는지도 함께 확인."""
+    captured = {}
+
+    def _fake_lookup(character_id, owner_uid=""):
+        captured["owner_uid"] = owner_uid
+        return LLM_MODEL_COMPLEX
+
+    monkeypatch.setattr(chat_service, "get_model_for_character", _fake_lookup)
+    _force_variant(monkeypatch, MODEL_ROUTING_COMPLEXITY)
+
+    chat_service._route_model_with_complexity(CHARACTER_ID, SIMPLE_MESSAGE, 0)
+
+    assert captured["owner_uid"] == ""

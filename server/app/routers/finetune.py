@@ -32,8 +32,10 @@ async def start_finetune(
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
     """대화 데이터 수집 → OpenAI Fine-tuning 잡 시작"""
+    owner_uid = (user or {}).get("uid", "") if user else ""
     result = await prepare_and_start_finetune(
         character_id=req.character_id,
+        owner_uid=owner_uid,
         character_name=req.character_name,
         mbti=req.mbti,
         speech_style=req.speech_style,
@@ -51,7 +53,8 @@ async def get_finetune_status(
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
     """Fine-tuning 잡 진행 상태 조회"""
-    result = await check_finetune_status(job_id)
+    owner_uid = (user or {}).get("uid", "") if user else ""
+    result = await check_finetune_status(job_id, owner_uid)
     return FinetuneStatusResponse(**result)
 
 
@@ -61,5 +64,6 @@ async def activate_finetune(
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
     """완료된 파인튜닝 모델을 캐릭터에 활성화"""
-    activate_model(req.character_id, req.model_id)
+    owner_uid = (user or {}).get("uid", "") if user else ""
+    activate_model(req.character_id, req.model_id, owner_uid)
     return {"status": "ok", "character_id": req.character_id, "model_id": req.model_id}

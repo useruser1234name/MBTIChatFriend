@@ -659,7 +659,8 @@ def _apply_crisis_override(model_id: str, crisis_tier: int) -> str:
 
 
 def _route_model_with_complexity(
-    character_id: str, message: str, history_len: int, crisis_tier: int = 0
+    character_id: str, message: str, history_len: int, crisis_tier: int = 0,
+    owner_uid: str = "",
 ) -> Tuple[str, Optional[str], str]:
     """모델 선택: 복잡도 라우팅이 기준선, A/B는 그 위의 정책 오버레이.
 
@@ -678,6 +679,13 @@ def _route_model_with_complexity(
       2) 파인튜닝 모델이 있으면 그것을 우선(기존 동작 유지)
       3) A/B variant는 정책으로만 작동 — MODEL_ROUTING_ALWAYS_COMPLEX 배정 시
          base를 상위 모델로 승격, 대조군은 복잡도 라우팅 결과 그대로
+
+    owner_uid: finetune_service의 모델 등록은 (owner_uid, character_id) 복합
+    키다 — Android의 character_id는 Room의 로컬 autoIncrement Long(사용자마다
+    1, 2, 3...로 재시작)이라 전역 유니크가 아니다. owner_uid 없이 조회하면
+    항상 미스(scoped_key="")되어 파인튜닝 모델이 적용되지 않는다(안전하지만
+    기능 자체가 죽어있던 상태). 기본값("")이면 기존 동작(항상 base 모델)과
+    동일하다.
     """
     try:
         complexity = _classify_message_complexity(message, history_len)
@@ -686,7 +694,7 @@ def _route_model_with_complexity(
         complexity = "simple"
     base_model = LLM_MODEL_COMPLEX if complexity == "complex" else LLM_MODEL_SIMPLE
 
-    finetuned_model = get_model_for_character(character_id) if character_id else None
+    finetuned_model = get_model_for_character(character_id, owner_uid) if character_id else None
     if finetuned_model and finetuned_model != LLM_MODEL_COMPLEX:
         # 파인튜닝 모델 우선 — 단 위기 턴은 상위 모델로 승격(select_model_for_crisis 의도)
         return _apply_crisis_override(finetuned_model, crisis_tier), None, complexity
@@ -1210,6 +1218,7 @@ async def _assemble_prompt_and_model(
     crisis_hint: str = "",
     user_role: str = "",
     situation: str = "",
+    owner_uid: str = "",
 ) -> Tuple[List[dict], str, Optional[str], AsyncOpenAI, str]:
     """시스템 프롬프트 조립 + 모델 라우팅(파인튜닝/복잡도/AB 오버레이).
 
@@ -1228,6 +1237,10 @@ async def _assemble_prompt_and_model(
     user_role/situation(2026-08-03 P3-M2): ChatRequest에서 온 장면 설정을
     _build_chat_messages → build_system_prompt로 그대로 전달한다(빈 값이면
     프롬프트 무변화).
+
+    owner_uid: 파인튜닝 모델 조회의 (owner_uid, character_id) 복합 키 스코프.
+    _route_model_with_complexity로 그대로 전달한다. 기본값("")이면 기존
+    동작(파인튜닝 모델 미적용)과 동일.
     """
     messages = _build_chat_messages(
         mbti=mbti,
@@ -1255,7 +1268,8 @@ async def _assemble_prompt_and_model(
 
     # 모델 선택 (복잡도 기반 라우팅이 기준선 + A/B 정책 오버레이 + 위기 승격)
     model_id, ab_variant, complexity = _route_model_with_complexity(
-        character_id, message, len(conversation_history), crisis_tier=crisis_tier
+        character_id, message, len(conversation_history), crisis_tier=crisis_tier,
+        owner_uid=owner_uid,
     )
 
     active_client, model_id = await _resolve_reply_client(model_id, ab_variant)
@@ -1503,7 +1517,7 @@ async def generate_reply(
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
             character_id, time_context=time_context,
             crisis_tier=crisis_tier, crisis_hint=crisis_hint,
-            user_role=user_role, situation=situation,
+            user_role=user_role, situation=situation, owner_uid=owner_uid,
         )
 
         _t_start = time.monotonic()
@@ -1859,7 +1873,7 @@ async def stream_reply(
             memory_dicts, mem_ctx, episode_context, mood, conversation_history, message,
             character_id, time_context=time_context,
             crisis_tier=crisis_tier, crisis_hint=crisis_hint,
-            user_role=user_role, situation=situation,
+            user_role=user_role, situation=situation, owner_uid=owner_uid,
         )
 
         # 9. 스트리밍 호출 + 증분 파싱
