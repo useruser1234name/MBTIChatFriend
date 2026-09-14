@@ -57,7 +57,8 @@ class ChatFirebaseMessagingService : FirebaseMessagingService() {
         }
 
         // D+7 알림 딥링크 처리 (27차 스프린트)
-        if (notificationType == "d3_personalized" || notificationType == "d5_character") {
+        // C6 이월(2026-09-14): 서버 D5 잡의 실제 type은 "d5_longing"(d5_character는 구 계약).
+        if (notificationType == "d3_personalized" || notificationType == "d5_character" || notificationType == "d5_longing") {
             handleCharacterDeepLinkNotification(message.data, notificationType)
             return
         }
@@ -136,14 +137,18 @@ class ChatFirebaseMessagingService : FirebaseMessagingService() {
         data: Map<String, String>,
         notificationType: String
     ) {
-        val characterId = data["character_id"] ?: return
+        // C6 이월(2026-09-14): 서버 D3/D5 잡은 messages 테이블에 character_id가 없어
+        // character_id를 실을 수 없다. 이전엔 여기서 즉시 return해 알림이 무음 소실됐다.
+        // character_id가 없으면 서버 deep_link(없으면 홈)로 폴백해 알림은 반드시 띄운다.
+        val characterId = data["character_id"]
         val title = data["title"] ?: when (notificationType) {
             "d3_personalized" -> "맞춤 메시지가 도착했어요"
-            "d5_character" -> "친구가 기다리고 있어요"
+            "d5_character", "d5_longing" -> "친구가 기다리고 있어요"
             else -> "새 알림"
         }
         val body = data["message"] ?: title
-        val deepLink = data["deep_link"] ?: "mbtichat://chat/$characterId"
+        val deepLink = data["deep_link"]
+            ?: if (characterId != null) "mbtichat://chat/$characterId" else "mbtichat://home"
         val pendingIntent = buildDeepLinkPendingIntent(deepLink, deepLink.hashCode())
         notificationHelper.showDeepLinkNotification(
             title = title,

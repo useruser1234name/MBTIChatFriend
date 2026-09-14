@@ -159,7 +159,13 @@ class MainActivity : ComponentActivity() {
 
     private fun handleDeepLink(intent: Intent?): Long? {
         val characterId = intent?.getLongExtra("characterId", -1L) ?: -1L
-        return if (characterId > 0) characterId else null
+        if (characterId > 0) return characterId
+        // C6 이월(2026-09-14): FCM 딥링크 PendingIntent는 extras가 아니라
+        // ACTION_VIEW + data("mbtichat://chat/{id}")로 오는데 여기서 파싱하지 않아
+        // 캐릭터 알림 탭이 항상 홈에서 멈췄다. chat/{id} 형식만 채팅방으로 보낸다.
+        val uri = intent?.data ?: return null
+        if (uri.scheme != "mbtichat" || uri.host != "chat") return null
+        return uri.lastPathSegment?.toLongOrNull()?.takeIf { it > 0 }
     }
 
     // 레퍼럴 V3 딥링크 처리 (29차 스프린트)
