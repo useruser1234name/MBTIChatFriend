@@ -6,8 +6,6 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.mbtichatfriend.data.local.UserPreferences
-import com.example.mbtichatfriend.data.remote.ChatApi
-import com.example.mbtichatfriend.data.remote.RedeemRequest
 import com.example.mbtichatfriend.data.repository.AnalyticsEvent
 import com.example.mbtichatfriend.data.repository.AnalyticsRepository
 import com.example.mbtichatfriend.model.AgeGroup
@@ -24,7 +22,6 @@ import javax.inject.Inject
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     private val prefs: UserPreferences,
-    private val chatApi: ChatApi,
     private val analyticsRepository: AnalyticsRepository,
 ) : ViewModel() {
 
@@ -138,27 +135,6 @@ class OnboardingViewModel @Inject constructor(
                 payload = mapOf("character_id" to (selectedCharacter?.mbti ?: partnerMbti.name)),
             )
             onComplete()
-        }
-    }
-
-    // ── 레퍼럴 코드 적용 (17차 스프린트) ──────────────────────────────────────
-    // A8: 서버(/api/v1/referral/redeem)는 RedeemRequest({"code": ...})만 인식(uid는 인증 토큰에서 추출).
-    fun redeemReferral(code: String, callback: (Boolean, String?) -> Unit) {
-        viewModelScope.launch {
-            try {
-                val response = chatApi.redeemReferral(
-                    RedeemRequest(code = code)
-                )
-                if (response.isSuccessful && response.body()?.success == true) {
-                    callback(true, null)
-                } else {
-                    val errorMsg = response.body()?.message?.takeIf { it.isNotEmpty() }
-                        ?: "코드를 확인해 주세요."
-                    callback(false, errorMsg)
-                }
-            } catch (e: Exception) {
-                callback(false, e.message ?: "코드 적용 실패")
-            }
         }
     }
 }

@@ -117,8 +117,9 @@ class ExpressionManager @Inject constructor(
                     }
                     // "processing" → 계속 폴링
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // 네트워크 오류 시 재시도
+                android.util.Log.w("ExpressionManager", "set-status poll failed, retrying", e)
             }
         }
         prefs.clearExpressionSetTaskId(characterId)

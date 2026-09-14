@@ -309,6 +309,7 @@ class HomeViewModel @Inject constructor(
                 _eventTrendingPosts.value = posts.map { it.toUi() }
             } catch (e: Exception) {
                 // 조용히 실패 (이벤트 섹션은 부가 기능)
+                android.util.Log.w("HomeViewModel", "event trending posts load failed", e)
             }
         }
     }

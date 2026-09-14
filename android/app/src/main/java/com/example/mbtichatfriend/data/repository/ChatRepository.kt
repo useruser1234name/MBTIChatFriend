@@ -175,16 +175,12 @@ class ChatRepository @Inject constructor(
                 nextGoal = response.nextGoal,
             )
         } catch (e: Exception) {
-            ChatResult(
-                replies = listOf(
-                    ReplyPart(
-                        text = "음... 잠깐 생각할게요! 다시 말해줄래요?",
-                        emotion = "NEUTRAL",
-                        delay = 500
-                    )
-                ),
-                affinityDelta = 0
-            )
+            // 리팩토링 이월 버그(2026-09-14): 네트워크 실패를 가짜 정상 답장
+            // ("음... 잠깐 생각할게요!")으로 바꿔 DB에 저장하던 분기를 제거.
+            // 두 호출부(ChatViewModel.fallbackToRest → sendStatus FAILED,
+            // 오프라인 큐 flush → pending 유지)가 이미 예외를 처리하므로 그대로 던진다.
+            android.util.Log.w("ChatRepository", "sendMessage failed", e)
+            throw e
         }
     }
 
@@ -226,8 +222,9 @@ class ChatRepository @Inject constructor(
                 val entity = feedbackDao.getByMessageId(messageId)
                 if (entity != null) feedbackDao.markSynced(entity.id)
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // 네트워크 예외(IOException 등) — 로컬만 저장, 나중에 재시도
+            android.util.Log.w("ChatRepository", "submitFeedback sync deferred", e)
         }
     }
 
@@ -285,8 +282,9 @@ class ChatRepository @Inject constructor(
                     feedbackDao.markSynced(fb.id)
                 }
                 // 5xx: 아무 것도 하지 않음 → 다음 sync에서 재시도
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // 네트워크 예외 — 다음 시도에서 재시도
+                android.util.Log.w("ChatRepository", "feedback resync deferred", e)
             }
         }
     }

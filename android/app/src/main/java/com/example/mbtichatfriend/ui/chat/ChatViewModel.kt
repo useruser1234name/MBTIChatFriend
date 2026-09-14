@@ -274,8 +274,9 @@ class ChatViewModel @Inject constructor(
                 }
             }.ifBlank { null }
             sessionWarnMessage = warn
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // 세션 점검 실패 시 사용자 경험을 방해하지 않고 조용히 무시
+            android.util.Log.w("ChatViewModel", "session check failed", e)
         }
     }
 

@@ -54,6 +54,7 @@ class CompatibilityViewModel @Inject constructor(
                 }
             } catch (e: Exception) {
                 // 발렌타인 메시지 실패는 무시 — 메인 궁합 화면 영향 없음
+                android.util.Log.w("CompatibilityViewModel", "valentine message load failed", e)
             }
         }
     }
