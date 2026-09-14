@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from ..auth_middleware import require_auth_always, verify_firebase_token
+from ..auth_middleware import require_auth_always, require_internal_token, verify_firebase_token
 from ..metrics_service import get_session_stats
 from ..models import FeedbackRequest, QualityDashboardResponse
 from ..postgres import execute as pg_execute
@@ -149,6 +149,7 @@ async def session_stats(
     days: int = 7,
     group_by: str = "room",
     user: Optional[dict] = Depends(verify_firebase_token),
+    _: bool = Depends(require_internal_token),
 ):
     """세션 통계 조회 — 30분 gap 휴리스틱으로 metric_events(chat_turn/app_open)에서
     세션을 파생(P3, 2026-08-03 회의). 신규 계측 없이 조회 계층에서만 집계한다.
@@ -158,6 +159,11 @@ async def session_stats(
     M-C(2026-08-04) 경화: days 클램프(1~90, /cost/summary 패턴)로 풀스캔 방지,
     레이트리밋 추가, 동기 psycopg 조회(fetchall)를 to_thread로 내려 이벤트 루프
     블로킹 제거.
+
+    관리자 게이트(2026-09-14, 점검 잔여): 전 사용자의 room/user 단위 세션 집계는
+    일반 사용자에게 노출할 데이터가 아니므로 referral 배치 엔드포인트와 같은
+    X-Internal-Token(INTERNAL_API_TOKEN) 검증을 추가. production에서 토큰 미설정
+    시 503, development는 경고 후 통과(기존 require_internal_token 정책 그대로).
     """
     if group_by not in ("room", "user"):
         raise HTTPException(status_code=400, detail="group_by must be 'room' or 'user'")

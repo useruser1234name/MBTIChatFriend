@@ -246,6 +246,7 @@ async def send_d5_character_messages():
                 title="캐릭터가 그리워하고 있어요",
                 body=body,
                 notification_type="d5_longing",
+                data={"character_mbti": mbti} if mbti else None,
                 deep_link="mbtichat://chat",
             )
         except Exception:

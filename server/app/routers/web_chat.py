@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -13,6 +14,8 @@ from openai import APIStatusError, AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from ..config import LLM_MODEL_SIMPLE, OPENAI_API_KEY
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["web-chat-mvp"])
 
@@ -265,7 +268,10 @@ async def send_web_chat(req: WebChatRequest):
                 prompt_mode=req.prompt_mode,
                 mocked=True,
             )
-        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+        # 리팩토링 이월 버그(2026-09-14): 업스트림 예외 원문(키 힌트·내부 URL 포함 가능)을
+        # 클라이언트에 노출하지 않는다. 원문은 서버 로그에만 남긴다.
+        logger.exception("web_chat: LLM request failed (mbti=%s, mode=%s)", mbti, req.prompt_mode)
+        raise HTTPException(status_code=502, detail="LLM 요청에 실패했습니다. 잠시 후 다시 시도해 주세요.") from exc
 
     reply = (response.choices[0].message.content or "").strip()
     if not reply:

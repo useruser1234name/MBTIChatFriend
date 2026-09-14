@@ -159,5 +159,10 @@ async def send_notification_with_record(
     fcm_data = dict(data) if data else {}
     if deep_link:
         fcm_data["deep_link"] = deep_link
+    # C6 이월(2026-09-14): Android FCM 서비스는 data["notification_type"]으로
+    # 핸들러를 분기하는데 d3/d5/weekly/night_diary 발송은 data 없이 호출돼
+    # 항상 기본 경로("알 수 없음" 캐릭터 채팅 알림)로 떨어졌다. DB에 기록하는
+    # type을 그대로 실어 클라 분기가 동작하게 한다(호출부가 이미 넣었으면 존중).
+    fcm_data.setdefault("notification_type", notification_type)
 
     return send_push_notification(token, title=title, body=body, data=fcm_data or None)

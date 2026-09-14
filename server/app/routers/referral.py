@@ -3,9 +3,10 @@ import asyncio
 import secrets
 import string
 import time
+from typing import Optional
 from pydantic import BaseModel, Field
 from ..postgres_async import get_async_db
-from ..auth_middleware import require_internal_token, get_uid
+from ..auth_middleware import require_internal_token, get_uid, _assert_owner, verify_firebase_token
 
 router = APIRouter(prefix="/api/v1/referral", tags=["referral"])
 
@@ -140,10 +141,16 @@ async def get_referral_stats_me(uid: str = Depends(get_uid), db=Depends(get_asyn
 
 
 @router.get("/stats/{user_id}")
-async def get_referral_stats(user_id: str, uid: str = Depends(get_uid)):
-    """초대 현황 조회(본인만)."""
-    if uid != user_id:
-        raise HTTPException(status_code=403, detail="본인의 현황만 조회할 수 있습니다.")
+async def get_referral_stats(
+    user_id: str,
+    user: Optional[dict] = Depends(verify_firebase_token),
+):
+    """초대 현황 조회(본인만).
+
+    S18 잔여(2026-09-14): 인라인 uid 비교를 다른 라우터와 같은 `_assert_owner`로
+    통일. 미인증(None)도 동일하게 403 — 이전 get_uid 경로의 401과 마찬가지로 거부.
+    """
+    _assert_owner(user or {}, user_id, detail="본인의 현황만 조회할 수 있습니다.")
     db = get_async_db()
     row = await db.fetchone(
         """

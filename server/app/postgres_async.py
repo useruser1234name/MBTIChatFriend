@@ -102,19 +102,28 @@ class AsyncDatabase:
             self._pool = None
             logger.info("비동기 PostgreSQL 풀 종료")
 
-    async def execute(self, query: str, *args: Any) -> None:
-        """INSERT / UPDATE / DELETE 등 결과 없는 쿼리 실행."""
+    async def execute(self, query: str, *args: Any) -> Optional[str]:
+        """INSERT / UPDATE / DELETE 등 결과 없는 쿼리 실행.
+
+        Returns: psycopg 커서의 statusmessage("UPDATE 0", "INSERT 0 1" 등).
+        풀 없음/서킷 오픈이면 None. 2026-09-14: 리팩토링 이월 버그 —
+        community.py의 `result == "UPDATE 0"` 분기가 항상 None을 받아 영구
+        데드였고(비인가/중복 삭제가 403 대신 조용히 204), 호출부가 영향받은
+        행 수를 알 방법이 없었다. 반환값을 무시하는 기존 호출부는 영향 없음.
+        """
         if not self._pool:
-            return
+            return None
         q = _to_psycopg(query)
         cb = get_db_circuit()
         try:
-            async def _do() -> None:
+            async def _do() -> Optional[str]:
                 async with self._pool.connection() as conn:
-                    await conn.execute(q, args)
-            await cb.call(_do())
+                    cur = await conn.execute(q, args)
+                    return getattr(cur, "statusmessage", None)
+            return await cb.call(_do())
         except CircuitOpenError:
             logger.warning("[CB] postgres circuit OPEN — DB 호출 스킵")
+            return None
         except Exception:
             raise
 
