@@ -4,20 +4,20 @@ MBTI 기반 AI 채팅 친구 앱. 16가지 MBTI 성격 유형의 캐릭터와 �
 
 ## Tech Stack
 
-- **Android**: Kotlin, Jetpack Compose, Hilt (DI), Room (DB v7), Retrofit + SSE, Lottie
+- **Android**: Kotlin, Jetpack Compose, Hilt (DI), Room (DB v8), Retrofit + SSE, Lottie
 - **Server**: Python 3.13, FastAPI, Uvicorn, SSE Starlette, SlowAPI (rate limit)
 - **AI**: OpenAI GPT-4.1 / GPT-4.1-mini (복잡도 기반 라우팅), DALL-E, Fine-tuning
 - **DB**: PostgreSQL (asyncpg), Room (Android 로컬), ChromaDB (벡터 검색)
 - **Auth**: Firebase Auth + FCM + Storage
 - **Build**: Gradle KSP, compileSdk 35, minSdk 28, Java 17, Kotlin 1.9
-- **Test**: pytest (server), 72 tests
+- **Test**: pytest (server), 44 files / 625 tests (2026-09-14 기준)
 
 ## Project Structure
 
 ```
 android/app/src/main/java/com/example/mbtichatfriend/
 ├── data/
-│   ├── local/           # Room DB: 5 Entity, 5 DAO, 7 Migrations
+│   ├── local/           # Room DB: 5 Entity, 5 DAO, Migrations → v8
 │   ├── remote/          # Retrofit ChatApi, SseClient, Firebase 연동
 │   ├── repository/      # Chat, Character, Auth, Diary, Memory, Finetune
 │   └── voice/           # TTS, SpeechRecognizer
@@ -46,7 +46,7 @@ server/app/
 ├── postgres.py          # asyncpg(async) / psycopg(sync fallback) 이중 접근
 └── vector_store.py      # ChromaDB 벡터 임베딩 (RAG)
 
-server/tests/            # pytest 5개 파일, 72 tests
+server/tests/            # pytest 44개 파일, 625 tests
 ```
 
 ## Architecture Patterns
@@ -87,7 +87,7 @@ server/tests/            # pytest 5개 파일, 72 tests
 
 ### Android
 - Hilt DI만 사용, 수동 생성자 호출 금지
-- Room Migration 순차 관리 (현재 v7)
+- Room Migration 순차 관리 (현재 v8)
 - Compose 애니메이션: Lottie(감정), 300ms 슬라이드(전환)
 - 모든 Screen은 ViewModel과 1:1 매핑
 
