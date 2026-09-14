@@ -1209,10 +1209,19 @@ _MBTI_GREETING_PROMPTS: dict[str, str] = {
 @limiter.limit("10/minute")
 async def send_greeting(
     request: Request,
-    character_mbti: str = Body(...),
+    character_mbti: str = Body(..., embed=True),
     user: Optional[dict] = Depends(verify_firebase_token),
 ):
-    """신규 채팅방 첫 진입 시 캐릭터 첫 인사 생성"""
+    """신규 채팅방 첫 진입 시 캐릭터 첫 인사 생성.
+
+    2026-08-13 에뮬레이터 QA에서 발견된 선재 계약 버그 수정: 단일 str Body
+    파라미터가 embed 없이 선언되면 FastAPI는 원시 JSON 문자열("INFP")을
+    기대하는데, Android는 처음부터 {"character_mbti": ..., "character_name":
+    ...} 객체를 보냈다 → 라이브에서 첫 인사가 항상 422로 실패(클라는 무음
+    폴백이라 증상이 '첫 인사 없음'으로만 보임). 기존 테스트는 함수를 직접
+    호출해 바디 파싱을 우회했기 때문에 잡지 못했다. embed=True로 객체
+    형태를 받는다(character_name 등 여분 키는 무시됨).
+    """
     mbti_upper = character_mbti.upper()
     prompt = _MBTI_GREETING_PROMPTS.get(
         mbti_upper,

@@ -50,20 +50,20 @@ object AppModule {
                     // 첫 설치 시 프리셋 캐릭터 4명 시딩
                     val now = System.currentTimeMillis()
                     db.execSQL(
-                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, createdAt)
-                           VALUES ('하루', 'ENFP', 'SWEET', 'FRIEND', 0, 0, 'BUNNY', $now)"""
+                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, expressionSetReady, createdAt)
+                           VALUES ('하루', 'ENFP', 'SWEET', 'FRIEND', 0, 0, 'BUNNY', 0, $now)"""
                     )
                     db.execSQL(
-                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, createdAt)
-                           VALUES ('시온', 'INTJ', 'TSUNDERE', 'FRIEND', 0, 0, 'WOLF', ${now + 1})"""
+                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, expressionSetReady, createdAt)
+                           VALUES ('시온', 'INTJ', 'TSUNDERE', 'FRIEND', 0, 0, 'WOLF', 0, ${now + 1})"""
                     )
                     db.execSQL(
-                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, createdAt)
-                           VALUES ('미루', 'INFP', 'CASUAL', 'FRIEND', 0, 0, 'UNICORN', ${now + 2})"""
+                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, expressionSetReady, createdAt)
+                           VALUES ('미루', 'INFP', 'CASUAL', 'FRIEND', 0, 0, 'UNICORN', 0, ${now + 2})"""
                     )
                     db.execSQL(
-                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, createdAt)
-                           VALUES ('도윤', 'ENTJ', 'CASUAL', 'SENIOR_JUNIOR', 0, 0, 'DRAGON', ${now + 3})"""
+                        """INSERT INTO characters (name, mbti, speechStyle, relationship, affinityScore, totalMessages, avatarId, expressionSetReady, createdAt)
+                           VALUES ('도윤', 'ENTJ', 'CASUAL', 'SENIOR_JUNIOR', 0, 0, 'DRAGON', 0, ${now + 3})"""
                     )
                 }
             })

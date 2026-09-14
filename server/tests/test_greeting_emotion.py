@@ -116,3 +116,27 @@ async def test_send_greeting_response_includes_emotion_with_llm_success(monkeypa
     assert resp["character_mbti"] == "ENFJ"
     assert resp["emotion"] == "HAPPY"
     assert resp["greeting"] == "안녕하세요! 반가워요~"
+
+
+def test_send_greeting_http_contract_accepts_android_body(monkeypatch):
+    """2026-08-13 QA 회귀 방지: 안드로이드가 보내는 실제 바디 형태
+    {"character_mbti": ..., "character_name": ...}가 HTTP 레벨에서 422 없이
+    수용되는지 검증한다. (기존 테스트는 send_greeting을 직접 호출해 FastAPI
+    바디 파싱을 우회했고, embed 누락으로 라이브에서 항상 422였다.)
+    """
+    from fastapi.testclient import TestClient
+
+    from app import chat_service
+    from app.main import app
+
+    monkeypatch.setattr(chat_service, "OPENAI_API_KEY", "", raising=False)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/v1/chat/greeting",
+        json={"character_mbti": "INFP", "character_name": "미루"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["greeting"]
+    assert data["character_mbti"] == "INFP"
